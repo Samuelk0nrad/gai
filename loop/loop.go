@@ -233,262 +233,201 @@ func (l *Loop) Run(ctx context.Context) <-chan Event {
 		return events
 	}
 
-	go func() {
-		callerCtx := ctx
-		if l.RetryPolicy != nil && l.RetryPolicy.TotalTimeout > 0 {
-			var totalCancel context.CancelFunc
-			ctx, totalCancel = context.WithTimeout(ctx, l.RetryPolicy.TotalTimeout)
-			defer totalCancel()
-		}
-		ctx, runState := newLoopRunState(ctx, l)
-		defer close(events)
-		defer runState.finish()
-		if err := ctx.Err(); err != nil {
-			sendLoopCanceled(ctx, events, runState, err)
-			return
-		}
+	go l.run(ctx, events)
+	return events
+}
 
-		executionTools, err := EffectiveTools(l.Tools, l.ToolChoice, l.ToolTransport)
-		if err != nil {
-			sendLoopError(ctx, events, runState, err)
-			return
-		}
+// run owns the asynchronous execution flow after Run has synchronously
+// validated the public configuration.
+func (l *Loop) run(ctx context.Context, events chan<- Event) {
+	callerCtx := ctx
+	if l.RetryPolicy != nil && l.RetryPolicy.TotalTimeout > 0 {
+		var totalCancel context.CancelFunc
+		ctx, totalCancel = context.WithTimeout(ctx, l.RetryPolicy.TotalTimeout)
+		defer totalCancel()
+	}
+	ctx, runState := newLoopRunState(ctx, l)
+	defer close(events)
+	defer runState.finish()
+	if err := ctx.Err(); err != nil {
+		sendLoopCanceled(ctx, events, runState, err)
+		return
+	}
 
-		var (
-			toolDefinitions []ai.ToolDefinition
-		)
-		if l.ToolTransport == ToolTransportNative {
-			toolDefinitions, err = ToolDefinitions(executionTools)
-			if err != nil {
-				if cancelErr := cancellationError(ctx, err); cancelErr != nil {
-					sendLoopCanceled(ctx, events, runState, cancelErr)
-					return
-				}
-				sendLoopError(ctx, events, runState, err)
-				return
-			}
-		}
+	executionTools, err := EffectiveTools(l.Tools, l.ToolChoice, l.ToolTransport)
+	if err != nil {
+		sendLoopError(ctx, events, runState, err)
+		return
+	}
 
-		_, err = l.PromptBuilder.BuildContext(ctx)
+	var (
+		toolDefinitions []ai.ToolDefinition
+	)
+	if l.ToolTransport == ToolTransportNative {
+		toolDefinitions, err = ToolDefinitions(executionTools)
 		if err != nil {
 			if cancelErr := cancellationError(ctx, err); cancelErr != nil {
 				sendLoopCanceled(ctx, events, runState, cancelErr)
 				return
 			}
-			sendLoopError(ctx, events, runState, fmt.Errorf("%w: %w", ErrBuildPrompt, err))
+			sendLoopError(ctx, events, runState, err)
 			return
 		}
-		if err := ctx.Err(); err != nil {
-			sendLoopCanceled(ctx, events, runState, err)
+	}
+
+	_, err = l.PromptBuilder.BuildContext(ctx)
+	if err != nil {
+		if cancelErr := cancellationError(ctx, err); cancelErr != nil {
+			sendLoopCanceled(ctx, events, runState, cancelErr)
 			return
 		}
+		sendLoopError(ctx, events, runState, fmt.Errorf("%w: %w", ErrBuildPrompt, err))
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		sendLoopCanceled(ctx, events, runState, err)
+		return
+	}
 
-		requiredToolCallSatisfied := l.ToolChoice.Mode != ai.ToolChoiceRequired
-		// Retain the input until an iteration is accepted. A rejected required-tool
-		// response consumes an iteration slot but must not lose conversation input.
-		userMessage := userMessageForIteration(l.PromptBuilder, 0)
-		for i := range l.MaxLoopIterations {
-			iteration := Iteration{Count: i + 1}
-			var toolCalls []pendingToolCall
-			var deferredTokens []ai.Token
-			var iterState *loopIterationState
-			var iterationErr error
-			var iterCtx context.Context
-			var cancel context.CancelFunc
-			deferTokens := (l.ToolTransport == ToolTransportText && (!requiredToolCallSatisfied ||
-				(l.ToolChoice.Mode == ai.ToolChoiceRequired && len(l.ToolChoice.Names) > 0))) ||
-				(l.ToolTransport == ToolTransportNative && len(l.ToolChoice.Names) > 0)
+	requiredToolCallSatisfied := l.ToolChoice.Mode != ai.ToolChoiceRequired
+	// Retain the input until an iteration is accepted. A rejected required-tool
+	// response consumes an iteration slot but must not lose conversation input.
+	userMessage := userMessageForIteration(l.PromptBuilder, 0)
+	for i := range l.MaxLoopIterations {
+		iteration := Iteration{Count: i + 1}
+		var toolCalls []pendingToolCall
+		var deferredTokens []ai.Token
+		var iterState *loopIterationState
+		var iterationErr error
+		var iterCtx context.Context
+		var cancel context.CancelFunc
+		deferTokens := (l.ToolTransport == ToolTransportText && (!requiredToolCallSatisfied ||
+			(l.ToolChoice.Mode == ai.ToolChoiceRequired && len(l.ToolChoice.Names) > 0))) ||
+			(l.ToolTransport == ToolTransportNative && len(l.ToolChoice.Names) > 0)
 
-			for attempt := 1; ; attempt++ {
-				attemptIteration := Iteration{Count: iteration.Count, UserMessage: userMessage}
-				toolCalls = nil
-				deferredTokens = nil
+		for attempt := 1; ; attempt++ {
+			attemptIteration := Iteration{Count: iteration.Count, UserMessage: userMessage}
+			toolCalls = nil
+			deferredTokens = nil
 
-				iterCtx, iterState = runState.startIteration(ctx, iteration.Count, attempt)
-				iterCtx, cancel = context.WithCancel(iterCtx)
-				attemptID := iterState.attemptID()
-				if err := iterCtx.Err(); err != nil {
-					sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, err)
-					cancel()
-					iterState.markCanceled(err)
-					iterState.finish(nil)
-					return
-				}
-				if err := sendEvent(ctx, events, AttemptStartEvent(iteration.Count, attemptID, runState.retryCount)); err != nil {
-					if cancelErr := cancellationError(iterCtx, err); cancelErr != nil {
-						sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, cancelErr)
-						iterState.markCanceled(cancelErr)
-					} else {
-						sendAttemptError(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, err)
-					}
-					cancel()
-					iterState.finish(nil)
-					return
-				}
-
-				var prompt string
-				var nativeMessages []ai.RequestMessage
-				if builder, ok := l.PromptBuilder.(gaictx.NativeMessageBuilder); ok {
-					prompt, nativeMessages, err = builder.BuildRequest(iterCtx, l)
+			iterCtx, iterState = runState.startIteration(ctx, iteration.Count, attempt)
+			iterCtx, cancel = context.WithCancel(iterCtx)
+			attemptID := iterState.attemptID()
+			if err := iterCtx.Err(); err != nil {
+				sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, err)
+				cancel()
+				iterState.markCanceled(err)
+				iterState.finish(nil)
+				return
+			}
+			if err := sendEvent(ctx, events, AttemptStartEvent(iteration.Count, attemptID, runState.retryCount)); err != nil {
+				if cancelErr := cancellationError(iterCtx, err); cancelErr != nil {
+					sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, cancelErr)
+					iterState.markCanceled(cancelErr)
 				} else {
-					prompt, err = l.PromptBuilder.BuildPrompt(iterCtx, l)
+					sendAttemptError(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, err)
 				}
-				if err != nil {
-					if cancelErr := cancellationError(iterCtx, err); cancelErr != nil {
-						sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, cancelErr)
-						cancel()
-						iterState.markCanceled(cancelErr)
-						iterState.finish(nil)
-						return
+				cancel()
+				iterState.finish(nil)
+				return
+			}
+
+			request, err := l.buildAttemptRequest(iterCtx, toolDefinitions, requiredToolCallSatisfied)
+			if err != nil {
+				if cancelErr := cancellationError(iterCtx, err); cancelErr != nil {
+					sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, cancelErr)
+					cancel()
+					iterState.markCanceled(cancelErr)
+					iterState.finish(nil)
+					return
+				}
+				iterationErr = fmt.Errorf("%w: %w", ErrBuildPrompt, err)
+				sendAttemptError(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, iterationErr)
+				cancel()
+				iterState.finish(iterationErr)
+				return
+			}
+
+			modelCtx := iterCtx
+			var attemptDeadline context.Context
+			if l.RetryPolicy != nil && l.RetryPolicy.AttemptTimeout > 0 {
+				var attemptCancel context.CancelFunc
+				attemptDeadline, attemptCancel = context.WithTimeout(iterCtx, l.RetryPolicy.AttemptTimeout)
+				previousCancel := cancel
+				cancel = func() { attemptCancel(); previousCancel() }
+				modelCtx = attemptDeadline
+			}
+			tokens := l.Model.GenerateStream(modelCtx, request)
+
+			retrying := false
+			var retryErr error
+			for t := range tokens {
+				if t.Err != nil {
+					retryErr = t.Err
+					attemptTimeout := attemptDeadline != nil && errors.Is(attemptDeadline.Err(), context.DeadlineExceeded) && callerCtx.Err() == nil && ctx.Err() == nil
+					var providerErr *ai.ProviderError
+					if attemptTimeout && errors.Is(t.Err, context.DeadlineExceeded) && !errors.As(t.Err, &providerErr) {
+						t.Err = ErrAttemptTimeout
+						retryErr = t.Err
+					} else if !attemptTimeout {
+						if cancelErr := cancellationError(iterCtx, t.Err); cancelErr != nil {
+							sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, cancelErr)
+							cancel()
+							iterState.markCanceled(cancelErr)
+							iterState.finish(nil)
+							return
+						}
 					}
-					iterationErr = fmt.Errorf("%w: %w", ErrBuildPrompt, err)
+
+					retryLimit := 0
+					canRetry := false
+					retryable := false
+					if l.RetryPolicy != nil {
+						retryLimit = l.RetryPolicy.MaxRetries
+						retryable = l.RetryPolicy.isRetryable(t.Err)
+						canRetry = l.RetryPolicy.hasRetryBudget(runState.retryCount) && retryable
+					}
+					if canRetry {
+						retrying = true
+						break
+					}
+
+					if l.RetryPolicy == nil || !retryable {
+						iterationErr = t.Err
+					} else {
+						iterationErr = fmt.Errorf("%w: limit=%d: %w", ErrMaxRetries, retryLimit, t.Err)
+					}
 					sendAttemptError(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, iterationErr)
 					cancel()
 					iterState.finish(iterationErr)
 					return
 				}
 
-				toolChoice := l.ToolChoice
-				if l.ToolChoice.Mode == ai.ToolChoiceRequired && requiredToolCallSatisfied {
-					toolChoice = ai.ToolChoice{Mode: ai.ToolChoiceAuto}
+				if t.Type == ai.TokenTypeToolCall && l.ToolChoice.Mode == ai.ToolChoiceNone {
+					// A provider can still emit a tool-call token after tools are
+					// disabled. Do not expose or retain a disabled call.
+					continue
 				}
-				if l.ToolTransport == ToolTransportText {
-					// Text transport exposes tools through the rendered prompt, not
-					// AIRequest.Tools. Provider-native tool choice is therefore invalid.
-					toolChoice = ai.ToolChoice{}
-				} else if len(toolDefinitions) == 0 {
-					// A neutral choice cannot affect a request with no provider-native
-					// tools, and AIRequest rejects that redundant combination.
-					toolChoice = ai.ToolChoice{}
+				if t.Type == ai.TokenTypeToolCall && t.ToolCall != nil {
+					attemptIteration.AppendToken(t)
+
+					toolReq := t.ToolCall
+					partIdx := len(attemptIteration.Parts) - 1
+
+					toolCalls = append(toolCalls, pendingToolCall{
+						partIndex: partIdx,
+						call:      *toolReq,
+					})
+				} else {
+					attemptIteration.AppendToken(t)
 				}
-				request := renderedPromptRequest(prompt, l.MaxTokens, toolDefinitions, toolChoice, l.ResponseFormat, l.Reasoning)
-				request.Messages = nativeMessages
-
-				modelCtx := iterCtx
-				var attemptDeadline context.Context
-				if l.RetryPolicy != nil && l.RetryPolicy.AttemptTimeout > 0 {
-					var attemptCancel context.CancelFunc
-					attemptDeadline, attemptCancel = context.WithTimeout(iterCtx, l.RetryPolicy.AttemptTimeout)
-					previousCancel := cancel
-					cancel = func() { attemptCancel(); previousCancel() }
-					modelCtx = attemptDeadline
+				if deferTokens {
+					deferredTokens = append(deferredTokens, t)
+					continue
 				}
-				tokens := l.Model.GenerateStream(modelCtx, request)
-
-				retrying := false
-				var retryErr error
-				for t := range tokens {
-					if t.Err != nil {
-						retryErr = t.Err
-						attemptTimeout := attemptDeadline != nil && errors.Is(attemptDeadline.Err(), context.DeadlineExceeded) && callerCtx.Err() == nil && ctx.Err() == nil
-						var providerErr *ai.ProviderError
-						if attemptTimeout && errors.Is(t.Err, context.DeadlineExceeded) && !errors.As(t.Err, &providerErr) {
-							t.Err = ErrAttemptTimeout
-							retryErr = t.Err
-						} else if !attemptTimeout {
-							if cancelErr := cancellationError(iterCtx, t.Err); cancelErr != nil {
-								sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, cancelErr)
-								cancel()
-								iterState.markCanceled(cancelErr)
-								iterState.finish(nil)
-								return
-							}
-						}
-
-						retryLimit := 0
-						canRetry := false
-						retryable := false
-						if l.RetryPolicy != nil {
-							retryLimit = l.RetryPolicy.MaxRetries
-							retryable = l.RetryPolicy.isRetryable(t.Err)
-							canRetry = l.RetryPolicy.hasRetryBudget(runState.retryCount) && retryable
-						}
-						if canRetry {
-							retrying = true
-							break
-						}
-
-						if l.RetryPolicy == nil || !retryable {
-							iterationErr = t.Err
-						} else {
-							iterationErr = fmt.Errorf("%w: limit=%d: %w", ErrMaxRetries, retryLimit, t.Err)
-						}
-						sendAttemptError(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, iterationErr)
-						cancel()
-						iterState.finish(iterationErr)
-						return
-					}
-
-					if t.Type == ai.TokenTypeToolCall && l.ToolChoice.Mode == ai.ToolChoiceNone {
-						// A provider can still emit a tool-call token after tools are
-						// disabled. Do not expose or retain a disabled call.
-						continue
-					}
-					if t.Type == ai.TokenTypeToolCall && t.ToolCall != nil {
-						attemptIteration.AppendToken(t)
-
-						toolReq := t.ToolCall
-						partIdx := len(attemptIteration.Parts) - 1
-
-						toolCalls = append(toolCalls, pendingToolCall{
-							partIndex: partIdx,
-							call:      *toolReq,
-						})
-					} else {
-						attemptIteration.AppendToken(t)
-					}
-					if deferTokens {
-						deferredTokens = append(deferredTokens, t)
-						continue
-					}
-					runState.recordToken(t)
-					iterState.recordToken(t)
-					if err := sendEvent(ctx, events, TokenEvent(iteration.Count, attemptID, runState.retryCount, t)); err != nil {
-						if cancelErr := cancellationError(iterCtx, err); cancelErr != nil {
-							sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, cancelErr)
-							iterState.markCanceled(cancelErr)
-						} else {
-							sendAttemptError(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, err)
-						}
-						cancel()
-						iterState.finish(nil)
-						return
-					}
-				}
-
-				attemptTimeout := attemptDeadline != nil && errors.Is(attemptDeadline.Err(), context.DeadlineExceeded) && callerCtx.Err() == nil && ctx.Err() == nil
-				if attemptTimeout && !retrying {
-					retryErr = ErrAttemptTimeout
-					if l.RetryPolicy.ShouldRetry(runState.retryCount, ErrAttemptTimeout) {
-						retrying = true
-					} else {
-						iterationErr = fmt.Errorf("%w: limit=%d: %w", ErrMaxRetries, l.RetryPolicy.MaxRetries, ErrAttemptTimeout)
-						sendAttemptError(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, iterationErr)
-						cancel()
-						iterState.finish(iterationErr)
-						return
-					}
-				}
-				if err := iterCtx.Err(); err != nil && !(retrying && attemptTimeout) {
-					sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, err)
-					cancel()
-					iterState.markCanceled(err)
-					iterState.finish(nil)
-					return
-				}
-				if !retrying {
-					iteration = attemptIteration
-					break
-				}
-
-				runState.retry()
-				delay := time.Duration(0)
-				if l.RetryPolicy != nil {
-					delay = l.RetryPolicy.Backoff(runState.retryCount-1, retryErr)
-				}
-				iterState.recordIteration(attemptIteration)
-				iterState.markRetrying(runState.retryCount, retryReason(retryErr), delay)
-				if err := sendEvent(ctx, events, RetryEvent(iteration.Count, attemptID, runState.retryCount, retryReason(retryErr), delay, attemptIteration)); err != nil {
+				runState.recordToken(t)
+				iterState.recordToken(t)
+				if err := sendEvent(ctx, events, TokenEvent(iteration.Count, attemptID, runState.retryCount, t)); err != nil {
 					if cancelErr := cancellationError(iterCtx, err); cancelErr != nil {
 						sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, cancelErr)
 						iterState.markCanceled(cancelErr)
@@ -499,140 +438,214 @@ func (l *Loop) Run(ctx context.Context) <-chan Event {
 					iterState.finish(nil)
 					return
 				}
-				if l.RetryPolicy != nil {
-					if delay > 0 {
-						// The backoff is scoped to the run context, not the failed
-						// attempt context. Cancel the attempt before waiting so a model
-						// producer cannot remain blocked while the retry is delayed.
-						cancel()
-						if err := l.RetryPolicy.wait(ctx, delay); err != nil {
-							if cancelErr := cancellationError(ctx, err); cancelErr != nil {
-								sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, cancelErr)
-								cancel()
-								iterState.markCanceled(cancelErr)
-								iterState.finish(nil)
-								return
-							}
-							iterationErr = fmt.Errorf("wait for retry: %w", err)
-							sendAttemptError(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, iterationErr)
-							cancel()
-							iterState.finish(iterationErr)
-							return
-						}
-					}
-				}
-				cancel()
-				iterState.finish(nil)
 			}
 
-			if deferTokens && (!requiredToolCallSatisfied || len(toolCalls) > 0) &&
-				!hasPermittedToolCall(toolCalls, l.Tools, l.ToolChoice.Names) {
-				// A text-transport response that does not satisfy a required tool
-				// call is not part of the conversation and must not be observable.
-				cancel()
-				if err := sendEvent(ctx, events, DiscardEvent(iteration.Count, iterState.attemptID(), runState.retryCount, iteration)); err != nil {
-					iterState.finish(nil)
-					return
-				}
-				runState.resetRetries()
-				iterState.finish(iterationErr)
-				continue
-			}
-			if l.ToolChoice.Mode == ai.ToolChoiceNone {
-				// Providers and text protocols can still emit a tool-call token even
-				// when tools are disabled. Never dispatch such a call.
-				toolCalls = nil
-			}
-			for _, token := range deferredTokens {
-				runState.recordToken(token)
-				iterState.recordToken(token)
-				if err := sendEvent(ctx, events, TokenEvent(iteration.Count, iterState.attemptID(), runState.retryCount, token)); err != nil {
-					if cancelErr := cancellationError(iterCtx, err); cancelErr != nil {
-						sendAttemptCanceled(ctx, events, runState, iteration.Count, iterState.attemptID(), runState.retryCount, &iteration, cancelErr)
-						iterState.markCanceled(cancelErr)
-					} else {
-						sendAttemptError(ctx, events, runState, iteration.Count, iterState.attemptID(), runState.retryCount, &iteration, err)
-					}
+			attemptTimeout := attemptDeadline != nil && errors.Is(attemptDeadline.Err(), context.DeadlineExceeded) && callerCtx.Err() == nil && ctx.Err() == nil
+			if attemptTimeout && !retrying {
+				retryErr = ErrAttemptTimeout
+				if l.RetryPolicy.ShouldRetry(runState.retryCount, ErrAttemptTimeout) {
+					retrying = true
+				} else {
+					iterationErr = fmt.Errorf("%w: limit=%d: %w", ErrMaxRetries, l.RetryPolicy.MaxRetries, ErrAttemptTimeout)
+					sendAttemptError(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, iterationErr)
 					cancel()
-					iterState.finish(nil)
+					iterState.finish(iterationErr)
 					return
 				}
 			}
-
-			if err := l.executeToolCalls(iterCtx, &iteration, toolCalls, executionTools, events, iteration.Count, iterState.attemptID(), runState.retryCount); err != nil {
-				if cancelErr := cancellationError(iterCtx, err); cancelErr != nil {
-					sendAttemptCanceled(ctx, events, runState, iteration.Count, iterState.attemptID(), runState.retryCount, &iteration, cancelErr)
-					cancel()
-					iterState.markCanceled(cancelErr)
-					iterState.finish(nil)
-					return
-				}
-				iterationErr = err
-				sendAttemptError(ctx, events, runState, iteration.Count, iterState.attemptID(), runState.retryCount, &iteration, iterationErr)
-				cancel()
-				iterState.finish(iterationErr)
-				return
-			}
-			if err := iterCtx.Err(); err != nil {
-				sendAttemptCanceled(ctx, events, runState, iteration.Count, iterState.attemptID(), runState.retryCount, &iteration, err)
+			if err := iterCtx.Err(); err != nil && !(retrying && attemptTimeout) {
+				sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, err)
 				cancel()
 				iterState.markCanceled(err)
 				iterState.finish(nil)
 				return
 			}
+			if !retrying {
+				iteration = attemptIteration
+				break
+			}
 
-			iterState.recordToolResponses(iteration)
-
-			attemptID := iterState.attemptID()
-			retryCount := runState.retryCount
-
-			if err := sendEvent(ctx, events, IterationDoneEvent(iteration, attemptID, retryCount)); err != nil {
+			runState.retry()
+			delay := time.Duration(0)
+			if l.RetryPolicy != nil {
+				delay = l.RetryPolicy.Backoff(runState.retryCount-1, retryErr)
+			}
+			iterState.recordIteration(attemptIteration)
+			iterState.markRetrying(runState.retryCount, retryReason(retryErr), delay)
+			if err := sendEvent(ctx, events, RetryEvent(iteration.Count, attemptID, runState.retryCount, retryReason(retryErr), delay, attemptIteration)); err != nil {
 				if cancelErr := cancellationError(iterCtx, err); cancelErr != nil {
-					sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, retryCount, &iteration, cancelErr)
+					sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, cancelErr)
 					iterState.markCanceled(cancelErr)
 				} else {
-					sendAttemptError(ctx, events, runState, iteration.Count, attemptID, retryCount, &iteration, err)
+					sendAttemptError(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, err)
 				}
 				cancel()
 				iterState.finish(nil)
 				return
 			}
-			l.Iterations = append(l.Iterations, iteration)
-			userMessage = nil
-			if hasPermittedToolCall(toolCalls, l.Tools, l.ToolChoice.Names) {
-				requiredToolCallSatisfied = true
-			}
-			runState.resetRetries()
-			if l.ToolTransport == ToolTransportText && len(toolCalls) == 0 && !requiredToolCallSatisfied {
-				// Text transport cannot rely on provider enforcement. Keep the
-				// run active until the required tool call has been observed.
-				cancel()
-				iterState.finish(iterationErr)
-				continue
-			}
-			if len(toolCalls) == 0 {
-				cancel()
-				iterState.markFinal()
-				iterState.finish(nil)
-				if err := sendEvent(ctx, events, DoneEvent()); err != nil {
-					if cancelErr := cancellationError(ctx, err); cancelErr != nil {
-						sendLoopCanceled(ctx, events, runState, cancelErr)
+			if l.RetryPolicy != nil {
+				if delay > 0 {
+					// The backoff is scoped to the run context, not the failed
+					// attempt context. Cancel the attempt before waiting so a model
+					// producer cannot remain blocked while the retry is delayed.
+					cancel()
+					if err := l.RetryPolicy.wait(ctx, delay); err != nil {
+						if cancelErr := cancellationError(ctx, err); cancelErr != nil {
+							sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, cancelErr)
+							cancel()
+							iterState.markCanceled(cancelErr)
+							iterState.finish(nil)
+							return
+						}
+						iterationErr = fmt.Errorf("wait for retry: %w", err)
+						sendAttemptError(ctx, events, runState, iteration.Count, attemptID, runState.retryCount, &attemptIteration, iterationErr)
+						cancel()
+						iterState.finish(iterationErr)
+						return
 					}
 				}
-				return
 			}
 			cancel()
-			iterState.finish(iterationErr)
+			iterState.finish(nil)
 		}
 
-		if err := ctx.Err(); err != nil {
-			sendLoopCanceled(ctx, events, runState, err)
+		if deferTokens && (!requiredToolCallSatisfied || len(toolCalls) > 0) &&
+			!hasPermittedToolCall(toolCalls, l.Tools, l.ToolChoice.Names) {
+			// A text-transport response that does not satisfy a required tool
+			// call is not part of the conversation and must not be observable.
+			cancel()
+			if err := sendEvent(ctx, events, DiscardEvent(iteration.Count, iterState.attemptID(), runState.retryCount, iteration)); err != nil {
+				iterState.finish(nil)
+				return
+			}
+			runState.resetRetries()
+			iterState.finish(iterationErr)
+			continue
+		}
+		if l.ToolChoice.Mode == ai.ToolChoiceNone {
+			// Providers and text protocols can still emit a tool-call token even
+			// when tools are disabled. Never dispatch such a call.
+			toolCalls = nil
+		}
+		for _, token := range deferredTokens {
+			runState.recordToken(token)
+			iterState.recordToken(token)
+			if err := sendEvent(ctx, events, TokenEvent(iteration.Count, iterState.attemptID(), runState.retryCount, token)); err != nil {
+				if cancelErr := cancellationError(iterCtx, err); cancelErr != nil {
+					sendAttemptCanceled(ctx, events, runState, iteration.Count, iterState.attemptID(), runState.retryCount, &iteration, cancelErr)
+					iterState.markCanceled(cancelErr)
+				} else {
+					sendAttemptError(ctx, events, runState, iteration.Count, iterState.attemptID(), runState.retryCount, &iteration, err)
+				}
+				cancel()
+				iterState.finish(nil)
+				return
+			}
+		}
+
+		if err := l.executeToolCalls(iterCtx, &iteration, toolCalls, executionTools, events, iteration.Count, iterState.attemptID(), runState.retryCount); err != nil {
+			if cancelErr := cancellationError(iterCtx, err); cancelErr != nil {
+				sendAttemptCanceled(ctx, events, runState, iteration.Count, iterState.attemptID(), runState.retryCount, &iteration, cancelErr)
+				cancel()
+				iterState.markCanceled(cancelErr)
+				iterState.finish(nil)
+				return
+			}
+			iterationErr = err
+			sendAttemptError(ctx, events, runState, iteration.Count, iterState.attemptID(), runState.retryCount, &iteration, iterationErr)
+			cancel()
+			iterState.finish(iterationErr)
 			return
 		}
-		sendLoopError(ctx, events, runState, fmt.Errorf("%w: limit=%d", ErrMaxIterations, l.MaxLoopIterations))
-	}()
+		if err := iterCtx.Err(); err != nil {
+			sendAttemptCanceled(ctx, events, runState, iteration.Count, iterState.attemptID(), runState.retryCount, &iteration, err)
+			cancel()
+			iterState.markCanceled(err)
+			iterState.finish(nil)
+			return
+		}
 
-	return events
+		iterState.recordToolResponses(iteration)
+
+		attemptID := iterState.attemptID()
+		retryCount := runState.retryCount
+
+		if err := sendEvent(ctx, events, IterationDoneEvent(iteration, attemptID, retryCount)); err != nil {
+			if cancelErr := cancellationError(iterCtx, err); cancelErr != nil {
+				sendAttemptCanceled(ctx, events, runState, iteration.Count, attemptID, retryCount, &iteration, cancelErr)
+				iterState.markCanceled(cancelErr)
+			} else {
+				sendAttemptError(ctx, events, runState, iteration.Count, attemptID, retryCount, &iteration, err)
+			}
+			cancel()
+			iterState.finish(nil)
+			return
+		}
+		l.Iterations = append(l.Iterations, iteration)
+		userMessage = nil
+		if hasPermittedToolCall(toolCalls, l.Tools, l.ToolChoice.Names) {
+			requiredToolCallSatisfied = true
+		}
+		runState.resetRetries()
+		if l.ToolTransport == ToolTransportText && len(toolCalls) == 0 && !requiredToolCallSatisfied {
+			// Text transport cannot rely on provider enforcement. Keep the
+			// run active until the required tool call has been observed.
+			cancel()
+			iterState.finish(iterationErr)
+			continue
+		}
+		if len(toolCalls) == 0 {
+			cancel()
+			iterState.markFinal()
+			iterState.finish(nil)
+			if err := sendEvent(ctx, events, DoneEvent()); err != nil {
+				if cancelErr := cancellationError(ctx, err); cancelErr != nil {
+					sendLoopCanceled(ctx, events, runState, cancelErr)
+				}
+			}
+			return
+		}
+		cancel()
+		iterState.finish(iterationErr)
+	}
+
+	if err := ctx.Err(); err != nil {
+		sendLoopCanceled(ctx, events, runState, err)
+		return
+	}
+	sendLoopError(ctx, events, runState, fmt.Errorf("%w: limit=%d", ErrMaxIterations, l.MaxLoopIterations))
+}
+
+// buildAttemptRequest builds exactly the provider request for one model attempt.
+// It deliberately runs before the attempt deadline is installed: prompt building
+// belongs to iteration preparation, not model generation.
+func (l *Loop) buildAttemptRequest(ctx context.Context, toolDefinitions []ai.ToolDefinition, requiredToolCallSatisfied bool) (ai.AIRequest, error) {
+	var (
+		prompt         string
+		nativeMessages []ai.RequestMessage
+		err            error
+	)
+	if builder, ok := l.PromptBuilder.(gaictx.NativeMessageBuilder); ok {
+		prompt, nativeMessages, err = builder.BuildRequest(ctx, l)
+	} else {
+		prompt, err = l.PromptBuilder.BuildPrompt(ctx, l)
+	}
+	if err != nil {
+		return ai.AIRequest{}, err
+	}
+
+	toolChoice := l.ToolChoice
+	if toolChoice.Mode == ai.ToolChoiceRequired && requiredToolCallSatisfied {
+		toolChoice = ai.ToolChoice{Mode: ai.ToolChoiceAuto}
+	}
+	if l.ToolTransport == ToolTransportText || len(toolDefinitions) == 0 {
+		// Text transport exposes tools through its rendered prompt. A neutral
+		// choice is likewise required when native tool definitions are absent.
+		toolChoice = ai.ToolChoice{}
+	}
+	request := renderedPromptRequest(prompt, l.MaxTokens, toolDefinitions, toolChoice, l.ResponseFormat, l.Reasoning)
+	request.Messages = nativeMessages
+	return request, nil
 }
 
 func userMessageForIteration(promptBuilder gaictx.PromptBuilder, index int) *gaictx.Message {
