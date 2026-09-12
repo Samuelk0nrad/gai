@@ -60,7 +60,7 @@ GAI is aimed at Go teams that want a small runtime they can compose into an appl
 
 ## Requirements
 
-- Go `1.26.1` or newer
+- Go `1.26.8` or newer
 - Credentials for the model provider you use
 
 Install the module in an existing application:
@@ -536,7 +536,7 @@ go test ./loop/...
 go test ./examples/order-support
 ```
 
-GitHub Actions runs build, vet, tests, race detection for concurrency-sensitive packages, static analysis, coverage artifact generation, and public API compatibility checks on pull requests. Dependency vulnerability scanning runs weekly on Mondays at 03:17 UTC and can also be started manually from the Actions tab.
+GitHub Actions runs build, vet, tests, race detection, static analysis, coverage artifact generation, and dependency vulnerability scanning on pull requests and pushes to main. Pull requests also run public API compatibility checks. The workflow runs weekly on Mondays at 03:17 UTC and can also be started manually from the Actions tab.
 
 ## Contributing
 
