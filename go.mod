@@ -1,6 +1,6 @@
 module github.com/lace-ai/gai
 
-go 1.26.1
+go 1.26.8
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.70.1

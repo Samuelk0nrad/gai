@@ -85,7 +85,6 @@ jobs:
 
   vulnerability-scan:
     name: Dependency vulnerability scan
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
       GOVULNCHECK_VERSION: v1.6.0
