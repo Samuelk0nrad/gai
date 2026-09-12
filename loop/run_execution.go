@@ -308,7 +308,7 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		// not part of the conversation and must not expose its response content.
 		attempt.cancelAttempt()
 		if err := sendEvent(r.ctx, r.events, DiscardEvent(attempt.iteration.Count, attempt.state.attemptID(), r.state.retryCount, attempt.iteration)); err != nil {
-			attempt.finish(nil)
+			attempt.terminateSendFailure(err)
 			return iterationTerminal
 		}
 		r.state.resetRetries()
