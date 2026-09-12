@@ -189,7 +189,7 @@ func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferToken
 		modelCtx = attempt.deadline
 	}
 
-	retrying, retryErr, outcome := attempt.consumeModelStream(modelCtx, request, deferTokens)
+	retrying, outcome, retryErr := attempt.consumeModelStream(modelCtx, request, deferTokens)
 	if outcome == attemptTerminal {
 		return attempt, outcome
 	}
@@ -213,7 +213,7 @@ func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferToken
 	return attempt, attempt.scheduleRetry(retryErr)
 }
 
-func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request ai.AIRequest, deferTokens bool) (bool, error, attemptOutcome) {
+func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request ai.AIRequest, deferTokens bool) (bool, attemptOutcome, error) {
 	tokens := a.run.owner.Model.GenerateStream(modelCtx, request)
 	for token := range tokens {
 		if token.Err != nil {
@@ -225,7 +225,7 @@ func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request 
 				retryErr = token.Err
 			} else if !attemptTimedOut {
 				if cancelErr := cancellationError(a.ctx, token.Err); cancelErr != nil {
-					return false, nil, a.terminateCanceled(cancelErr)
+					return false, a.terminateCanceled(cancelErr), nil
 				}
 			}
 
@@ -238,14 +238,14 @@ func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request 
 				canRetry = a.run.owner.RetryPolicy.hasRetryBudget(a.run.state.retryCount) && retryable
 			}
 			if canRetry {
-				return true, retryErr, attemptRetry
+				return true, attemptRetry, retryErr
 			}
 
 			terminalErr := token.Err
 			if a.run.owner.RetryPolicy != nil && retryable {
 				terminalErr = fmt.Errorf("%w: limit=%d: %w", ErrMaxRetries, retryLimit, token.Err)
 			}
-			return false, nil, a.terminateError(terminalErr)
+			return false, a.terminateError(terminalErr), nil
 		}
 
 		if token.Type == ai.TokenTypeToolCall && a.run.owner.ToolChoice.Mode == ai.ToolChoiceNone {
@@ -269,10 +269,10 @@ func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request 
 		a.run.state.recordToken(token)
 		a.state.recordToken(token)
 		if err := sendEvent(a.run.ctx, a.run.events, TokenEvent(a.iteration.Count, a.state.attemptID(), a.run.state.retryCount, token)); err != nil {
-			return false, nil, a.terminateSendFailure(err)
+			return false, a.terminateSendFailure(err), nil
 		}
 	}
-	return false, nil, attemptAccepted
+	return false, attemptAccepted, nil
 }
 
 func (a *attemptExecution) scheduleRetry(retryErr error) attemptOutcome {
