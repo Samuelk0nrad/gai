@@ -225,7 +225,7 @@ type middlewareObserver struct {
 	errorPolicy ErrorPolicy
 }
 
-func newMiddlewareObserver(ctx context.Context, run *MiddlewareContext, middleware *AgentMiddleware, upstream capturedStream) (context.Context, *middlewareObserver) {
+func newMiddlewareObserver(ctx context.Context, run *MiddlewareContext, middleware *AgentMiddleware, upstream WorkflowResult) (context.Context, *middlewareObserver) {
 	agentName := ""
 	var debug gai.ObservationSink
 	if run != nil && run.workflow != nil {

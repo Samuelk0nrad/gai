@@ -110,7 +110,7 @@ func New(def Definition) *Agent {
 // NewRun builds a single-use workflow for input.
 //
 // Prompt construction happens before NewRun returns. Model execution and
-// middleware processing begin when Workflow.Run is called.
+// middleware processing begin when Workflow.Run or Workflow.RunEvents is called.
 func (a *Agent) NewRun(ctx context.Context, input RunInput) (*Workflow, error) {
 	if input.ID == "" {
 		var err error
