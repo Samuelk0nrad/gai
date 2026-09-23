@@ -95,13 +95,29 @@ func (m *AgentMiddleware) Process(ctx context.Context, run *MiddlewareContext, u
 	go func() {
 		defer close(out)
 		var upstreamOutput []Event
+		invalid := make(map[attemptKey]bool)
 		for event := range upstream {
+			switch event.Type {
+			case EventRetry, EventDiscard:
+				invalid[eventAttemptKey(event)] = true
+			case EventStageFinish:
+				if event.AttemptID != 0 && (event.StageOutcome == StageFailed || event.StageOutcome == StageCanceled) {
+					invalid[eventAttemptKey(event)] = true
+				}
+			}
 			if event.Type == EventOutput && m.config.Output == ReplaceOutput {
 				upstreamOutput = append(upstreamOutput, cloneEvent(event))
 				continue
 			}
 			out <- cloneEvent(event)
 		}
+		restorable := upstreamOutput[:0:0]
+		for _, event := range upstreamOutput {
+			if !invalid[eventAttemptKey(event)] {
+				restorable = append(restorable, event)
+			}
+		}
+		upstreamOutput = restorable
 
 		result := run.Result()
 		stageCtx, obs := newMiddlewareObserver(ctx, run, m, result)

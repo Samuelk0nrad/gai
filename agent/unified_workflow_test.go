@@ -114,6 +114,44 @@ func TestWorkflowRunEventsUsesMiddlewarePipeline(t *testing.T) {
 	}
 }
 
+func TestAgentMiddlewareReplaceOutputRestoresOnlyAcceptedUpstreamAttempts(t *testing.T) {
+	model := &scriptedWorkflowModel{scripts: [][]ai.Token{
+		{{Type: ai.TokenTypeText, Text: "partial"}, {Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("retry")}}},
+		{{Type: ai.TokenTypeText, Text: "final"}},
+	}}
+	main := agent.New(agent.Definition{
+		Name:        "main",
+		Model:       model,
+		RetryPolicy: &loop.RetryPolicy{MaxRetries: 1},
+		Limits:      agent.Limits{MaxLoopIterations: 1},
+		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+			return &testPromptBuilder{}, nil
+		},
+		Middleware: []agent.Middleware{
+			agent.NewAgentMiddleware(workflowAgent("post", "unused"), agent.AgentMiddlewareConfig{
+				Output:    agent.ReplaceOutput,
+				ShouldRun: func(agent.WorkflowResult) bool { return false },
+			}),
+		},
+	})
+	workflow, err := main.NewRun(context.Background(), textRunInput("question"))
+	if err != nil {
+		t.Fatalf("NewRun failed: %v", err)
+	}
+
+	events := collectAgentEvents(workflow.RunEvents(context.Background()))
+	result, err := workflow.Wait()
+	if err != nil {
+		t.Fatalf("Wait failed: %v", err)
+	}
+	if got, want := outputText(events), result.Text; got != want {
+		t.Fatalf("streamed output = %q, reduced result = %q", got, want)
+	}
+	if result.Text != "final" {
+		t.Fatalf("result text = %q, want final", result.Text)
+	}
+}
+
 func TestWorkflowWaitDoesNotConsumeEventStream(t *testing.T) {
 	gate := make(chan struct{})
 	middleware := agent.MiddlewareFunc(func(ctx context.Context, run *agent.MiddlewareContext, upstream <-chan agent.Event) <-chan agent.Event {
