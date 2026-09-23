@@ -152,6 +152,38 @@ func TestAgentMiddlewareReplaceOutputRestoresOnlyAcceptedUpstreamAttempts(t *tes
 	}
 }
 
+func TestWorkflowCanceledAbandonedEventStreamStillCompletes(t *testing.T) {
+	stopsOnCancellation := agent.MiddlewareFunc(func(ctx context.Context, _ *agent.MiddlewareContext, _ <-chan agent.Event) <-chan agent.Event {
+		out := make(chan agent.Event)
+		close(out)
+		return out
+	})
+	workflow, err := workflowAgent("main", "answer", stopsOnCancellation).NewRun(context.Background(), textRunInput("question"))
+	if err != nil {
+		t.Fatalf("NewRun failed: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_ = workflow.RunEvents(ctx)
+	waited := make(chan struct{})
+	var result agent.WorkflowResult
+	var waitErr error
+	go func() {
+		result, waitErr = workflow.Wait()
+		close(waited)
+	}()
+
+	select {
+	case <-waited:
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not complete after cancellation with an abandoned event stream")
+	}
+	if !errors.Is(waitErr, context.Canceled) || !result.Complete || !result.Canceled {
+		t.Fatalf("Wait = (%+v, %v), want complete canceled result", result, waitErr)
+	}
+}
+
 func TestWorkflowWaitDoesNotConsumeEventStream(t *testing.T) {
 	gate := make(chan struct{})
 	middleware := agent.MiddlewareFunc(func(ctx context.Context, run *agent.MiddlewareContext, upstream <-chan agent.Event) <-chan agent.Event {

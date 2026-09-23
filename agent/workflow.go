@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
@@ -118,18 +119,20 @@ type Workflow struct {
 	mu          sync.RWMutex
 	started     bool
 	done        chan struct{}
+	primaryDone chan struct{}
 	terminalErr error
 	result      WorkflowResult
 }
 
 func newWorkflow(input RunInput, l *loop.Loop, name string, debug gai.ObservationSink, middleware []Middleware) *Workflow {
 	return &Workflow{
-		loop:       l,
-		middleware: append([]Middleware(nil), middleware...),
-		name:       name,
-		debug:      debug,
-		done:       make(chan struct{}),
-		result:     WorkflowResult{Input: cloneRunInput(input)},
+		loop:        l,
+		middleware:  append([]Middleware(nil), middleware...),
+		name:        name,
+		debug:       debug,
+		done:        make(chan struct{}),
+		primaryDone: make(chan struct{}),
+		result:      WorkflowResult{Input: cloneRunInput(input)},
 	}
 }
 
@@ -226,7 +229,7 @@ func (w *Workflow) start(ctx context.Context) (<-chan Event, error) {
 		source := EventSource{Kind: SourceMiddleware, Index: index + 1, Name: middlewareName(middleware, index)}
 		run := &MiddlewareContext{workflow: w, source: source}
 		stream = middleware.Process(ctx, run, stream)
-		stream = w.captureMiddlewareOutput(stream)
+		stream = w.captureMiddlewareOutput(ctx, stream)
 	}
 	return w.finalize(ctx, stream, obs, runObs), nil
 }
@@ -266,6 +269,41 @@ func failedEventStream(err error) <-chan Event {
 	events <- Event{Type: EventError, Source: EventSource{Kind: SourceWorkflow}, Err: err}
 	close(events)
 	return events
+}
+
+func sendWorkflowEvent(ctx context.Context, out chan<- Event, event Event, deliver bool) bool {
+	if !deliver {
+		return false
+	}
+	// Prefer a receiver that is already waiting, even when cancellation and the
+	// send become ready together. This keeps internal pipeline stages draining
+	// while allowing an abandoned public stream to be released by cancellation.
+	select {
+	case out <- event:
+		return true
+	default:
+	}
+	select {
+	case out <- event:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func sendTerminalWorkflowEvent(ctx context.Context, out chan<- Event, event Event, deliver bool) {
+	if sendWorkflowEvent(ctx, out, event, deliver) || ctx.Err() == nil {
+		return
+	}
+	// A caller may start draining immediately after RunEvents returns with an
+	// already-canceled context. Give that receiver a short opportunity to observe
+	// the required terminal event, without letting an abandoned stream block Wait.
+	timer := time.NewTimer(50 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case out <- event:
+	case <-timer.C:
+	}
 }
 
 type attemptKey struct {
@@ -327,8 +365,9 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 	source := EventSource{Kind: SourcePrimary, Index: 0, Name: w.name}
 	go func() {
 		defer close(out)
+		defer close(w.primaryDone)
 		acc := primaryAccumulator{billedKey: make(map[attemptKey]struct{})}
-		out <- Event{Type: EventStageStart, Source: source}
+		deliver := sendWorkflowEvent(ctx, out, Event{Type: EventStageStart, Source: source}, true)
 		var terminal Event
 		for low := range upstream {
 			event, emit := mapLoopEvent(low, source)
@@ -358,7 +397,7 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 				terminal = Event{Type: EventStageFinish, Source: source, StageOutcome: StageSucceeded}
 			}
 			if emit {
-				out <- cloneEvent(event)
+				deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
 			}
 		}
 		if terminal.Type == "" {
@@ -378,7 +417,7 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 		w.result.AttemptedText = primary.AttemptedText
 		w.mu.Unlock()
 		obs.PrimaryFinished(ctx, primary)
-		out <- cloneEvent(terminal)
+		sendWorkflowEvent(ctx, out, cloneEvent(terminal), deliver)
 	}()
 	return out
 }
@@ -445,14 +484,15 @@ func cloneIterationPtr(iteration *loop.Iteration) *loop.Iteration {
 	return &cloned
 }
 
-func (w *Workflow) captureMiddlewareOutput(upstream <-chan Event) <-chan Event {
+func (w *Workflow) captureMiddlewareOutput(ctx context.Context, upstream <-chan Event) <-chan Event {
 	out := make(chan Event)
 	go func() {
 		defer close(out)
 		var events []Event
+		deliver := true
 		for event := range upstream {
 			events = append(events, cloneEvent(event))
-			out <- cloneEvent(event)
+			deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
 		}
 		output, _, stageErrs := reduceOutput(events)
 		canceled, cancellationErr := stageCancellation(events)
@@ -476,13 +516,15 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 	out := make(chan Event)
 	go func() {
 		var events []Event
+		deliver := true
 		for event := range upstream {
 			if event.Type == EventDone || event.Type == EventError || event.Type == EventCanceled {
 				continue
 			}
 			events = append(events, cloneEvent(event))
-			out <- cloneEvent(event)
+			deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
 		}
+		<-w.primaryDone
 
 		output, attempted, stageErrs := reduceOutput(events)
 		w.mu.Lock()
@@ -511,7 +553,7 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 
 		obs.Finished(ctx, result)
 		runObs.Finished(result)
-		out <- terminal
+		sendTerminalWorkflowEvent(ctx, out, terminal, deliver)
 		close(out)
 		close(w.done)
 	}()
