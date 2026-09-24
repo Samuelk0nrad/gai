@@ -35,6 +35,20 @@ func collectAgentEvents(stream <-chan agent.Event) []agent.Event {
 	return events
 }
 
+type gatedWorkflowTool struct {
+	loop.Tool
+	release <-chan struct{}
+}
+
+func (t gatedWorkflowTool) Function(ctx context.Context, call *ai.ToolCall) *loop.ToolResponse {
+	select {
+	case <-t.release:
+		return t.Tool.Function(ctx, call)
+	case <-ctx.Done():
+		return loop.NewToolError(ctx.Err())
+	}
+}
+
 func TestWorkflowUnifiedBlockingLifecycle(t *testing.T) {
 	workflow, err := workflowAgent("main", "answer").NewRun(context.Background(), textRunInput("question"))
 	if err != nil {
@@ -104,13 +118,84 @@ func TestWorkflowRunEventsUsesMiddlewarePipeline(t *testing.T) {
 			stageOrder = append(stageOrder, event.Type)
 		}
 	}
-	if want := []agent.EventType{agent.EventStageStart, agent.EventAttemptStart, agent.EventOutput, agent.EventIterationDone, agent.EventStageFinish}; !reflect.DeepEqual(stageOrder, want) {
+	if want := []agent.EventType{agent.EventStageStart, agent.EventAttemptStart, agent.EventIterationDone, agent.EventOutput, agent.EventStageFinish}; !reflect.DeepEqual(stageOrder, want) {
 		t.Fatalf("middleware event order = %v, want %v", stageOrder, want)
 	}
 
 	result, err := workflow.Wait()
 	if err != nil || !result.Complete || result.Text != "answer polished" || len(result.Stages) != 1 {
 		t.Fatalf("Wait = (%+v, %v)", result, err)
+	}
+}
+
+func TestAgentMiddlewareStreamsToolStartBeforeNestedStageCompletes(t *testing.T) {
+	release := make(chan struct{})
+	nested := agent.New(agent.Definition{
+		Name: "memory",
+		Model: &scriptedWorkflowModel{scripts: [][]ai.Token{
+			{{
+				Type: ai.TokenTypeToolCall,
+				ToolCall: &ai.ToolCall{
+					ID:   "call_1",
+					Type: "function",
+					Name: "echo",
+					Args: []byte(`{"text":"remembered"}`),
+				},
+			}},
+			{{Type: ai.TokenTypeText, Text: "saved"}},
+		}},
+		Tools: []loop.Tool{gatedWorkflowTool{Tool: loop.NewEchoTool(), release: release}},
+		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+			return &testPromptBuilder{}, nil
+		},
+		Limits: agent.Limits{MaxLoopIterations: 2},
+	})
+	main := workflowAgent("main", "answer", agent.NewAgentMiddleware(nested, agent.AgentMiddlewareConfig{
+		Name:   "memory",
+		Output: agent.PreserveOutput,
+	}))
+	workflow, err := main.NewRun(context.Background(), textRunInput("question"))
+	if err != nil {
+		t.Fatalf("NewRun failed: %v", err)
+	}
+
+	toolStarted := make(chan agent.Event, 1)
+	streamDone := make(chan []agent.Event, 1)
+	go func() {
+		var events []agent.Event
+		for event := range workflow.RunEvents(context.Background()) {
+			events = append(events, event)
+			if event.Type == agent.EventToolStart && event.Source.Kind == agent.SourceMiddleware {
+				select {
+				case toolStarted <- event:
+				default:
+				}
+			}
+		}
+		streamDone <- events
+	}()
+
+	select {
+	case event := <-toolStarted:
+		if event.Source.Index != 1 || event.Source.Name != "memory" || event.ToolCall == nil || event.ToolCall.Name != "echo" {
+			t.Fatalf("unexpected live tool event: %#v", event)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		<-streamDone
+		t.Fatal("middleware tool start was not streamed while the nested tool was blocked")
+	}
+
+	close(release)
+	events := <-streamDone
+	result, err := workflow.Wait()
+	if err != nil || result.Text != "answer" || len(result.Stages) != 1 || result.Stages[0].Result.Text != "saved" {
+		t.Fatalf("Wait = (%+v, %v)", result, err)
+	}
+	for _, event := range events {
+		if event.Type == agent.EventOutput && event.Source.Kind == agent.SourceMiddleware {
+			t.Fatalf("PreserveOutput leaked nested output: %#v", event)
+		}
 	}
 }
 

@@ -148,13 +148,10 @@ func (m *AgentMiddleware) Process(ctx context.Context, run *MiddlewareContext, u
 			return
 		}
 
-		stageResult, nestedEvents, terminalErr := m.runStage(stageCtx, input, run.Source())
+		stageResult, nestedOutput, terminalErr := m.runStage(stageCtx, input, run.Source(), func(event Event) {
+			deliver = sendWorkflowEvent(ctx, out, event, deliver)
+		})
 		if terminalErr != nil || stageResult.Canceled || len(stageResult.Errors) > 0 {
-			for _, event := range nestedEvents {
-				if event.Type != EventOutput {
-					deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
-				}
-			}
 			if terminalErr == nil {
 				terminalErr = errors.Join(stageResult.Errors...)
 				if stageResult.Canceled {
@@ -165,12 +162,7 @@ func (m *AgentMiddleware) Process(ctx context.Context, run *MiddlewareContext, u
 			return
 		}
 
-		for _, event := range nestedEvents {
-			if event.Type == EventOutput && m.config.Output == PreserveOutput {
-				continue
-			}
-			deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
-		}
+		deliver = forwardEvents(ctx, out, nestedOutput, deliver)
 		run.workflow.addStage(StageResult{Name: m.name(), Output: m.config.Output, Result: stageResult})
 		obs.Finished(stageCtx, stageResult, m.config.Output != PreserveOutput)
 		sendWorkflowEvent(ctx, out, Event{Type: EventStageFinish, Source: run.Source(), StageOutcome: StageSucceeded}, deliver)
@@ -210,22 +202,38 @@ func forwardEvents(ctx context.Context, out chan<- Event, events []Event, delive
 	return deliver
 }
 
-func (m *AgentMiddleware) runStage(ctx context.Context, input RunInput, source EventSource) (AgentResult, []Event, error) {
+func (m *AgentMiddleware) runStage(ctx context.Context, input RunInput, source EventSource, forward func(Event)) (AgentResult, []Event, error) {
 	workflow, err := m.agent.NewRun(ctx, input)
 	if err != nil {
 		return AgentResult{Errors: []error{err}}, nil, err
 	}
-	var events []Event
+	var output []Event
+	invalid := make(map[attemptKey]bool)
 	for event := range workflow.RunEvents(ctx) {
 		switch event.Type {
 		case EventStageStart, EventStageFinish, EventDone, EventError, EventCanceled:
 			continue
 		}
 		event.Source = source
-		events = append(events, cloneEvent(event))
+		if event.Type == EventOutput {
+			if m.config.Output != PreserveOutput {
+				output = append(output, cloneEvent(event))
+			}
+			continue
+		}
+		if event.Type == EventRetry || event.Type == EventDiscard {
+			invalid[eventAttemptKey(event)] = true
+		}
+		forward(cloneEvent(event))
 	}
 	result, err := workflow.Wait()
-	return result.Primary, events, err
+	accepted := output[:0:0]
+	for _, event := range output {
+		if !invalid[eventAttemptKey(event)] {
+			accepted = append(accepted, event)
+		}
+	}
+	return result.Primary, accepted, err
 }
 
 func (m *AgentMiddleware) shouldRun(result WorkflowResult) bool {
