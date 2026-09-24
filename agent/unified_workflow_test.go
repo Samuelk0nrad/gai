@@ -184,6 +184,32 @@ func TestWorkflowCanceledAbandonedEventStreamStillCompletes(t *testing.T) {
 	}
 }
 
+func TestWorkflowCanceledDelayedConsumerReceivesTerminalEvent(t *testing.T) {
+	emitsBeforeCancel := agent.MiddlewareFunc(func(_ context.Context, run *agent.MiddlewareContext, _ <-chan agent.Event) <-chan agent.Event {
+		out := make(chan agent.Event, 1)
+		out <- agent.Event{Type: agent.EventOutput, Source: run.Source(), Output: &agent.OutputPart{Kind: agent.OutputText, Text: "pending"}}
+		close(out)
+		return out
+	})
+	workflow, err := workflowAgent("main", "answer", emitsBeforeCancel).NewRun(context.Background(), textRunInput("question"))
+	if err != nil {
+		t.Fatalf("NewRun failed: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	stream := workflow.RunEvents(ctx)
+	result, waitErr := workflow.Wait()
+	if !errors.Is(waitErr, context.Canceled) || !result.Complete || !result.Canceled {
+		t.Fatalf("Wait = (%+v, %v), want complete canceled result", result, waitErr)
+	}
+
+	events := collectAgentEvents(stream)
+	if len(events) != 1 || events[0].Type != agent.EventCanceled || !errors.Is(events[0].Err, context.Canceled) {
+		t.Fatalf("delayed events = %#v, want one canceled terminal event", events)
+	}
+}
+
 func TestWorkflowWaitDoesNotConsumeEventStream(t *testing.T) {
 	gate := make(chan struct{})
 	middleware := agent.MiddlewareFunc(func(ctx context.Context, run *agent.MiddlewareContext, upstream <-chan agent.Event) <-chan agent.Event {

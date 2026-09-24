@@ -5,7 +5,6 @@ import (
 	"errors"
 	"reflect"
 	"sync"
-	"time"
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
@@ -176,7 +175,9 @@ func (w *Workflow) Run(ctx context.Context) (WorkflowResult, error) {
 }
 
 // RunEvents starts the same ordered middleware-aware pipeline used by Run.
-// Callers must drain the returned channel before Wait can complete.
+// Callers must drain the returned channel before Wait can complete. On
+// cancellation, an abandoned stream retains its terminal event in place of any
+// pending non-terminal event so completion does not depend on a receiver.
 func (w *Workflow) RunEvents(ctx context.Context) <-chan Event {
 	events, err := w.start(ctx)
 	if err != nil {
@@ -291,19 +292,18 @@ func sendWorkflowEvent(ctx context.Context, out chan<- Event, event Event, deliv
 	}
 }
 
-func sendTerminalWorkflowEvent(ctx context.Context, out chan<- Event, event Event, deliver bool) {
+func sendTerminalWorkflowEvent(ctx context.Context, out chan Event, event Event, deliver bool) {
 	if sendWorkflowEvent(ctx, out, event, deliver) || ctx.Err() == nil {
 		return
 	}
-	// A caller may start draining immediately after RunEvents returns with an
-	// already-canceled context. Give that receiver a short opportunity to observe
-	// the required terminal event, without letting an abandoned stream block Wait.
-	timer := time.NewTimer(50 * time.Millisecond)
-	defer timer.Stop()
+	// The finalizer owns out and gives it one bounded slot. Cancellation may
+	// evict one pending non-terminal event, but the terminal outcome is retained
+	// for a delayed consumer without letting an abandoned stream block Wait.
 	select {
-	case out <- event:
-	case <-timer.C:
+	case <-out:
+	default:
 	}
+	out <- event
 }
 
 type attemptKey struct {
@@ -570,7 +570,7 @@ func (w *Workflow) captureMiddlewareOutput(ctx context.Context, upstream <-chan 
 }
 
 func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *workflowObserver, runObs *agentRunObserver) <-chan Event {
-	out := make(chan Event)
+	out := make(chan Event, 1)
 	go func() {
 		var accumulator workflowOutputAccumulator
 		deliver := true
