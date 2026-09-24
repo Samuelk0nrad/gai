@@ -484,18 +484,75 @@ func cloneIterationPtr(iteration *loop.Iteration) *loop.Iteration {
 	return &cloned
 }
 
+type outputRecord struct {
+	key  attemptKey
+	part OutputPart
+}
+
+type workflowOutputAccumulator struct {
+	outputs         []outputRecord
+	invalid         map[attemptKey]struct{}
+	stageErrs       []error
+	canceled        bool
+	cancellationErr error
+}
+
+func (a *workflowOutputAccumulator) invalidate(key attemptKey) {
+	if a.invalid == nil {
+		a.invalid = make(map[attemptKey]struct{})
+	}
+	a.invalid[key] = struct{}{}
+}
+
+func (a *workflowOutputAccumulator) add(event Event) {
+	switch event.Type {
+	case EventOutput:
+		if event.Output != nil {
+			a.outputs = append(a.outputs, outputRecord{
+				key:  eventAttemptKey(event),
+				part: cloneOutputPart(*event.Output),
+			})
+		}
+	case EventRetry, EventDiscard:
+		a.invalidate(eventAttemptKey(event))
+	case EventStageFinish:
+		if event.StageOutcome != StageFailed && event.StageOutcome != StageCanceled {
+			return
+		}
+		if event.AttemptID != 0 {
+			a.invalidate(eventAttemptKey(event))
+		}
+		if event.StageOutcome == StageFailed && event.Err != nil && event.StageReason != stageReasonRecorded {
+			a.stageErrs = append(a.stageErrs, event.Err)
+		}
+		if event.StageOutcome == StageCanceled && !a.canceled {
+			a.canceled = true
+			a.cancellationErr = event.Err
+		}
+	}
+}
+
+func (a *workflowOutputAccumulator) result() (accepted []OutputPart, attempted []OutputPart, stageErrs []error, canceled bool, cancellationErr error) {
+	for _, output := range a.outputs {
+		attempted = append(attempted, cloneOutputPart(output.part))
+		if _, discarded := a.invalid[output.key]; !discarded {
+			accepted = append(accepted, cloneOutputPart(output.part))
+		}
+	}
+	return accepted, attempted, append([]error(nil), a.stageErrs...), a.canceled, a.cancellationErr
+}
+
 func (w *Workflow) captureMiddlewareOutput(ctx context.Context, upstream <-chan Event) <-chan Event {
 	out := make(chan Event)
 	go func() {
 		defer close(out)
-		var events []Event
+		var accumulator workflowOutputAccumulator
 		deliver := true
 		for event := range upstream {
-			events = append(events, cloneEvent(event))
+			accumulator.add(event)
 			deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
 		}
-		output, _, stageErrs := reduceOutput(events)
-		canceled, cancellationErr := stageCancellation(events)
+		output, _, stageErrs, canceled, cancellationErr := accumulator.result()
 		w.mu.Lock()
 		w.setVisibleOutputLocked(output)
 		for _, err := range stageErrs {
@@ -515,18 +572,18 @@ func (w *Workflow) captureMiddlewareOutput(ctx context.Context, upstream <-chan 
 func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *workflowObserver, runObs *agentRunObserver) <-chan Event {
 	out := make(chan Event)
 	go func() {
-		var events []Event
+		var accumulator workflowOutputAccumulator
 		deliver := true
 		for event := range upstream {
 			if event.Type == EventDone || event.Type == EventError || event.Type == EventCanceled {
 				continue
 			}
-			events = append(events, cloneEvent(event))
+			accumulator.add(event)
 			deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
 		}
 		<-w.primaryDone
 
-		output, attempted, stageErrs := reduceOutput(events)
+		output, attempted, stageErrs, _, _ := accumulator.result()
 		w.mu.Lock()
 		w.setVisibleOutputLocked(output)
 		w.result.AttemptedTokens = outputPartsToTokens(attempted)
@@ -567,51 +624,6 @@ func containsError(errs []error, target error) bool {
 		}
 	}
 	return false
-}
-
-func reduceOutput(events []Event) (accepted []OutputPart, attempted []OutputPart, stageErrs []error) {
-	type outputRecord struct {
-		key  attemptKey
-		part OutputPart
-	}
-	var records []outputRecord
-	invalid := make(map[attemptKey]bool)
-	for _, event := range events {
-		switch event.Type {
-		case EventOutput:
-			if event.Output != nil {
-				part := cloneOutputPart(*event.Output)
-				records = append(records, outputRecord{key: eventAttemptKey(event), part: part})
-				attempted = append(attempted, cloneOutputPart(part))
-			}
-		case EventRetry, EventDiscard:
-			invalid[eventAttemptKey(event)] = true
-		case EventStageFinish:
-			if event.StageOutcome == StageFailed || event.StageOutcome == StageCanceled {
-				if event.AttemptID != 0 {
-					invalid[eventAttemptKey(event)] = true
-				}
-				if event.StageOutcome == StageFailed && event.Err != nil && event.StageReason != stageReasonRecorded {
-					stageErrs = append(stageErrs, event.Err)
-				}
-			}
-		}
-	}
-	for _, record := range records {
-		if !invalid[record.key] {
-			accepted = append(accepted, cloneOutputPart(record.part))
-		}
-	}
-	return accepted, attempted, stageErrs
-}
-
-func stageCancellation(events []Event) (bool, error) {
-	for _, event := range events {
-		if event.Type == EventStageFinish && event.StageOutcome == StageCanceled {
-			return true, event.Err
-		}
-	}
-	return false, nil
 }
 
 func (w *Workflow) setVisibleOutputLocked(output []OutputPart) {
