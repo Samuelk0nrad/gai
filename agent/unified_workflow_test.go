@@ -237,6 +237,30 @@ func TestAgentMiddlewareReplaceOutputRestoresOnlyAcceptedUpstreamAttempts(t *tes
 	}
 }
 
+func TestWorkflowCanceledDeliveryPreservesPrimaryOutput(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	main := workflowAgent("main", "answer", agent.NewAgentMiddleware(workflowAgent("post", "unused"), agent.AgentMiddlewareConfig{
+		Output: agent.ReplaceOutput,
+		ShouldRun: func(agent.WorkflowResult) bool {
+			cancel()
+			return false
+		},
+	}))
+	workflow, err := main.NewRun(context.Background(), textRunInput("question"))
+	if err != nil {
+		t.Fatalf("NewRun failed: %v", err)
+	}
+
+	collectAgentEvents(workflow.RunEvents(ctx))
+	result, _ := workflow.Wait()
+	if result.Primary.Text != "answer" {
+		t.Fatalf("primary text = %q, want answer", result.Primary.Text)
+	}
+	if result.Text != result.Primary.Text {
+		t.Fatalf("result text = %q, primary text = %q", result.Text, result.Primary.Text)
+	}
+}
+
 func TestWorkflowCanceledAbandonedEventStreamStillCompletes(t *testing.T) {
 	stopsOnCancellation := agent.MiddlewareFunc(func(ctx context.Context, _ *agent.MiddlewareContext, _ <-chan agent.Event) <-chan agent.Event {
 		out := make(chan agent.Event)

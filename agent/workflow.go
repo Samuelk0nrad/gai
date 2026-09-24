@@ -115,12 +115,13 @@ type Workflow struct {
 	name       string
 	debug      gai.ObservationSink
 
-	mu          sync.RWMutex
-	started     bool
-	done        chan struct{}
-	primaryDone chan struct{}
-	terminalErr error
-	result      WorkflowResult
+	mu                 sync.RWMutex
+	started            bool
+	done               chan struct{}
+	primaryDone        chan struct{}
+	terminalErr        error
+	deliveryIncomplete bool
+	result             WorkflowResult
 }
 
 func newWorkflow(input RunInput, l *loop.Loop, name string, debug gai.ObservationSink, middleware []Middleware) *Workflow {
@@ -292,6 +293,16 @@ func sendWorkflowEvent(ctx context.Context, out chan<- Event, event Event, deliv
 	}
 }
 
+func (w *Workflow) sendEvent(ctx context.Context, out chan<- Event, event Event, deliver bool) bool {
+	delivered := sendWorkflowEvent(ctx, out, event, deliver)
+	if deliver && !delivered {
+		w.mu.Lock()
+		w.deliveryIncomplete = true
+		w.mu.Unlock()
+	}
+	return delivered
+}
+
 func sendTerminalWorkflowEvent(ctx context.Context, out chan Event, event Event, deliver bool) {
 	if sendWorkflowEvent(ctx, out, event, deliver) || ctx.Err() == nil {
 		return
@@ -367,7 +378,7 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 		defer close(out)
 		defer close(w.primaryDone)
 		acc := primaryAccumulator{billedKey: make(map[attemptKey]struct{})}
-		deliver := sendWorkflowEvent(ctx, out, Event{Type: EventStageStart, Source: source}, true)
+		deliver := w.sendEvent(ctx, out, Event{Type: EventStageStart, Source: source}, true)
 		var terminal Event
 		for low := range upstream {
 			event, emit := mapLoopEvent(low, source)
@@ -397,7 +408,7 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 				terminal = Event{Type: EventStageFinish, Source: source, StageOutcome: StageSucceeded}
 			}
 			if emit {
-				deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
+				deliver = w.sendEvent(ctx, out, cloneEvent(event), deliver)
 			}
 		}
 		if terminal.Type == "" {
@@ -417,7 +428,7 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 		w.result.AttemptedText = primary.AttemptedText
 		w.mu.Unlock()
 		obs.PrimaryFinished(ctx, primary)
-		sendWorkflowEvent(ctx, out, cloneEvent(terminal), deliver)
+		w.sendEvent(ctx, out, cloneEvent(terminal), deliver)
 	}()
 	return out
 }
@@ -550,11 +561,13 @@ func (w *Workflow) captureMiddlewareOutput(ctx context.Context, upstream <-chan 
 		deliver := true
 		for event := range upstream {
 			accumulator.add(event)
-			deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
+			deliver = w.sendEvent(ctx, out, cloneEvent(event), deliver)
 		}
 		output, _, stageErrs, canceled, cancellationErr := accumulator.result()
 		w.mu.Lock()
-		w.setVisibleOutputLocked(output)
+		if !w.deliveryIncomplete {
+			w.setVisibleOutputLocked(output)
+		}
 		for _, err := range stageErrs {
 			if err != nil && !containsError(w.result.Errors, err) {
 				w.result.Errors = append(w.result.Errors, err)
@@ -579,15 +592,17 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 				continue
 			}
 			accumulator.add(event)
-			deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
+			deliver = w.sendEvent(ctx, out, cloneEvent(event), deliver)
 		}
 		<-w.primaryDone
 
 		output, attempted, stageErrs, _, _ := accumulator.result()
 		w.mu.Lock()
-		w.setVisibleOutputLocked(output)
-		w.result.AttemptedTokens = outputPartsToTokens(attempted)
-		w.result.AttemptedText = outputTextOnly(attempted)
+		if !w.deliveryIncomplete {
+			w.setVisibleOutputLocked(output)
+			w.result.AttemptedTokens = outputPartsToTokens(attempted)
+			w.result.AttemptedText = outputTextOnly(attempted)
+		}
 		for _, err := range stageErrs {
 			if err != nil && !containsError(w.result.Errors, err) {
 				w.result.Errors = append(w.result.Errors, err)
