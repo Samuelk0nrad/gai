@@ -50,11 +50,13 @@ type WorkflowResult struct {
 	// Output is the canonical visible workflow output after middleware.
 	Output []OutputPart
 	// Tokens is retained as a convenience view of text and reasoning output.
-	Tokens          []ai.Token
-	Text            string
-	Reasoning       string
+	Tokens    []ai.Token
+	Text      string
+	Reasoning string
+	// AttemptedTokens retains the raw primary stream, including non-text tokens.
 	AttemptedTokens []ai.Token
-	AttemptedText   string
+	// AttemptedText retains attempted user-visible text after middleware.
+	AttemptedText string
 
 	Primary AgentResult
 	Stages  []StageResult
@@ -600,7 +602,6 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 		w.mu.Lock()
 		if !w.deliveryIncomplete {
 			w.setVisibleOutputLocked(output)
-			w.result.AttemptedTokens = outputPartsToTokens(attempted)
 			w.result.AttemptedText = outputTextOnly(attempted)
 		}
 		for _, err := range stageErrs {

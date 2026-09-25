@@ -149,6 +149,16 @@ func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 	if result.Reasoning != "checking tool" || result.Primary.Reasoning != "checking tool" {
 		t.Fatalf("unexpected reasoning capture: %+v", result)
 	}
+	var attemptedToolCall bool
+	for _, token := range result.AttemptedTokens {
+		if token.Type == ai.TokenTypeToolCall && token.ToolCall != nil && token.ToolCall.Name == "echo" {
+			attemptedToolCall = true
+			break
+		}
+	}
+	if !attemptedToolCall {
+		t.Fatalf("workflow attempted tokens lost the primary tool call: %#v", result.AttemptedTokens)
+	}
 	if len(result.Primary.Iterations) != 2 {
 		t.Fatalf("expected two iterations, got %+v", result.Primary.Iterations)
 	}
