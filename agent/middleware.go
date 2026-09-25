@@ -28,11 +28,12 @@ const (
 	// PreserveOutput forwards upstream output and records the middleware-agent
 	// result without emitting its text as EventOutput.
 	PreserveOutput OutputPolicy = iota
-	// AppendOutput forwards upstream output and then emits accepted
-	// middleware-agent output.
+	// AppendOutput forwards upstream output, streams nested lifecycle events,
+	// and emits accepted middleware-agent output after the nested run completes.
 	AppendOutput
-	// ReplaceOutput buffers upstream output and emits accepted middleware-agent
-	// output on success, restoring upstream output on failure.
+	// ReplaceOutput buffers upstream output, streams nested lifecycle events,
+	// and emits accepted middleware-agent output after the nested run succeeds,
+	// restoring upstream output on failure.
 	ReplaceOutput
 )
 
@@ -60,7 +61,9 @@ type AgentMiddlewareConfig struct {
 	ShouldRun func(WorkflowResult) bool
 }
 
-// AgentMiddleware runs an agent after its upstream stream completes.
+// AgentMiddleware runs an agent after its upstream stream completes. Nested
+// lifecycle events stream as they occur, while nested EventOutput is withheld
+// until its acceptance is known according to the configured OutputPolicy.
 type AgentMiddleware struct {
 	agent  *Agent
 	config AgentMiddlewareConfig

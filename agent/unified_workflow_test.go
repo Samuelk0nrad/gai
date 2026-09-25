@@ -118,6 +118,8 @@ func TestWorkflowRunEventsUsesMiddlewarePipeline(t *testing.T) {
 			stageOrder = append(stageOrder, event.Type)
 		}
 	}
+	// Accepted nested output is emitted after its attempt completes and before
+	// the middleware stage finishes.
 	if want := []agent.EventType{agent.EventStageStart, agent.EventAttemptStart, agent.EventIterationDone, agent.EventOutput, agent.EventStageFinish}; !reflect.DeepEqual(stageOrder, want) {
 		t.Fatalf("middleware event order = %v, want %v", stageOrder, want)
 	}

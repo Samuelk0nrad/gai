@@ -371,8 +371,10 @@ Middleware stages run after an upstream agent completes and are suited to tasks 
 `agent.NewAgentMiddleware` adapts another agent with one of three output policies:
 
 - `PreserveOutput` keeps the upstream output and records the stage result.
-- `AppendOutput` emits the stage output after the upstream output.
-- `ReplaceOutput` replaces the visible output after a successful stage.
+- `AppendOutput` emits accepted stage output after the upstream output.
+- `ReplaceOutput` replaces the visible output with accepted stage output after a successful stage.
+
+Nested attempt and tool lifecycle events stream while an agent-middleware stage runs. Nested `EventOutput` does not: `PreserveOutput` suppresses it, while `AppendOutput` and `ReplaceOutput` buffer it until the nested run completes and retry/discard outcomes determine which output is accepted. Consequently, a nested attempt's `EventIterationDone` precedes its accepted `EventOutput`; that output is emitted before the middleware `EventStageFinish`.
 
 Use `AgentMiddlewareConfig.MapInput` to map a typed upstream `WorkflowResult` into the next agent's `RunInput`. Use `MiddlewareFunc` for transformations that do not need another model call.
 
