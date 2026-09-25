@@ -85,8 +85,6 @@ import (
   "github.com/lace-ai/gai/agent"
   "github.com/lace-ai/gai/ai/openai"
   gaictx "github.com/lace-ai/gai/context"
-  "github.com/lace-ai/gai/loop"
-  "github.com/lace-ai/gai/ai"
 )
 
 func main() {
@@ -129,29 +127,22 @@ func run(ctx context.Context) error {
     log.Fatal(err)
   }
 
-  var runErr error
   for event := range workflow.RunEvents(ctx) {
     switch event.Type {
-    case loop.EventToken:
-      if event.Token != nil && event.Token.Type == ai.TokenTypeText {
-        if event.Token.Text != "" {
-          fmt.Print(event.Token.Text)
-        } else {
-          fmt.Print(event.Token.String())
-        }
+    case agent.EventOutput:
+      if event.Output != nil && event.Output.Kind == agent.OutputText {
+        fmt.Print(event.Output.Text)
       }
-
-    case loop.EventError, loop.EventCanceled:
-      runErr = event.Err
     }
   }
 
   fmt.Println()
-  return runErr
+  _, err = workflow.Wait()
+  return err
 }
 ```
 
-`Workflow.RunEvents` is the preferred API for a primary agent when event order matters. Each workflow is single-use; create a new workflow from the reusable agent definition for each request.
+Use `Workflow.Run(ctx)` when only the final result is needed. Use `Workflow.RunEvents(ctx)` for ordered streaming and call `Wait` after draining the channel. Both APIs execute the same middleware-aware pipeline. Each workflow is single-use; create a new workflow from the reusable agent definition for each request.
 
 ## Providers
 
@@ -183,7 +174,7 @@ Built-in providers discover compatible models dynamically and use a bundled fall
 
 `agent` is the high-level API: it owns reusable definitions, per-run configuration, workflow lifecycle, middleware, and aggregate results. `loop` is the canonical low-level execution API and owns tools, tool responses and helpers, selection and transport, ordered events, and iterations. `ai` owns provider-neutral request, definition, and call types. Use `agent` for application workflows; use `loop` directly only when an application deliberately needs mutable execution control.
 
-`Workflow.RunEvents` exposes the canonical `loop.Event` stream, while workflow results contain copied `loop.Iteration` snapshots. Prompt-only tool rendering accepts `context.ToolSignature`, so context packages do not require executable tools.
+`loop.Loop.Run` exposes low-level `loop.Event` values. `Workflow.RunEvents` exposes higher-level `agent.Event` values covering visible output, primary and middleware stages, and one final workflow outcome. Workflow results contain copied `loop.Iteration` snapshots. Prompt-only tool rendering accepts `context.ToolSignature`, so context packages do not require executable tools.
 
 A tool has a typed schema and a Go function:
 
@@ -258,28 +249,33 @@ workflow, err := support.NewRun(ctx, agent.RunInput{
 
 ## Ordered workflow events
 
-`RunEvents` forwards the loop's event stream without splitting it into unrelated channels:
+`RunEvents` exposes the workflow's ordered, middleware-aware event stream:
 
 ```go
 for event := range workflow.RunEvents(ctx) {
   switch event.Type {
-  case loop.EventAttemptStart:
+  case agent.EventAttemptStart:
     // A generation attempt began.
-  case loop.EventToken:
-    // Stream visible text or inspect other token types.
-  case loop.EventRetry:
+  case agent.EventOutput:
+    // Every EventOutput is externally visible, independent of Source.Index.
+    render(event.Output)
+  case agent.EventRetry:
     // Roll back output associated with event.AttemptID.
-  case loop.EventIterationDone:
+  case agent.EventIterationDone:
     // One model/tool iteration completed.
-  case loop.EventDone:
-    // The loop completed successfully.
-  case loop.EventError, loop.EventCanceled:
+  case agent.EventStageStart, agent.EventStageFinish:
+    // Observe primary and middleware-agent lifecycle.
+  case agent.EventDone:
+    // The complete workflow finished successfully.
+  case agent.EventError, agent.EventCanceled:
     // Handle terminal failure or cancellation.
   }
 }
+
+result, err := workflow.Wait()
 ```
 
-`Workflow.Run` remains available for workflows that use post-processing middleware. It exposes compatibility token, status, and error channels; consumers must drain all three concurrently.
+For non-streaming use, `result, err := workflow.Run(ctx)` starts and internally drains that same pipeline. `Wait` is repeatable and concurrency-safe; `Result` returns a non-blocking defensive snapshot.
 
 ## Retries
 
@@ -375,8 +371,10 @@ Middleware stages run after an upstream agent completes and are suited to tasks 
 `agent.NewAgentMiddleware` adapts another agent with one of three output policies:
 
 - `PreserveOutput` keeps the upstream output and records the stage result.
-- `AppendOutput` emits the stage output after the upstream output.
-- `ReplaceOutput` replaces the visible output after a successful stage.
+- `AppendOutput` emits accepted stage output after the upstream output.
+- `ReplaceOutput` replaces the visible output with accepted stage output after a successful stage.
+
+Nested attempt and tool lifecycle events stream while an agent-middleware stage runs. Nested `EventOutput` does not: `PreserveOutput` suppresses it, while `AppendOutput` and `ReplaceOutput` buffer it until the nested run completes and retry/discard outcomes determine which output is accepted. Consequently, a nested attempt's `EventIterationDone` precedes its accepted `EventOutput`; that output is emitted before the middleware `EventStageFinish`.
 
 Use `AgentMiddlewareConfig.MapInput` to map a typed upstream `WorkflowResult` into the next agent's `RunInput`. Use `MiddlewareFunc` for transformations that do not need another model call.
 

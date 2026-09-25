@@ -126,6 +126,18 @@ func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 	if len(consumed.statuses) != 2 {
 		t.Fatalf("expected two loop statuses, got %#v", consumed.statuses)
 	}
+	var toolStart, toolResult bool
+	for _, event := range consumed.events {
+		if event.Type == agent.EventToolStart && event.Source.Kind == agent.SourcePrimary && event.ToolCall != nil && event.ToolCall.Name == "echo" {
+			toolStart = true
+		}
+		if event.Type == agent.EventToolResult && event.Source.Kind == agent.SourcePrimary && event.ToolResponse != nil && event.ToolResponse.TextValue() == "tool says hi" {
+			toolResult = true
+		}
+	}
+	if !toolStart || !toolResult {
+		t.Fatalf("tool lifecycle missing from workflow events: start=%v result=%v events=%#v", toolStart, toolResult, consumed.events)
+	}
 
 	result := workflow.Result()
 	if !result.Complete {
@@ -136,6 +148,16 @@ func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 	}
 	if result.Reasoning != "checking tool" || result.Primary.Reasoning != "checking tool" {
 		t.Fatalf("unexpected reasoning capture: %+v", result)
+	}
+	var attemptedToolCall bool
+	for _, token := range result.AttemptedTokens {
+		if token.Type == ai.TokenTypeToolCall && token.ToolCall != nil && token.ToolCall.Name == "echo" {
+			attemptedToolCall = true
+			break
+		}
+	}
+	if !attemptedToolCall {
+		t.Fatalf("workflow attempted tokens lost the primary tool call: %#v", result.AttemptedTokens)
 	}
 	if len(result.Primary.Iterations) != 2 {
 		t.Fatalf("expected two iterations, got %+v", result.Primary.Iterations)
@@ -392,9 +414,9 @@ func TestAgentWorkflowRunEventsBillsRejectedRequiredToolAttempt(t *testing.T) {
 		t.Fatalf("NewRun failed: %v", err)
 	}
 
-	var discarded loop.Event
+	var discarded agent.Event
 	for event := range workflow.RunEvents(context.Background()) {
-		if event.Type == loop.EventDiscard {
+		if event.Type == agent.EventDiscard {
 			discarded = event
 		}
 	}
@@ -431,9 +453,9 @@ func TestAgentWorkflowRunEventsBillsTerminalErrorAttempt(t *testing.T) {
 		t.Fatalf("NewRun failed: %v", err)
 	}
 
-	var terminal loop.Event
+	var terminal agent.Event
 	for event := range workflow.RunEvents(context.Background()) {
-		if event.Type == loop.EventError {
+		if event.Type == agent.EventStageFinish && event.StageOutcome == agent.StageFailed {
 			terminal = event
 		}
 	}
@@ -461,16 +483,10 @@ func TestAgentWorkflowReportsCancellationWithoutError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRun failed: %v", err)
 	}
-	tokens, statuses, errs := workflow.Run(ctx)
-	for range tokens {
-	}
-	var gotStatuses []loop.IterationInformation
-	for status := range statuses {
-		gotStatuses = append(gotStatuses, status)
-	}
-	for err := range errs {
-		if err != nil {
-			t.Fatalf("cancellation should not reach error stream: %v", err)
+	var gotStatuses []consumedStatus
+	for event := range workflow.RunEvents(ctx) {
+		if event.Type == agent.EventCanceled {
+			gotStatuses = append(gotStatuses, consumedStatus{Canceled: true, DiscardIteration: true, CancellationErr: event.Err})
 		}
 	}
 	if len(gotStatuses) != 1 {
@@ -553,39 +569,41 @@ func TestAgentWorkflowRunEventsPreservesRetryOrdering(t *testing.T) {
 		t.Fatalf("NewRun failed: %v", err)
 	}
 
-	var events []loop.Event
+	var events []agent.Event
 	for event := range workflow.RunEvents(context.Background()) {
 		events = append(events, event)
 	}
 
-	if got, want := eventTypes(events), []loop.EventType{
-		loop.EventAttemptStart,
-		loop.EventToken,
-		loop.EventRetry,
-		loop.EventAttemptStart,
-		loop.EventToken,
-		loop.EventIterationDone,
-		loop.EventDone,
+	if got, want := eventTypes(events), []agent.EventType{
+		agent.EventStageStart,
+		agent.EventAttemptStart,
+		agent.EventOutput,
+		agent.EventRetry,
+		agent.EventAttemptStart,
+		agent.EventOutput,
+		agent.EventIterationDone,
+		agent.EventStageFinish,
+		agent.EventDone,
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected event order: got %v want %v", got, want)
 	}
-	if events[1].Token == nil || events[1].Token.Text != "partial" || events[1].AttemptID != 1 {
-		t.Fatalf("unexpected first token event: %#v", events[1])
+	if events[2].Output == nil || events[2].Output.Text != "partial" || events[2].AttemptID != 1 {
+		t.Fatalf("unexpected first output event: %#v", events[2])
 	}
-	if events[2].AttemptID != 1 || events[2].RetryCount != 1 || events[2].Iteration == nil {
-		t.Fatalf("retry event did not preserve attempt metadata: %#v", events[2])
+	if events[3].AttemptID != 1 || events[3].RetryCount != 1 || events[3].Iteration == nil {
+		t.Fatalf("retry event did not preserve attempt metadata: %#v", events[3])
 	}
-	if events[4].Token == nil || events[4].Token.Text != "final" || events[4].AttemptID != 2 {
-		t.Fatalf("unexpected final token event: %#v", events[4])
+	if events[5].Output == nil || events[5].Output.Text != "final" || events[5].AttemptID != 2 {
+		t.Fatalf("unexpected final output event: %#v", events[5])
 	}
 	result := workflow.Result()
-	if !result.Complete || result.Text != "partialfinal" || result.Primary.Text != "partialfinal" {
+	if !result.Complete || result.Text != "final" || result.Primary.Text != "final" {
 		t.Fatalf("RunEvents did not finalize workflow result: %+v", result)
 	}
 }
 
-func eventTypes(events []loop.Event) []loop.EventType {
-	types := make([]loop.EventType, len(events))
+func eventTypes(events []agent.Event) []agent.EventType {
+	types := make([]agent.EventType, len(events))
 	for i, event := range events {
 		types[i] = event.Type
 	}

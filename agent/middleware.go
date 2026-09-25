@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/lace-ai/gai/ai"
 	gaictx "github.com/lace-ai/gai/context"
-	"github.com/lace-ai/gai/loop"
 )
 
 var (
@@ -18,17 +16,24 @@ var (
 	ErrMiddlewareErrorPolicyInvalid = errors.New("middleware error policy is invalid")
 )
 
-// OutputPolicy controls how an agent middleware transforms upstream tokens.
+const (
+	stageReasonRecorded   = "recorded_error"
+	stageReasonPropagated = "propagated_error"
+)
+
+// OutputPolicy controls how agent middleware transforms upstream output.
 type OutputPolicy uint8
 
 const (
-	// PreserveOutput forwards upstream tokens and records the middleware agent's
-	// result without exposing its tokens to the caller.
+	// PreserveOutput forwards upstream output and records the middleware-agent
+	// result without emitting its text as EventOutput.
 	PreserveOutput OutputPolicy = iota
-	// AppendOutput forwards upstream tokens followed by middleware-agent tokens.
+	// AppendOutput forwards upstream output, streams nested lifecycle events,
+	// and emits accepted middleware-agent output after the nested run completes.
 	AppendOutput
-	// ReplaceOutput buffers upstream tokens and emits middleware-agent tokens only
-	// when the middleware agent completes successfully.
+	// ReplaceOutput buffers upstream output, streams nested lifecycle events,
+	// and emits accepted middleware-agent output after the nested run succeeds,
+	// restoring upstream output on failure.
 	ReplaceOutput
 )
 
@@ -36,41 +41,34 @@ const (
 type ErrorPolicy uint8
 
 const (
-	// PropagateError sends middleware failures through the workflow error stream.
+	// PropagateError makes a middleware-agent failure fail the workflow.
 	PropagateError ErrorPolicy = iota
-	// RecordError records middleware failures in StageResult without failing the
-	// surrounding workflow.
+	// RecordError retains the failure in StageResult without failing the workflow.
 	RecordError
 )
 
-// AgentMiddlewareConfig configures an agent as stream middleware.
+// AgentMiddlewareConfig configures an agent as ordered event middleware.
 type AgentMiddlewareConfig struct {
-	// Name identifies the stage in WorkflowResult.Stages. The agent name is used
-	// when Name is empty.
+	// Name identifies the stage. The agent name is used when empty.
 	Name string
-	// Output controls how the nested agent changes visible workflow tokens.
+	// Output controls how the stage changes visible workflow output.
 	Output OutputPolicy
-	// MapInput controls exactly what the nested agent receives. When nil, the
-	// current visible text is forwarded as named upstream_output context along
-	// with the original run ID and metadata.
-	MapInput func(ctx context.Context, result WorkflowResult) (RunInput, error)
-	// ErrorPolicy controls whether input-mapping and nested-agent failures
-	// propagate. The zero value is PropagateError.
+	// MapInput maps the accumulated workflow snapshot to the nested run.
+	MapInput func(context.Context, WorkflowResult) (RunInput, error)
+	// ErrorPolicy controls whether stage failures fail the workflow.
 	ErrorPolicy ErrorPolicy
-	// ShouldRun overrides the default success-only policy. It receives the full
-	// upstream result and may enable stages such as failure auditing.
-	ShouldRun func(result WorkflowResult) bool
+	// ShouldRun overrides the default success-only policy.
+	ShouldRun func(WorkflowResult) bool
 }
 
-// AgentMiddleware runs an agent after its upstream stream completes.
+// AgentMiddleware runs an agent after its upstream stream completes. Nested
+// lifecycle events stream as they occur, while nested EventOutput is withheld
+// until its acceptance is known according to the configured OutputPolicy.
 type AgentMiddleware struct {
 	agent  *Agent
 	config AgentMiddlewareConfig
 }
 
-// NewAgentMiddleware adapts an ordinary agent into workflow middleware. Use
-// AgentMiddlewareConfig.MapInput when the nested agent needs a deliberate
-// projection of the upstream workflow state.
 func NewAgentMiddleware(agent *Agent, config AgentMiddlewareConfig) *AgentMiddleware {
 	return &AgentMiddleware{agent: agent, config: config}
 }
@@ -95,59 +93,150 @@ func (m *AgentMiddleware) validate() error {
 }
 
 // Process implements Middleware.
-func (m *AgentMiddleware) Process(ctx context.Context, run *MiddlewareContext, upstream Stream) Stream {
-	tokens := make(chan ai.Token, 16)
-	statuses := make(chan loop.IterationInformation, 16)
-	errs := make(chan error, 1)
-
+func (m *AgentMiddleware) Process(ctx context.Context, run *MiddlewareContext, upstream <-chan Event) <-chan Event {
+	out := make(chan Event)
 	go func() {
-		defer close(tokens)
-		defer close(statuses)
-		defer close(errs)
-
-		upstreamRelay := streamRelay{Statuses: statuses, Errors: errs}
-		if m.config.Output != ReplaceOutput {
-			upstreamRelay.Tokens = tokens
+		defer close(out)
+		var upstreamOutput []Event
+		invalid := make(map[attemptKey]bool)
+		deliver := true
+		for event := range upstream {
+			switch event.Type {
+			case EventRetry, EventDiscard:
+				invalid[eventAttemptKey(event)] = true
+			case EventStageFinish:
+				if event.AttemptID != 0 && (event.StageOutcome == StageFailed || event.StageOutcome == StageCanceled) {
+					invalid[eventAttemptKey(event)] = true
+				}
+			}
+			if event.Type == EventOutput && m.config.Output == ReplaceOutput {
+				upstreamOutput = append(upstreamOutput, cloneEvent(event))
+				continue
+			}
+			deliver = run.workflow.sendEvent(ctx, out, cloneEvent(event), deliver)
 		}
-		upstreamResult := drainStream(ctx, upstream, upstreamRelay)
-		stageCtx, obs := newMiddlewareObserver(ctx, run, m, upstreamResult)
+		restorable := upstreamOutput[:0:0]
+		for _, event := range upstreamOutput {
+			if !invalid[eventAttemptKey(event)] {
+				restorable = append(restorable, event)
+			}
+		}
+		upstreamOutput = restorable
+
+		result := run.Result()
+		stageCtx, obs := newMiddlewareObserver(ctx, run, m, result)
 		obs.Started(stageCtx)
-		result := m.upstreamResult(run, upstreamResult)
+		deliver = run.workflow.sendEvent(ctx, out, Event{Type: EventStageStart, Source: run.Source()}, deliver)
 
 		if result.Canceled {
-			m.restoreReplacement(stageCtx, tokens, upstreamResult.Tokens)
+			deliver = forwardEvents(ctx, run.workflow, out, upstreamOutput, deliver)
 			obs.Skipped(stageCtx, "upstream_canceled")
+			run.workflow.sendEvent(ctx, out, Event{Type: EventStageFinish, Source: run.Source(), StageOutcome: StageSkipped, StageReason: "upstream_canceled"}, deliver)
 			return
 		}
 		if !m.shouldRun(result) {
-			m.restoreReplacement(stageCtx, tokens, upstreamResult.Tokens)
+			deliver = forwardEvents(ctx, run.workflow, out, upstreamOutput, deliver)
 			reason := "predicate"
 			if m.config.ShouldRun == nil && len(result.Errors) > 0 {
 				reason = "upstream_error"
 			}
 			obs.Skipped(stageCtx, reason)
+			run.workflow.sendEvent(ctx, out, Event{Type: EventStageFinish, Source: run.Source(), StageOutcome: StageSkipped, StageReason: reason}, deliver)
 			return
 		}
 
 		input, err := m.input(stageCtx, result)
 		if err != nil {
-			m.finishStage(stageCtx, run, tokens, errs, upstreamResult.Tokens, AgentResult{Errors: []error{err}}, obs)
+			m.finishFailure(stageCtx, run, out, upstreamOutput, AgentResult{Errors: []error{err}}, obs, err, false, deliver)
 			return
 		}
 
-		stageResult := m.runStage(stageCtx, input)
-		m.finishStage(stageCtx, run, tokens, errs, upstreamResult.Tokens, stageResult, obs)
-	}()
+		stageResult, nestedOutput, terminalErr := m.runStage(stageCtx, input, run.Source(), func(event Event) {
+			deliver = run.workflow.sendEvent(ctx, out, event, deliver)
+		})
+		if terminalErr != nil || stageResult.Canceled || len(stageResult.Errors) > 0 {
+			if terminalErr == nil {
+				terminalErr = errors.Join(stageResult.Errors...)
+				if stageResult.Canceled {
+					terminalErr = stageResult.CancellationErr
+				}
+			}
+			m.finishFailure(stageCtx, run, out, upstreamOutput, stageResult, obs, terminalErr, stageResult.Canceled, deliver)
+			return
+		}
 
-	return Stream{Tokens: tokens, Statuses: statuses, Errors: errs}
+		deliver = forwardEvents(ctx, run.workflow, out, nestedOutput, deliver)
+		run.workflow.addStage(StageResult{Name: m.name(), Output: m.config.Output, Result: stageResult})
+		obs.Finished(stageCtx, stageResult, m.config.Output != PreserveOutput)
+		run.workflow.sendEvent(ctx, out, Event{Type: EventStageFinish, Source: run.Source(), StageOutcome: StageSucceeded}, deliver)
+	}()
+	return out
 }
 
-func (m *AgentMiddleware) upstreamResult(run *MiddlewareContext, captured capturedStream) WorkflowResult {
-	result := run.Result()
-	result.AttemptedTokens = cloneTokens(captured.Tokens)
-	result.AttemptedText = tokenText(captured.Tokens)
-	result.Errors = append([]error(nil), captured.Errors...)
-	return result
+func (m *AgentMiddleware) finishFailure(
+	ctx context.Context,
+	run *MiddlewareContext,
+	out chan<- Event,
+	upstreamOutput []Event,
+	result AgentResult,
+	obs *middlewareObserver,
+	err error,
+	canceled bool,
+	deliver bool,
+) {
+	deliver = forwardEvents(ctx, run.workflow, out, upstreamOutput, deliver)
+	run.workflow.addStage(StageResult{Name: m.name(), Output: m.config.Output, Result: result})
+	obs.Finished(ctx, result, false)
+	outcome := StageFailed
+	reason := stageReasonRecorded
+	if canceled {
+		outcome = StageCanceled
+		reason = "canceled"
+	} else if m.config.ErrorPolicy == PropagateError {
+		reason = stageReasonPropagated
+	}
+	run.workflow.sendEvent(ctx, out, Event{Type: EventStageFinish, Source: run.Source(), StageOutcome: outcome, StageReason: reason, Err: err}, deliver)
+}
+
+func forwardEvents(ctx context.Context, workflow *Workflow, out chan<- Event, events []Event, deliver bool) bool {
+	for _, event := range events {
+		deliver = workflow.sendEvent(ctx, out, cloneEvent(event), deliver)
+	}
+	return deliver
+}
+
+func (m *AgentMiddleware) runStage(ctx context.Context, input RunInput, source EventSource, forward func(Event)) (AgentResult, []Event, error) {
+	workflow, err := m.agent.NewRun(ctx, input)
+	if err != nil {
+		return AgentResult{Errors: []error{err}}, nil, err
+	}
+	var output []Event
+	invalid := make(map[attemptKey]bool)
+	for event := range workflow.RunEvents(ctx) {
+		switch event.Type {
+		case EventStageStart, EventStageFinish, EventDone, EventError, EventCanceled:
+			continue
+		}
+		event.Source = source
+		if event.Type == EventOutput {
+			if m.config.Output != PreserveOutput {
+				output = append(output, cloneEvent(event))
+			}
+			continue
+		}
+		if event.Type == EventRetry || event.Type == EventDiscard {
+			invalid[eventAttemptKey(event)] = true
+		}
+		forward(cloneEvent(event))
+	}
+	result, err := workflow.Wait()
+	accepted := output[:0:0]
+	for _, event := range output {
+		if !invalid[eventAttemptKey(event)] {
+			accepted = append(accepted, event)
+		}
+	}
+	return result.Primary, accepted, err
 }
 
 func (m *AgentMiddleware) shouldRun(result WorkflowResult) bool {
@@ -174,60 +263,6 @@ func (m *AgentMiddleware) input(ctx context.Context, result WorkflowResult) (Run
 	}, nil
 }
 
-func (m *AgentMiddleware) runStage(ctx context.Context, input RunInput) AgentResult {
-	workflow, err := m.agent.NewRun(ctx, input)
-	if err != nil {
-		return AgentResult{Errors: []error{err}}
-	}
-	tokens, statuses, errs := workflow.Run(ctx)
-	captured := drainStream(ctx, Stream{Tokens: tokens, Statuses: statuses, Errors: errs}, streamRelay{})
-	result := workflow.Result().Primary
-	result.AttemptedTokens = cloneTokens(captured.Tokens)
-	result.AttemptedText = tokenText(captured.Tokens)
-	result.Errors = append([]error(nil), captured.Errors...)
-	return result
-}
-
-func (m *AgentMiddleware) finishStage(
-	ctx context.Context,
-	run *MiddlewareContext,
-	tokens chan<- ai.Token,
-	errs chan<- error,
-	upstreamTokens []ai.Token,
-	result AgentResult,
-	obs *middlewareObserver,
-) {
-	failed := len(result.Errors) > 0
-	visible := cloneTokens(upstreamTokens)
-	if failed {
-		if m.config.ErrorPolicy == PropagateError {
-			forwardErrors(ctx, errs, result.Errors)
-		}
-		m.restoreReplacement(ctx, tokens, upstreamTokens)
-	} else {
-		switch m.config.Output {
-		case AppendOutput:
-			forwardTokens(ctx, tokens, result.Tokens)
-			visible = append(visible, cloneTokens(result.Tokens)...)
-		case ReplaceOutput:
-			forwardTokens(ctx, tokens, result.Tokens)
-			visible = cloneTokens(result.Tokens)
-		}
-	}
-	run.workflow.addStage(StageResult{
-		Name:   m.name(),
-		Output: m.config.Output,
-		Result: result,
-	}, visible)
-	obs.Finished(ctx, result, !failed && m.config.Output != PreserveOutput)
-}
-
-func (m *AgentMiddleware) restoreReplacement(ctx context.Context, tokens chan<- ai.Token, upstream []ai.Token) {
-	if m.config.Output == ReplaceOutput {
-		forwardTokens(ctx, tokens, upstream)
-	}
-}
-
 func (m *AgentMiddleware) name() string {
 	if m == nil {
 		return ""
@@ -239,18 +274,4 @@ func (m *AgentMiddleware) name() string {
 		return m.agent.def.Name
 	}
 	return ""
-}
-
-func forwardTokens(ctx context.Context, output chan<- ai.Token, tokens []ai.Token) {
-	for _, token := range tokens {
-		send(ctx, output, token)
-	}
-}
-
-func forwardErrors(ctx context.Context, output chan<- error, errs []error) {
-	for _, err := range errs {
-		if err != nil {
-			send(ctx, output, err)
-		}
-	}
 }

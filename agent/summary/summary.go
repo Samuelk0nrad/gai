@@ -136,47 +136,12 @@ func (s Summarizer) Summarize(ctx context.Context, req Request) (string, error) 
 	}
 
 	runCtx := context.WithValue(ctx, activeKey{}, true)
-	tokenCh, statusCh, errCh := workflow.Run(runCtx)
-	statusDone := make(chan struct{})
-	go func() {
-		defer close(statusDone)
-		for range statusCh {
-		}
-	}()
-	errDone := make(chan error, 1)
-	go func() {
-		var firstErr error
-		for err := range errCh {
-			if firstErr == nil && err != nil {
-				firstErr = err
-			}
-		}
-		errDone <- firstErr
-	}()
-
-	var summary []byte
-	for token := range tokenCh {
-		if token.Err != nil {
-			<-statusDone
-			<-errDone
-			return "", token.Err
-		}
-		switch token.Type {
-		case ai.TokenTypeText:
-			if token.Text != "" {
-				summary = append(summary, token.Text...)
-			} else {
-				summary = append(summary, token.Data...)
-			}
-		}
-	}
-
-	<-statusDone
-	if err := <-errDone; err != nil {
+	result, err := workflow.Run(runCtx)
+	if err != nil {
 		return "", err
 	}
-	if len(summary) == 0 {
+	if result.Text == "" {
 		return "", fmt.Errorf("%w: summary agent produced no text", gaictx.ErrPromptSource)
 	}
-	return string(summary), nil
+	return result.Text, nil
 }
