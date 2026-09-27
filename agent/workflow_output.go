@@ -202,14 +202,17 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 			terminal.Err = errors.Join(w.result.Errors...)
 			w.terminalErr = terminal.Err
 		}
-		w.result.Complete = true
 		result := cloneWorkflowResult(w.result)
+		result.Complete = true
 		w.mu.Unlock()
 
 		obs.Finished(ctx, result)
 		runObs.Finished(result)
 		sendTerminalWorkflowEvent(ctx, out, terminal, deliver)
 		close(out)
+		w.mu.Lock()
+		w.result.Complete = true
+		w.mu.Unlock()
 		close(w.done)
 	}()
 	return out
