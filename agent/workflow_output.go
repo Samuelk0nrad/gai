@@ -199,7 +199,7 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 
 func containsError(errs []error, target error) bool {
 	for _, err := range errs {
-		if err == target || (err != nil && target != nil && err.Error() == target.Error()) {
+		if errors.Is(err, target) || (err != nil && target != nil && err.Error() == target.Error()) {
 			return true
 		}
 	}
