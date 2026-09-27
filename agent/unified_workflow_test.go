@@ -263,6 +263,45 @@ func TestWorkflowCanceledDeliveryPreservesPrimaryOutput(t *testing.T) {
 	}
 }
 
+func TestWorkflowCancellationAfterMiddlewareOutputRetainsAcceptedOutput(t *testing.T) {
+	middleware := agent.MiddlewareFunc(func(ctx context.Context, run *agent.MiddlewareContext, upstream <-chan agent.Event) <-chan agent.Event {
+		out := make(chan agent.Event)
+		go func() {
+			defer close(out)
+			for event := range upstream {
+				out <- event
+			}
+			out <- agent.Event{Type: agent.EventOutput, Source: run.Source(), Output: &agent.OutputPart{Kind: agent.OutputText, Text: " polished"}}
+			<-ctx.Done()
+			out <- agent.Event{Type: agent.EventToolStart, Source: run.Source()}
+			out <- agent.Event{Type: agent.EventToolResult, Source: run.Source()}
+			out <- agent.Event{Type: agent.EventStageFinish, Source: run.Source(), StageOutcome: agent.StageSucceeded}
+		}()
+		return out
+	})
+	workflow, err := workflowAgent("main", "answer", middleware).NewRun(context.Background(), textRunInput("question"))
+	if err != nil {
+		t.Fatalf("NewRun failed: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := workflow.RunEvents(ctx)
+	for event := range stream {
+		if event.Type == agent.EventOutput && event.Source.Kind == agent.SourceMiddleware {
+			cancel()
+			break
+		}
+	}
+
+	result, waitErr := workflow.Wait()
+	if waitErr != nil {
+		t.Fatalf("Wait failed: %v", waitErr)
+	}
+	if result.Text != "answer polished" {
+		t.Fatalf("result text = %q, want accepted middleware output", result.Text)
+	}
+}
+
 func TestWorkflowCanceledAbandonedEventStreamStillCompletes(t *testing.T) {
 	stopsOnCancellation := agent.MiddlewareFunc(func(ctx context.Context, _ *agent.MiddlewareContext, _ <-chan agent.Event) <-chan agent.Event {
 		out := make(chan agent.Event)

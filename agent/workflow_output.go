@@ -28,12 +28,23 @@ func sendWorkflowEvent(ctx context.Context, out chan<- Event, event Event, deliv
 
 func (w *Workflow) sendEvent(ctx context.Context, out chan<- Event, event Event, deliver bool) bool {
 	delivered := sendWorkflowEvent(ctx, out, event, deliver)
-	if deliver && !delivered {
+	if !delivered && eventAffectsOutputReduction(event) {
 		w.mu.Lock()
 		w.deliveryIncomplete = true
 		w.mu.Unlock()
 	}
 	return delivered
+}
+
+func eventAffectsOutputReduction(event Event) bool {
+	switch event.Type {
+	case EventOutput, EventRetry, EventDiscard:
+		return true
+	case EventStageFinish:
+		return event.AttemptID != 0 && (event.StageOutcome == StageFailed || event.StageOutcome == StageCanceled)
+	default:
+		return false
+	}
 }
 
 func sendTerminalWorkflowEvent(ctx context.Context, out chan Event, event Event, deliver bool) {
