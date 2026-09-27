@@ -390,6 +390,96 @@ func TestWorkflowAbandonedDeliveryRetainsCompletedTransformations(t *testing.T) 
 	})
 }
 
+func TestWorkflowCanceledNestedFailurePersistsUnderDownstreamBackpressure(t *testing.T) {
+	toolRelease := make(chan struct{})
+	nested := agent.New(agent.Definition{
+		Name: "nested",
+		Model: &scriptedWorkflowModel{scripts: [][]ai.Token{{{
+			Type: ai.TokenTypeToolCall,
+			ToolCall: &ai.ToolCall{
+				ID:   "call_1",
+				Type: "function",
+				Name: "echo",
+				Args: []byte(`{"text":"blocked"}`),
+			},
+		}}}},
+		Tools: []loop.Tool{gatedWorkflowTool{Tool: loop.NewEchoTool(), release: toolRelease}},
+		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+			return &testPromptBuilder{}, nil
+		},
+		Limits: agent.Limits{MaxLoopIterations: 2},
+	})
+
+	backpressured := make(chan struct{})
+	releaseDownstream := make(chan struct{})
+	backpressure := agent.MiddlewareFunc(func(_ context.Context, _ *agent.MiddlewareContext, upstream <-chan agent.Event) <-chan agent.Event {
+		out := make(chan agent.Event)
+		go func() {
+			defer close(out)
+			blocked := false
+			for event := range upstream {
+				if !blocked && event.Type == agent.EventToolStart && event.Source.Kind == agent.SourceMiddleware {
+					blocked = true
+					close(backpressured)
+					<-releaseDownstream
+				}
+			}
+		}()
+		return out
+	})
+
+	main := workflowAgent("main", "answer",
+		agent.NewAgentMiddleware(nested, agent.AgentMiddlewareConfig{ErrorPolicy: agent.PropagateError}),
+		backpressure,
+	)
+	workflow, err := main.NewRun(context.Background(), textRunInput("question"))
+	if err != nil {
+		t.Fatalf("NewRun failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer func() {
+		select {
+		case <-releaseDownstream:
+		default:
+			close(releaseDownstream)
+		}
+	}()
+	stream := workflow.RunEvents(ctx)
+	select {
+	case <-backpressured:
+	case <-time.After(time.Second):
+		t.Fatal("nested tool start did not reach the backpressured middleware")
+	}
+	cancel()
+
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for len(workflow.Result().Stages) == 0 {
+		select {
+		case <-deadline.C:
+			t.Fatal("nested stage outcome was not recorded while downstream remained blocked")
+		case <-ticker.C:
+		}
+	}
+	close(releaseDownstream)
+
+	events := collectAgentEvents(stream)
+	result, waitErr := workflow.Wait()
+	if !errors.Is(waitErr, context.Canceled) || !result.Canceled || !errors.Is(result.CancellationErr, context.Canceled) {
+		t.Fatalf("Wait = (%+v, %v), want canceled nested stage to cancel workflow", result, waitErr)
+	}
+	if len(result.Stages) != 1 || !result.Stages[0].Result.Canceled {
+		t.Fatalf("nested cancellation was not retained in stage result: %+v", result.Stages)
+	}
+	if len(events) == 0 || events[len(events)-1].Type != agent.EventCanceled {
+		t.Fatalf("terminal event = %#v, want EventCanceled", events)
+	}
+}
+
 func TestWorkflowCanceledAbandonedEventStreamStillCompletes(t *testing.T) {
 	stopsOnCancellation := agent.MiddlewareFunc(func(ctx context.Context, _ *agent.MiddlewareContext, _ <-chan agent.Event) <-chan agent.Event {
 		out := make(chan agent.Event)

@@ -147,7 +147,7 @@ func (m *AgentMiddleware) Process(ctx context.Context, run *MiddlewareContext, u
 
 		input, err := m.input(stageCtx, result)
 		if err != nil {
-			m.finishFailure(stageCtx, run, out, upstreamOutput, AgentResult{Errors: []error{err}}, obs, err, false, deliver)
+			m.finishFailure(stageCtx, run, out, upstreamOutput, AgentResult{Errors: []error{err}}, obs, err, false)
 			return
 		}
 
@@ -161,7 +161,7 @@ func (m *AgentMiddleware) Process(ctx context.Context, run *MiddlewareContext, u
 					terminalErr = stageResult.CancellationErr
 				}
 			}
-			m.finishFailure(stageCtx, run, out, upstreamOutput, stageResult, obs, terminalErr, stageResult.Canceled, deliver)
+			m.finishFailure(stageCtx, run, out, upstreamOutput, stageResult, obs, terminalErr, stageResult.Canceled)
 			return
 		}
 
@@ -182,7 +182,6 @@ func (m *AgentMiddleware) finishFailure(
 	obs *middlewareObserver,
 	err error,
 	canceled bool,
-	deliver bool,
 ) {
 	forwardOutputEvents(out, upstreamOutput)
 	run.workflow.addStage(StageResult{Name: m.name(), Output: m.config.Output, Result: result})
@@ -195,7 +194,7 @@ func (m *AgentMiddleware) finishFailure(
 	} else if m.config.ErrorPolicy == PropagateError {
 		reason = stageReasonPropagated
 	}
-	run.workflow.sendEvent(ctx, out, Event{Type: EventStageFinish, Source: run.Source(), StageOutcome: outcome, StageReason: reason, Err: err}, deliver)
+	out <- Event{Type: EventStageFinish, Source: run.Source(), StageOutcome: outcome, StageReason: reason, Err: err}
 }
 
 func forwardOutputEvents(out chan<- Event, events []Event) {
