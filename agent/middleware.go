@@ -129,13 +129,13 @@ func (m *AgentMiddleware) Process(ctx context.Context, run *MiddlewareContext, u
 		deliver = run.workflow.sendEvent(ctx, out, Event{Type: EventStageStart, Source: run.Source()}, deliver)
 
 		if result.Canceled {
-			deliver = forwardEvents(ctx, run.workflow, out, upstreamOutput, deliver)
+			forwardOutputEvents(out, upstreamOutput)
 			obs.Skipped(stageCtx, "upstream_canceled")
 			run.workflow.sendEvent(ctx, out, Event{Type: EventStageFinish, Source: run.Source(), StageOutcome: StageSkipped, StageReason: "upstream_canceled"}, deliver)
 			return
 		}
 		if !m.shouldRun(result) {
-			deliver = forwardEvents(ctx, run.workflow, out, upstreamOutput, deliver)
+			forwardOutputEvents(out, upstreamOutput)
 			reason := "predicate"
 			if m.config.ShouldRun == nil && len(result.Errors) > 0 {
 				reason = "upstream_error"
@@ -165,7 +165,7 @@ func (m *AgentMiddleware) Process(ctx context.Context, run *MiddlewareContext, u
 			return
 		}
 
-		deliver = forwardEvents(ctx, run.workflow, out, nestedOutput, deliver)
+		forwardOutputEvents(out, nestedOutput)
 		run.workflow.addStage(StageResult{Name: m.name(), Output: m.config.Output, Result: stageResult})
 		obs.Finished(stageCtx, stageResult, m.config.Output != PreserveOutput)
 		run.workflow.sendEvent(ctx, out, Event{Type: EventStageFinish, Source: run.Source(), StageOutcome: StageSucceeded}, deliver)
@@ -184,7 +184,7 @@ func (m *AgentMiddleware) finishFailure(
 	canceled bool,
 	deliver bool,
 ) {
-	deliver = forwardEvents(ctx, run.workflow, out, upstreamOutput, deliver)
+	forwardOutputEvents(out, upstreamOutput)
 	run.workflow.addStage(StageResult{Name: m.name(), Output: m.config.Output, Result: result})
 	obs.Finished(ctx, result, false)
 	outcome := StageFailed
@@ -198,11 +198,10 @@ func (m *AgentMiddleware) finishFailure(
 	run.workflow.sendEvent(ctx, out, Event{Type: EventStageFinish, Source: run.Source(), StageOutcome: outcome, StageReason: reason, Err: err}, deliver)
 }
 
-func forwardEvents(ctx context.Context, workflow *Workflow, out chan<- Event, events []Event, deliver bool) bool {
+func forwardOutputEvents(out chan<- Event, events []Event) {
 	for _, event := range events {
-		deliver = workflow.sendEvent(ctx, out, cloneEvent(event), deliver)
+		out <- cloneEvent(event)
 	}
-	return deliver
 }
 
 func (m *AgentMiddleware) runStage(ctx context.Context, input RunInput, source EventSource, forward func(Event)) (AgentResult, []Event, error) {

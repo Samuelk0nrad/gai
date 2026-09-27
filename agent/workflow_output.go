@@ -136,14 +136,21 @@ func (w *Workflow) captureMiddlewareOutput(ctx context.Context, upstream <-chan 
 		defer close(out)
 		var accumulator workflowOutputAccumulator
 		deliver := true
+		downstreamIncomplete := false
 		for event := range upstream {
 			accumulator.add(event)
-			deliver = w.sendEvent(ctx, out, cloneEvent(event), deliver)
+			deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
+			if !deliver && eventAffectsOutputReduction(event) {
+				downstreamIncomplete = true
+			}
 		}
 		output, _, stageErrs, canceled, cancellationErr := accumulator.result()
 		w.mu.Lock()
 		if !w.deliveryIncomplete {
 			w.setVisibleOutputLocked(output)
+		}
+		if downstreamIncomplete {
+			w.deliveryIncomplete = true
 		}
 		for _, err := range stageErrs {
 			if err != nil && !containsError(w.result.Errors, err) {
@@ -169,7 +176,7 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 				continue
 			}
 			accumulator.add(event)
-			deliver = w.sendEvent(ctx, out, cloneEvent(event), deliver)
+			deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
 		}
 		<-w.primaryDone
 

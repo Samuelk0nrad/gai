@@ -302,6 +302,94 @@ func TestWorkflowCancellationAfterMiddlewareOutputRetainsAcceptedOutput(t *testi
 	}
 }
 
+func TestWorkflowAbandonedDeliveryRetainsCompletedTransformations(t *testing.T) {
+	t.Run("multi-chunk replacement", func(t *testing.T) {
+		replacement := agent.New(agent.Definition{
+			Name: "replacement",
+			Model: &scriptedWorkflowModel{scripts: [][]ai.Token{{
+				{Type: ai.TokenTypeText, Text: "SAFE"},
+				{Type: ai.TokenTypeText, Text: " "},
+				{Type: ai.TokenTypeText, Text: "RE"},
+				{Type: ai.TokenTypeText, Text: "PLACE"},
+				{Type: ai.TokenTypeText, Text: "MENT"},
+			}}},
+			Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+				return &testPromptBuilder{}, nil
+			},
+			Limits: agent.Limits{MaxLoopIterations: 1},
+		})
+		main := workflowAgent("main", "RAW PRIMARY", agent.NewAgentMiddleware(replacement, agent.AgentMiddlewareConfig{Output: agent.ReplaceOutput}))
+		workflow, err := main.NewRun(context.Background(), textRunInput("question"))
+		if err != nil {
+			t.Fatalf("NewRun failed: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		for event := range workflow.RunEvents(ctx) {
+			if event.Type == agent.EventOutput && event.Source.Kind == agent.SourceMiddleware {
+				cancel()
+				break
+			}
+		}
+
+		result, waitErr := workflow.Wait()
+		if waitErr != nil {
+			t.Fatalf("Wait failed: %v", waitErr)
+		}
+		if len(result.Stages) != 1 || result.Stages[0].Result.Text != "SAFE REPLACEMENT" {
+			t.Fatalf("replacement stage result = %#v", result.Stages)
+		}
+		if result.Text != "SAFE REPLACEMENT" {
+			t.Fatalf("result text = %q, want completed replacement", result.Text)
+		}
+	})
+
+	t.Run("structured output", func(t *testing.T) {
+		structured := agent.MiddlewareFunc(func(_ context.Context, run *agent.MiddlewareContext, upstream <-chan agent.Event) <-chan agent.Event {
+			out := make(chan agent.Event)
+			go func() {
+				defer close(out)
+				for range upstream {
+				}
+				for _, id := range []string{"safe", "structured", "result"} {
+					out <- agent.Event{
+						Type:   agent.EventOutput,
+						Source: run.Source(),
+						Output: &agent.OutputPart{Kind: agent.OutputData, Data: &agent.StructuredOutput{Name: "item", JSON: json.RawMessage(`{"id":"` + id + `"}`)}},
+					}
+				}
+				out <- agent.Event{Type: agent.EventStageFinish, Source: run.Source(), StageOutcome: agent.StageSucceeded}
+			}()
+			return out
+		})
+		workflow, err := workflowAgent("main", "RAW PRIMARY", structured).NewRun(context.Background(), textRunInput("question"))
+		if err != nil {
+			t.Fatalf("NewRun failed: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		for event := range workflow.RunEvents(ctx) {
+			if event.Type == agent.EventOutput && event.Output != nil && event.Output.Kind == agent.OutputData {
+				cancel()
+				break
+			}
+		}
+
+		result, waitErr := workflow.Wait()
+		if waitErr != nil {
+			t.Fatalf("Wait failed: %v", waitErr)
+		}
+		want := []agent.OutputPart{
+			{Kind: agent.OutputData, Data: &agent.StructuredOutput{Name: "item", JSON: json.RawMessage(`{"id":"safe"}`)}},
+			{Kind: agent.OutputData, Data: &agent.StructuredOutput{Name: "item", JSON: json.RawMessage(`{"id":"structured"}`)}},
+			{Kind: agent.OutputData, Data: &agent.StructuredOutput{Name: "item", JSON: json.RawMessage(`{"id":"result"}`)}},
+		}
+		if !reflect.DeepEqual(result.Output, want) {
+			t.Fatalf("result output = %#v, want %#v", result.Output, want)
+		}
+	})
+}
+
 func TestWorkflowCanceledAbandonedEventStreamStillCompletes(t *testing.T) {
 	stopsOnCancellation := agent.MiddlewareFunc(func(ctx context.Context, _ *agent.MiddlewareContext, _ <-chan agent.Event) <-chan agent.Event {
 		out := make(chan agent.Event)
