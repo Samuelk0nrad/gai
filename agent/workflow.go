@@ -73,6 +73,7 @@ type Workflow struct {
 	terminalErr        error
 	deliveryIncomplete bool
 	stageErrorsSeen    map[stageErrorKey]struct{}
+	primaryOutput      []Event
 	result             WorkflowResult
 }
 

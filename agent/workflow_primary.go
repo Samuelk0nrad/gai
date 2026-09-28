@@ -10,13 +10,37 @@ import (
 )
 
 type primaryAccumulator struct {
-	attempted []ai.Token
-	accepted  []loop.Iteration
-	billed    ai.Usage
-	billedKey map[attemptKey]struct{}
-	errs      []error
-	canceled  bool
-	cancelErr error
+	attempted        []ai.Token
+	accepted         []loop.Iteration
+	outputs          []Event
+	acceptedAttempts map[attemptKey]struct{}
+	billed           ai.Usage
+	billedKey        map[attemptKey]struct{}
+	errs             []error
+	canceled         bool
+	cancelErr        error
+}
+
+func (a *primaryAccumulator) recordOutput(event Event) {
+	switch event.Type {
+	case EventOutput:
+		a.outputs = append(a.outputs, cloneEvent(event))
+	case EventIterationDone:
+		if a.acceptedAttempts == nil {
+			a.acceptedAttempts = make(map[attemptKey]struct{})
+		}
+		a.acceptedAttempts[eventAttemptKey(event)] = struct{}{}
+	}
+}
+
+func (a *primaryAccumulator) acceptedOutput() []Event {
+	var accepted []Event
+	for _, event := range a.outputs {
+		if _, ok := a.acceptedAttempts[eventAttemptKey(event)]; ok {
+			accepted = append(accepted, cloneEvent(event))
+		}
+	}
+	return accepted
 }
 
 func (a *primaryAccumulator) account(event Event) {
@@ -64,6 +88,9 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 		var terminal Event
 		for low := range upstream {
 			event, emit := mapLoopEvent(low, source)
+			if emit {
+				acc.recordOutput(event)
+			}
 			if low.Type == loop.EventToken && low.Token != nil {
 				acc.attempted = append(acc.attempted, cloneTokens([]ai.Token{*low.Token})[0])
 			}
@@ -105,6 +132,7 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 		w.result.Errors = append([]error(nil), primary.Errors...)
 		w.result.Canceled = primary.Canceled
 		w.result.CancellationErr = primary.CancellationErr
+		w.primaryOutput = acc.acceptedOutput()
 		w.setVisibleOutputLocked(outputPartsFromTokens(primary.Tokens))
 		w.result.AttemptedTokens = cloneTokens(primary.AttemptedTokens)
 		w.result.AttemptedText = primary.AttemptedText
@@ -113,6 +141,16 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 		w.sendEvent(ctx, out, cloneEvent(terminal), deliver)
 	}()
 	return out
+}
+
+func (w *Workflow) canonicalPrimaryOutput() []Event {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	output := make([]Event, len(w.primaryOutput))
+	for i, event := range w.primaryOutput {
+		output[i] = cloneEvent(event)
+	}
+	return output
 }
 
 func mapLoopEvent(low loop.Event, source EventSource) (Event, bool) {

@@ -208,8 +208,6 @@ func (m *AgentMiddleware) runStage(ctx context.Context, input RunInput, source E
 	if err != nil {
 		return AgentResult{Errors: []error{err}}, nil, err
 	}
-	var output []Event
-	invalid := make(map[attemptKey]bool)
 	for event := range workflow.RunEvents(ctx) {
 		switch event.Type {
 		case EventStageStart, EventStageFinish, EventDone, EventError, EventCanceled:
@@ -217,21 +215,16 @@ func (m *AgentMiddleware) runStage(ctx context.Context, input RunInput, source E
 		}
 		event.Source = source
 		if event.Type == EventOutput {
-			if m.config.Output != PreserveOutput {
-				output = append(output, cloneEvent(event))
-			}
 			continue
-		}
-		if event.Type == EventRetry || event.Type == EventDiscard {
-			invalid[eventAttemptKey(event)] = true
 		}
 		forward(cloneEvent(event))
 	}
 	result, err := workflow.Wait()
-	accepted := output[:0:0]
-	for _, event := range output {
-		if !invalid[eventAttemptKey(event)] {
-			accepted = append(accepted, event)
+	var accepted []Event
+	if m.config.Output != PreserveOutput {
+		accepted = workflow.canonicalPrimaryOutput()
+		for i := range accepted {
+			accepted[i].Source = source
 		}
 	}
 	return result.Primary, accepted, err
