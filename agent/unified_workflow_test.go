@@ -480,6 +480,91 @@ func TestWorkflowCanceledNestedFailurePersistsUnderDownstreamBackpressure(t *tes
 	}
 }
 
+func TestWorkflowWaitsForUpstreamMiddlewareAfterDownstreamCancellation(t *testing.T) {
+	mapStarted := make(chan struct{})
+	releaseMap := make(chan struct{})
+	mapErr := errors.New("map input failed after cancellation")
+	blocked := agent.NewAgentMiddleware(workflowAgent("blocked", "unused"), agent.AgentMiddlewareConfig{
+		ErrorPolicy: agent.PropagateError,
+		MapInput: func(context.Context, agent.WorkflowResult) (agent.RunInput, error) {
+			close(mapStarted)
+			<-releaseMap
+			return agent.RunInput{}, mapErr
+		},
+	})
+	stopsOnCancellation := agent.MiddlewareFunc(func(ctx context.Context, _ *agent.MiddlewareContext, upstream <-chan agent.Event) <-chan agent.Event {
+		out := make(chan agent.Event)
+		go func() {
+			defer close(out)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case _, ok := <-upstream:
+					if !ok {
+						return
+					}
+				}
+			}
+		}()
+		return out
+	})
+	workflow, err := workflowAgent("main", "answer", blocked, stopsOnCancellation).NewRun(context.Background(), textRunInput("question"))
+	if err != nil {
+		t.Fatalf("NewRun failed: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	releasedMap := false
+	defer func() {
+		if !releasedMap {
+			close(releaseMap)
+		}
+	}()
+	stream := workflow.RunEvents(ctx)
+	select {
+	case <-mapStarted:
+	case <-time.After(time.Second):
+		t.Fatal("upstream middleware did not reach MapInput")
+	}
+	cancel()
+
+	waited := make(chan struct{})
+	var result agent.WorkflowResult
+	var waitErr error
+	go func() {
+		result, waitErr = workflow.Wait()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+		t.Fatalf("Wait completed before the upstream middleware: (%+v, %v)", result, waitErr)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if snapshot := workflow.Result(); snapshot.Complete {
+		t.Fatalf("Result().Complete = true while upstream middleware is still running: %+v", snapshot)
+	}
+
+	releasedMap = true
+	close(releaseMap)
+	select {
+	case <-waited:
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not complete after the upstream middleware finished")
+	}
+	if !errors.Is(waitErr, mapErr) || !result.Complete || len(result.Errors) != 1 || !errors.Is(result.Errors[0], mapErr) {
+		t.Fatalf("Wait = (%+v, %v), want stable propagated MapInput failure", result, waitErr)
+	}
+	second, secondErr := workflow.Wait()
+	if !errors.Is(secondErr, mapErr) || len(second.Errors) != 1 || !errors.Is(second.Errors[0], mapErr) {
+		t.Fatalf("repeated Wait = (%+v, %v), want same propagated MapInput failure", second, secondErr)
+	}
+	events := collectAgentEvents(stream)
+	if len(events) == 0 || events[len(events)-1].Type != agent.EventError || !errors.Is(events[len(events)-1].Err, mapErr) {
+		t.Fatalf("terminal event = %#v, want propagated MapInput error", events)
+	}
+}
+
 func TestWorkflowCanceledAbandonedEventStreamStillCompletes(t *testing.T) {
 	stopsOnCancellation := agent.MiddlewareFunc(func(ctx context.Context, _ *agent.MiddlewareContext, _ <-chan agent.Event) <-chan agent.Event {
 		out := make(chan agent.Event)

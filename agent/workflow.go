@@ -66,6 +66,7 @@ type Workflow struct {
 	debug      gai.ObservationSink
 
 	mu                 sync.RWMutex
+	middlewareDone     sync.WaitGroup
 	started            bool
 	done               chan struct{}
 	primaryDone        chan struct{}

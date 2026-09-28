@@ -146,7 +146,9 @@ func (a *workflowOutputAccumulator) result() (accepted []OutputPart, attempted [
 
 func (w *Workflow) captureMiddlewareOutput(ctx context.Context, upstream <-chan Event) <-chan Event {
 	out := make(chan Event)
+	w.middlewareDone.Add(1)
 	go func() {
+		defer w.middlewareDone.Done()
 		defer close(out)
 		var accumulator workflowOutputAccumulator
 		deliver := true
@@ -188,6 +190,7 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 			accumulator.add(event)
 			deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
 		}
+		w.middlewareDone.Wait()
 		<-w.primaryDone
 
 		output, attempted, stageErrs, _, _ := accumulator.result()
