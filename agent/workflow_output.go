@@ -77,10 +77,20 @@ type outputRecord struct {
 	part OutputPart
 }
 
+type stageErrorKey struct {
+	kind    EventSourceKind
+	attempt attemptKey
+}
+
+type stageError struct {
+	key stageErrorKey
+	err error
+}
+
 type workflowOutputAccumulator struct {
 	outputs         []outputRecord
 	invalid         map[attemptKey]struct{}
-	stageErrs       []error
+	stageErrs       []stageError
 	canceled        bool
 	cancellationErr error
 }
@@ -110,8 +120,12 @@ func (a *workflowOutputAccumulator) add(event Event) {
 		if event.AttemptID != 0 {
 			a.invalidate(eventAttemptKey(event))
 		}
-		if event.StageOutcome == StageFailed && event.Err != nil && event.StageReason != stageReasonRecorded {
-			a.stageErrs = append(a.stageErrs, event.Err)
+		// mapPrimary records primary errors independently of event delivery.
+		if event.StageOutcome == StageFailed && event.Err != nil && event.StageReason != stageReasonRecorded && event.Source.Kind != SourcePrimary {
+			a.stageErrs = append(a.stageErrs, stageError{
+				key: stageErrorKey{kind: event.Source.Kind, attempt: eventAttemptKey(event)},
+				err: event.Err,
+			})
 		}
 		if event.StageOutcome == StageCanceled && !a.canceled {
 			a.canceled = true
@@ -120,14 +134,14 @@ func (a *workflowOutputAccumulator) add(event Event) {
 	}
 }
 
-func (a *workflowOutputAccumulator) result() (accepted []OutputPart, attempted []OutputPart, stageErrs []error, canceled bool, cancellationErr error) {
+func (a *workflowOutputAccumulator) result() (accepted []OutputPart, attempted []OutputPart, stageErrs []stageError, canceled bool, cancellationErr error) {
 	for _, output := range a.outputs {
 		attempted = append(attempted, cloneOutputPart(output.part))
 		if _, discarded := a.invalid[output.key]; !discarded {
 			accepted = append(accepted, cloneOutputPart(output.part))
 		}
 	}
-	return accepted, attempted, append([]error(nil), a.stageErrs...), a.canceled, a.cancellationErr
+	return accepted, attempted, append([]stageError(nil), a.stageErrs...), a.canceled, a.cancellationErr
 }
 
 func (w *Workflow) captureMiddlewareOutput(ctx context.Context, upstream <-chan Event) <-chan Event {
@@ -152,11 +166,7 @@ func (w *Workflow) captureMiddlewareOutput(ctx context.Context, upstream <-chan 
 		if downstreamIncomplete {
 			w.deliveryIncomplete = true
 		}
-		for _, err := range stageErrs {
-			if err != nil && !containsError(w.result.Errors, err) {
-				w.result.Errors = append(w.result.Errors, err)
-			}
-		}
+		w.recordStageErrorsLocked(stageErrs)
 		if canceled {
 			w.result.Canceled = true
 			w.result.CancellationErr = cancellationErr
@@ -186,11 +196,7 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 			w.setVisibleOutputLocked(output)
 			w.result.AttemptedText = outputTextOnly(attempted)
 		}
-		for _, err := range stageErrs {
-			if err != nil && !containsError(w.result.Errors, err) {
-				w.result.Errors = append(w.result.Errors, err)
-			}
-		}
+		w.recordStageErrorsLocked(stageErrs)
 		terminal := Event{Type: EventDone, Source: EventSource{Kind: SourceWorkflow}}
 		switch {
 		case w.result.Canceled:
@@ -209,20 +215,27 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 		obs.Finished(ctx, result)
 		runObs.Finished(result)
 		sendTerminalWorkflowEvent(ctx, out, terminal, deliver)
-		close(out)
 		w.mu.Lock()
 		w.result.Complete = true
+		close(out)
 		w.mu.Unlock()
 		close(w.done)
 	}()
 	return out
 }
 
-func containsError(errs []error, target error) bool {
-	for _, err := range errs {
-		if errors.Is(err, target) || (err != nil && target != nil && err.Error() == target.Error()) {
-			return true
-		}
+func (w *Workflow) recordStageErrorsLocked(errs []stageError) {
+	if len(errs) > 0 && w.stageErrorsSeen == nil {
+		w.stageErrorsSeen = make(map[stageErrorKey]struct{})
 	}
-	return false
+	for _, failure := range errs {
+		// Capture layers and finalization see the same stage-finish event.
+		// Distinct stages must retain their failures even if errors share a
+		// message, wrap each other, or use the same sentinel value.
+		if _, seen := w.stageErrorsSeen[failure.key]; seen {
+			continue
+		}
+		w.stageErrorsSeen[failure.key] = struct{}{}
+		w.result.Errors = append(w.result.Errors, failure.err)
+	}
 }

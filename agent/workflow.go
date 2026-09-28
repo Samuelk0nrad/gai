@@ -71,6 +71,7 @@ type Workflow struct {
 	primaryDone        chan struct{}
 	terminalErr        error
 	deliveryIncomplete bool
+	stageErrorsSeen    map[stageErrorKey]struct{}
 	result             WorkflowResult
 }
 

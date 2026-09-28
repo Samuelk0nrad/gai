@@ -8,21 +8,6 @@ import (
 	"github.com/lace-ai/gai/loop"
 )
 
-type nonComparableError struct {
-	details []string
-}
-
-func (e nonComparableError) Error() string {
-	return e.details[0]
-}
-
-func TestContainsErrorHandlesNonComparableErrors(t *testing.T) {
-	target := nonComparableError{details: []string{"failed"}}
-	if !containsError([]error{target}, target) {
-		t.Fatal("containsError returned false for the same non-comparable error")
-	}
-}
-
 func TestWorkflowOutputAccumulatorDoesNotRetainLargeExecutionEvents(t *testing.T) {
 	payload := bytes.Repeat([]byte("x"), 64<<10)
 	response := string(payload)
