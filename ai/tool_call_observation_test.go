@@ -151,6 +151,43 @@ func TestToolCallStreamObservationReportsCancellation(t *testing.T) {
 	}
 }
 
+func TestToolCallStreamObservationCancellationWinsOverClosedInput(t *testing.T) {
+	recorder, restore := installToolCallStreamSpanRecorder(t)
+	defer restore()
+
+	const attempts = 100
+	for attempt := 0; attempt < attempts; attempt++ {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		in := make(chan Token)
+		close(in)
+
+		var observation gai.Observation
+		sink := gai.ObservationSinkFunc(func(_ context.Context, emitted gai.Observation) {
+			observation = emitted
+		})
+		drainToolCallStream(DetectToolCallsInStream(ctx, in, sink))
+
+		if observation.Fields["outcome"] != "canceled" {
+			t.Fatalf("attempt %d outcome = %#v, want canceled", attempt, observation.Fields["outcome"])
+		}
+		if observation.Fields["input_token_events"] != 0 || observation.Fields["output_token_events"] != 0 {
+			t.Fatalf("attempt %d counts = %#v", attempt, observation.Fields)
+		}
+	}
+
+	spans := recorder.Ended()
+	if len(spans) != attempts {
+		t.Fatalf("spans = %d, want %d", len(spans), attempts)
+	}
+	for attempt, span := range spans {
+		attrs := spanAttributes(span.Attributes())
+		if got := attrs["ai.tool_call_stream.outcome"].AsString(); got != "canceled" {
+			t.Fatalf("attempt %d span outcome = %q, want canceled", attempt, got)
+		}
+	}
+}
+
 func installToolCallStreamSpanRecorder(t *testing.T) (*tracetest.SpanRecorder, func()) {
 	t.Helper()
 	previous := otel.GetTracerProvider()

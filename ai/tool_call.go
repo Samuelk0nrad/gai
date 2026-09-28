@@ -136,7 +136,9 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 		result := toolCallStreamResult{}
 		canceled := false
 		defer func() {
-			if canceled {
+			// Cancellation observable at terminal finalization takes precedence
+			// over a concurrently closed input channel.
+			if canceled || ctx.Err() != nil {
 				observer.Canceled(ctx, result)
 				return
 			}
