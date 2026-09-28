@@ -105,17 +105,18 @@ func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 	})
 
 	input := textRunInput("use echo")
-	input.ResponseFormat = ai.ResponseFormat{
+	input.Execution = &agent.ExecutionOverrides{}
+	input.Execution.ResponseFormat = &ai.ResponseFormat{
 		Type:   ai.ResponseFormatJSONSchema,
 		Name:   "answer",
 		Schema: []byte(`{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}`),
 	}
-	expectedSchema := string(input.ResponseFormat.Schema)
+	expectedSchema := string(input.Execution.ResponseFormat.Schema)
 	workflow, err := assistant.NewRun(context.Background(), input)
 	if err != nil {
 		t.Fatalf("NewRun failed: %v", err)
 	}
-	input.ResponseFormat.Schema[0] = '['
+	input.Execution.ResponseFormat.Schema[0] = '['
 	consumed := consumeWorkflow(t, workflow)
 	if len(consumed.errs) != 0 {
 		t.Fatalf("unexpected workflow errors: %v", consumed.errs)
@@ -327,6 +328,7 @@ func TestAgentWorkflowBillsRejectedRequiredToolAttemptWithoutExposingIt(t *testi
 	})
 
 	input := textRunInput("use echo")
+	input.Execution = &agent.ExecutionOverrides{}
 	input.Execution.ToolChoice = &ai.ToolChoice{Mode: ai.ToolChoiceRequired}
 	workflow, err := assistant.NewRun(context.Background(), input)
 	if err != nil {
@@ -386,6 +388,7 @@ func TestAgentWorkflowRunEventsBillsRejectedRequiredToolAttempt(t *testing.T) {
 	})
 
 	input := textRunInput("use echo")
+	input.Execution = &agent.ExecutionOverrides{}
 	input.Execution.ToolChoice = &ai.ToolChoice{Mode: ai.ToolChoiceRequired}
 	workflow, err := assistant.NewRun(context.Background(), input)
 	if err != nil {

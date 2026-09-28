@@ -53,6 +53,8 @@ type runCreationObserver struct {
 	agentName       string
 	modelName       string
 	toolCount       int
+	maxTokens       int
+	maxIterations   int
 	middlewareCount int
 	input           RunInput
 }
@@ -67,10 +69,6 @@ func newRunCreationObserver(ctx context.Context, agent *Agent, input RunInput) (
 		name = agent.name()
 		debug = agent.debugSink()
 		middlewareCount = len(agent.middleware())
-		toolCount = len(agent.def.Tools)
-		if agent.def.Model != nil {
-			modelName = agent.def.Model.Name()
-		}
 	}
 	ctx, operation := observe.Start(ctx, debug, agentTracerName, "agent.run", "agent.operation", "create", "agent:Agent.NewRun",
 		attribute.String("agent.name", name),
@@ -79,7 +77,6 @@ func newRunCreationObserver(ctx context.Context, agent *Agent, input RunInput) (
 		attribute.Int("agent.middleware_count", middlewareCount),
 		attribute.Int("agent.user_input_chars", promptUserChars(input.Prompt)),
 		attribute.Int("agent.input_context_parts", len(input.Prompt.Context)),
-		attribute.Int("agent.max_tokens", input.MaxTokens),
 	)
 	return ctx, &runCreationObserver{
 		debug:           debug,
@@ -90,6 +87,24 @@ func newRunCreationObserver(ctx context.Context, agent *Agent, input RunInput) (
 		middlewareCount: middlewareCount,
 		input:           input,
 	}
+}
+
+// Resolved observes only validated effective dependencies, never an unresolved
+// definition model (which may be absent or replaced by this run).
+func (o *runCreationObserver) Resolved(execution resolvedExecution) {
+	o.modelName = execution.model.Name()
+	o.toolCount = len(execution.tools)
+	o.maxTokens = execution.limits.MaxTokens
+	o.operation.Set(
+		attribute.String("agent.model", o.modelName),
+		attribute.Int("agent.tool_count", o.toolCount),
+		attribute.Int("agent.max_tokens", o.maxTokens),
+	)
+}
+
+func (o *runCreationObserver) LoopConfigured(maxIterations int) {
+	o.maxIterations = maxIterations
+	o.operation.Set(attribute.Int("agent.max_iterations", maxIterations))
 }
 
 func (o *runCreationObserver) Created(ctx context.Context) {
@@ -120,7 +135,8 @@ func (o *runCreationObserver) fields(ctx context.Context) map[string]any {
 	fields["middleware_count"] = o.middlewareCount
 	fields["user_input_chars"] = promptUserChars(o.input.Prompt)
 	fields["input_context_parts"] = len(o.input.Prompt.Context)
-	fields["max_tokens"] = o.input.MaxTokens
+	fields["max_tokens"] = o.maxTokens
+	fields["max_iterations"] = o.maxIterations
 	fields["meta_keys"] = sortedMetaKeys(o.input.Meta)
 	if o.input.ID != "" {
 		fields["run_id"] = o.input.ID

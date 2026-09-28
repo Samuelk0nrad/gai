@@ -268,6 +268,7 @@ func TestAgentNewRunPreservesNilAndEmptyExecutionToolOverrides(t *testing.T) {
 	}
 
 	disabledInput := textRunInput("disable tools")
+	disabledInput.Execution = &agent.ExecutionOverrides{}
 	disabledInput.Execution.Tools = []loop.Tool{}
 	disabled, err := assistant.NewRun(context.Background(), disabledInput)
 	if err != nil {
@@ -300,7 +301,7 @@ func TestAgentNewRunExecutionOverridesSnapshotToolsAndConfiguration(t *testing.T
 		},
 	})
 	input := textRunInput("hello")
-	input.Execution = agent.ExecutionConfig{
+	input.Execution = &agent.ExecutionOverrides{
 		Tools:      []loop.Tool{runTool},
 		ToolChoice: &ai.ToolChoice{Mode: ai.ToolChoiceRequired, Names: []string{"run_tool"}},
 		Reasoning:  &ai.ReasoningConfig{Enabled: true, Effort: ai.ReasoningEffortHigh},
@@ -337,6 +338,7 @@ func TestAgentNewRunRejectsDuplicateExecutionToolNamesBeforeRun(t *testing.T) {
 		},
 	})
 	input := textRunInput("hello")
+	input.Execution = &agent.ExecutionOverrides{}
 	input.Execution.Tools = []loop.Tool{tool, tool}
 
 	_, err := assistant.NewRun(context.Background(), input)
@@ -365,6 +367,7 @@ func TestAgentConcurrentRunsUseIndependentExecutionToolSets(t *testing.T) {
 		go func(name string) {
 			defer wg.Done()
 			input := textRunInput("hello")
+			input.Execution = &agent.ExecutionOverrides{}
 			input.Execution.Tools = []loop.Tool{namedTool{name: name}}
 			workflow, err := assistant.NewRun(context.Background(), input)
 			if err == nil {
@@ -694,6 +697,7 @@ func TestAgentTextTransportRequiresSelectedToolInPrompt(t *testing.T) {
 	})
 
 	input := textRunInput("find the weather")
+	input.Execution = &agent.ExecutionOverrides{}
 	input.Execution.ToolChoice = &ai.ToolChoice{Mode: ai.ToolChoiceRequired, Names: []string{"weather"}}
 	_, err := assistant.NewRun(context.Background(), input)
 	if err != nil {
@@ -736,6 +740,7 @@ func TestAgentTextTransportSelectedToolsReplaceExistingPromptToolDefinitions(t *
 	})
 
 	input := textRunInput("find the weather")
+	input.Execution = &agent.ExecutionOverrides{}
 	input.Execution.ToolChoice = &ai.ToolChoice{
 		Mode:  ai.ToolChoiceRequired,
 		Names: []string{"weather"},
@@ -782,6 +787,7 @@ func TestAgentTextTransportDoesNotExecuteUnselectedRequiredTool(t *testing.T) {
 		},
 	})
 	input := textRunInput("use weather")
+	input.Execution = &agent.ExecutionOverrides{}
 	input.Execution.ToolChoice = &ai.ToolChoice{Mode: ai.ToolChoiceRequired, Names: []string{"weather"}}
 
 	workflow, err := assistant.NewRun(context.Background(), input)
@@ -813,6 +819,7 @@ func TestAgentTextTransportDoesNotAdvertiseOrExecuteDisabledTools(t *testing.T) 
 		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return builder, nil },
 	})
 	input := textRunInput("do not use tools")
+	input.Execution = &agent.ExecutionOverrides{}
 	input.Execution.ToolChoice = &ai.ToolChoice{Mode: ai.ToolChoiceNone}
 
 	workflow, err := assistant.NewRun(context.Background(), input)
@@ -866,6 +873,7 @@ func TestAgentTextTransportRejectsUnsatisfiableRequiredToolChoice(t *testing.T) 
 				},
 			})
 			input := textRunInput("use a tool")
+			input.Execution = &agent.ExecutionOverrides{}
 			input.Execution.ToolChoice = &tt.choice
 
 			if _, err := assistant.NewRun(context.Background(), input); err == nil {
@@ -900,6 +908,7 @@ func TestAgentRejectsInvalidToolChoiceMode(t *testing.T) {
 				},
 			})
 			input := textRunInput("use a tool")
+			input.Execution = &agent.ExecutionOverrides{}
 			input.Execution.ToolChoice = &ai.ToolChoice{Mode: ai.ToolChoiceMode("requred")}
 
 			if _, err := assistant.NewRun(context.Background(), input); err == nil {
@@ -987,6 +996,7 @@ func TestAgentExecutionToolsReplaceExistingPromptToolDefinitions(t *testing.T) {
 	})
 
 	input := textRunInput("use the run tool")
+	input.Execution = &agent.ExecutionOverrides{}
 	input.Execution.Tools = []loop.Tool{runTool}
 	_, err = assistant.NewRun(context.Background(), input)
 	if err != nil {
@@ -1032,11 +1042,13 @@ func TestAgentExecutionToolOverridesUseRunOwnedPromptBuilders(t *testing.T) {
 	})
 
 	firstInput := textRunInput("use the run tool")
+	firstInput.Execution = &agent.ExecutionOverrides{}
 	firstInput.Execution.Tools = []loop.Tool{runTool}
 	if _, err := assistant.NewRun(context.Background(), firstInput); err != nil {
 		t.Fatalf("first NewRun failed: %v", err)
 	}
 	secondInput := textRunInput("do not use tools")
+	secondInput.Execution = &agent.ExecutionOverrides{}
 	secondInput.Execution.Tools = []loop.Tool{}
 	if _, err := assistant.NewRun(context.Background(), secondInput); err != nil {
 		t.Fatalf("second NewRun failed: %v", err)
@@ -1086,6 +1098,7 @@ func TestAgentExecutionEmptyToolsRemoveExistingPromptToolDefinitions(t *testing.
 	})
 
 	input := textRunInput("do not use tools")
+	input.Execution = &agent.ExecutionOverrides{}
 	input.Execution.Tools = []loop.Tool{}
 	_, err = assistant.NewRun(context.Background(), input)
 	if err != nil {
@@ -1118,7 +1131,8 @@ func TestAgentNewRunUsesInputMaxTokens(t *testing.T) {
 	})
 
 	input := textRunInput("input")
-	input.MaxTokens = 3
+	maxTokens := 3
+	input.Execution = &agent.ExecutionOverrides{Limits: agent.LimitsOverrides{MaxTokens: &maxTokens}}
 	workflow, err := assistant.NewRun(context.Background(), input)
 	if err != nil {
 		t.Fatalf("NewRun failed: %v", err)

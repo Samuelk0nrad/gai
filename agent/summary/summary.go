@@ -16,8 +16,10 @@ import (
 var DefaultSystemPrompt string
 
 type Request struct {
-	ID        string
-	Text      string
+	ID   string
+	Text string
+	// MaxTokens overrides the summary definition only when positive.
+	// Zero and negative values inherit its default.
 	MaxTokens int
 	Required  bool
 	Meta      map[string]any
@@ -125,10 +127,15 @@ func (s Summarizer) Summarize(ctx context.Context, req Request) (string, error) 
 		def.Limits.MaxLoopIterations = 1
 	}
 	input := agent.RunInput{
-		ID:        req.ID,
-		Prompt:    gaictx.PromptInput{User: gaictx.NewTextContent(req.Text)},
-		MaxTokens: req.MaxTokens,
-		Meta:      req.Meta,
+		ID:     req.ID,
+		Prompt: gaictx.PromptInput{User: gaictx.NewTextContent(req.Text)},
+		Meta:   req.Meta,
+	}
+	// Request.MaxTokens retains its existing non-positive-means-inherit API.
+	if req.MaxTokens > 0 {
+		input.Execution = &agent.ExecutionOverrides{
+			Limits: agent.LimitsOverrides{MaxTokens: &req.MaxTokens},
+		}
 	}
 	workflow, err := agent.New(def).NewRun(ctx, input)
 	if err != nil {

@@ -65,6 +65,24 @@ func TestDefinitionConfiguresRetryPolicy(t *testing.T) {
 	}
 }
 
+func TestSummaryRequestPreservesNonpositiveLimitInheritance(t *testing.T) {
+	for _, limit := range []int{0, -1, 7} {
+		model := &recordingModel{response: "summary"}
+		summarizer := summary.New(model)
+		summarizer.Definition.Limits.MaxTokens = 19
+		if _, err := summarizer.Summarize(t.Context(), summary.Request{Text: "input", MaxTokens: limit}); err != nil {
+			t.Fatal(err)
+		}
+		want := 19
+		if limit > 0 {
+			want = limit
+		}
+		if model.request.MaxTokens != want {
+			t.Fatalf("request limit %d: got %d, want %d", limit, model.request.MaxTokens, want)
+		}
+	}
+}
+
 type recordingModel struct {
 	response string
 	request  ai.AIRequest

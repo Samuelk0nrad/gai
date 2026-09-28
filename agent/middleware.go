@@ -52,7 +52,8 @@ type AgentMiddlewareConfig struct {
 	Output OutputPolicy
 	// MapInput controls exactly what the nested agent receives. When nil, the
 	// current visible text is forwarded as named upstream_output context along
-	// with the original run ID and metadata.
+	// with the original run ID and metadata. Execution overrides are not
+	// forwarded; the nested agent uses its own definition defaults.
 	MapInput func(ctx context.Context, result WorkflowResult) (RunInput, error)
 	// ErrorPolicy controls whether input-mapping and nested-agent failures
 	// propagate. The zero value is PropagateError.
