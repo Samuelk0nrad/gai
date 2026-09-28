@@ -241,11 +241,7 @@ support := agent.New(agent.Definition{
 The loop sends definitions to the model, executes requested calls, appends tool results to the conversation, and continues until the model commits a normal response or the iteration limit is reached.
 
 Use `RunInput.Execution` to override an agent's defaults for one run. Omitted
-fields inherit from `Definition`. For tools:
-
-- `nil` inherits `Definition.Tools`
-- a non-nil slice replaces them
-- an empty slice disables tools for that run
+fields inherit from `Definition`.
 
 ```go
 workflow, err := support.NewRun(ctx, agent.RunInput{
@@ -254,25 +250,6 @@ workflow, err := support.NewRun(ctx, agent.RunInput{
   },
 })
 ```
-
-Overrides also support `Model`, individual `Limits`, `ToolChoice`,
-`ResponseFormat`, `Reasoning`, `Tokenizer`, `RetryPolicy`, and
-`ToolResponseProcessor`. `Definition` keeps ordinary concrete defaults;
-only the override needs pointers and presence markers.
-
-```go
-maxTokens := 512
-workflow, err := support.NewRun(ctx, agent.RunInput{
-  Execution: &agent.ExecutionOverrides{
-    Model: fasterModel,
-    Limits: agent.LimitsOverrides{MaxTokens: &maxTokens},
-    RetryPolicy: agent.Optional[*loop.RetryPolicy]{Set: true}, // Disable the policy.
-  },
-})
-```
-
-See [execution overrides](docs/execution-overrides.md) for inheritance,
-explicit clearing, validation, ownership, and migration from `ExecutionConfig`.
 
 ## Ordered workflow events
 
