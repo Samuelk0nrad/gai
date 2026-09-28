@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"strings"
+
 	"github.com/lace-ai/gai/ai"
 	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
@@ -94,23 +96,23 @@ func outputPartsToTokens(output []OutputPart) []ai.Token {
 }
 
 func outputTextOnly(output []OutputPart) string {
-	var text string
+	var text strings.Builder
 	for _, part := range output {
 		if part.Kind == OutputText {
-			text += part.Text
+			text.WriteString(part.Text)
 		}
 	}
-	return text
+	return text.String()
 }
 
 func outputReasoningOnly(output []OutputPart) string {
-	var reasoning string
+	var reasoning strings.Builder
 	for _, part := range output {
 		if part.Kind == OutputReasoning {
-			reasoning += part.Text
+			reasoning.WriteString(part.Text)
 		}
 	}
-	return reasoning
+	return reasoning.String()
 }
 
 func tokenText(tokens []ai.Token) string {
