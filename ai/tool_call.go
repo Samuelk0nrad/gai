@@ -209,6 +209,7 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 				payload = append(joinTokenData(pending[:len(pending)-1]), payload...)
 			}
 			if tc, ok := parseToolCall(payload); ok {
+				detected := observer.snapshotDetected(tc)
 				if !SendToken(ctx, out, Token{
 					Type:     TokenTypeToolCall,
 					Data:     payload,
@@ -218,7 +219,7 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 					return false, false
 				}
 				result.outputTokenEvents++
-				observer.Detected(&result, tc)
+				observer.Detected(&result, detected)
 				resetTracking()
 			} else {
 				observer.CandidateRejected(&result, "parse_failed", payload)

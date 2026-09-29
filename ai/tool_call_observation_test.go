@@ -76,7 +76,7 @@ func TestToolCallStreamObserverDoesNotRetainPayloadsWhenCaptureDisabled(t *testi
 	_, observer := newToolCallStreamObserver(t.Context(), nil)
 	result := toolCallStreamResult{}
 
-	observer.Detected(&result, &ToolCall{Name: "echo", Args: []byte(`{"value":"secret"}`)})
+	observer.Detected(&result, observer.snapshotDetected(&ToolCall{Name: "echo", Args: []byte(`{"value":"secret"}`)}))
 	observer.CandidateRejected(&result, "parse_failed", []byte(`{"kind":"secret"}`))
 	observer.Pending(&result, []byte(`{"pending":"secret"}`))
 
@@ -99,12 +99,36 @@ func TestToolCallStreamObserverDoesNotRetainPayloadsWithoutObservationDestinatio
 	_, observer := newToolCallStreamObserver(ctx, nil)
 	result := toolCallStreamResult{}
 
-	observer.Detected(&result, &ToolCall{Name: "echo", Args: []byte(`{"value":"secret"}`)})
+	observer.Detected(&result, observer.snapshotDetected(&ToolCall{Name: "echo", Args: []byte(`{"value":"secret"}`)}))
 	observer.CandidateRejected(&result, "parse_failed", []byte(`{"kind":"secret"}`))
 	observer.Pending(&result, []byte(`{"pending":"secret"}`))
 
 	if result.lastToolCallArgs != nil || result.lastRejectedPayload != nil || result.pendingPayload != nil {
 		t.Fatalf("observer without destination retained payloads: %#v", result)
+	}
+}
+
+func TestToolCallStreamObserverSnapshotsDetectedCallBeforeDelivery(t *testing.T) {
+	var observation gai.Observation
+	sink := gai.ObservationSinkFunc(func(_ context.Context, emitted gai.Observation) {
+		observation = emitted
+	})
+	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{ToolInput: gai.CaptureEnabled})
+	ctx, observer := newToolCallStreamObserver(ctx, sink)
+	result := toolCallStreamResult{}
+	toolCall := &ToolCall{Name: "echo", Args: []byte(`{"value":"original"}`)}
+
+	snapshot := observer.snapshotDetected(toolCall)
+	toolCall.Name = "mutated"
+	toolCall.Args[2] = 'X'
+	observer.Detected(&result, snapshot)
+	observer.Finished(ctx, result)
+
+	if observation.Fields["last_tool_call_name"] != "echo" {
+		t.Fatalf("captured tool name = %#v, want echo", observation.Fields["last_tool_call_name"])
+	}
+	if observation.Fields["last_tool_call_args"] != `{"value":"original"}` {
+		t.Fatalf("captured tool args = %#v, want original args", observation.Fields["last_tool_call_args"])
 	}
 }
 

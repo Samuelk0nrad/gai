@@ -29,6 +29,11 @@ type toolCallStreamObserver struct {
 	captureCompletion bool
 }
 
+type detectedToolCallSnapshot struct {
+	name string
+	args []byte
+}
+
 func newToolCallStreamObserver(ctx context.Context, sink gai.ObservationSink) (context.Context, *toolCallStreamObserver) {
 	ctx, operation := observe.Start(
 		ctx,
@@ -47,18 +52,24 @@ func newToolCallStreamObserver(ctx context.Context, sink gai.ObservationSink) (c
 	}
 }
 
-func (o *toolCallStreamObserver) Detected(result *toolCallStreamResult, toolCall *ToolCall) {
+func (o *toolCallStreamObserver) snapshotDetected(toolCall *ToolCall) detectedToolCallSnapshot {
+	if toolCall == nil {
+		return detectedToolCallSnapshot{}
+	}
+	snapshot := detectedToolCallSnapshot{name: toolCall.Name}
+	if o != nil && o.captureToolInput {
+		snapshot.args = append([]byte(nil), toolCall.Args...)
+	}
+	return snapshot
+}
+
+func (o *toolCallStreamObserver) Detected(result *toolCallStreamResult, snapshot detectedToolCallSnapshot) {
 	if result == nil {
 		return
 	}
 	result.detectedToolCallCount++
-	if toolCall == nil {
-		return
-	}
-	result.lastToolCallName = toolCall.Name
-	if o != nil && o.captureToolInput {
-		result.lastToolCallArgs = append(result.lastToolCallArgs[:0], toolCall.Args...)
-	}
+	result.lastToolCallName = snapshot.name
+	result.lastToolCallArgs = snapshot.args
 }
 
 func (o *toolCallStreamObserver) CandidateRejected(result *toolCallStreamResult, reason string, payload []byte) {
