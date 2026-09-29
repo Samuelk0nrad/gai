@@ -161,12 +161,12 @@ Each provider exposes the shared `ai.Provider` interface:
 type Provider interface {
   Name() string
   Model(name string) (Model, error)
-  ListModels() ([]string, error)
-  Validate() error
 }
 ```
 
 Built-in providers discover compatible models dynamically and use a bundled fallback catalog when discovery is unavailable. Use `ai.ModelRepository` to register multiple providers and resolve models centrally.
+
+Validation and model discovery are optional capabilities: `ProviderValidator`, `ModelLister`, and the context-aware `ModelCatalogProvider`. Repository listing prefers the context-aware catalog and returns `UnsupportedModelDiscoveryError` if any registered provider cannot enumerate models. Named model lookup works without discovery.
 
 ## Tools and agent loops
 

@@ -2,7 +2,10 @@ package ai
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"sort"
+	"strings"
 
 	"github.com/lace-ai/gai"
 )
@@ -34,50 +37,59 @@ func (r *ModelRepository) Validate() error {
 	return nil
 }
 
-// RegisterProvider validates and registers provider under Provider.Name.
+// RegisterProvider registers provider under Provider.Name, calling Validate
+// first when provider implements ProviderValidator. Nil providers, including
+// typed nil values, return ErrNilProvider. Empty or whitespace-only names
+// return ErrProviderInvalid before optional validation runs.
 // It returns ErrProviderAlreadyExists when that name is already registered.
 func (r *ModelRepository) RegisterProvider(ctx context.Context, provider Provider) error {
 	if err := r.Validate(); err != nil {
 		return err
 	}
-	if provider == nil {
+	if isNilProvider(provider) {
 		return ErrNilProvider
 	}
-	if err := provider.Validate(); err != nil {
-		if r.debug != nil {
-			gai.EmitObservation(ctx, r.debug, gai.Observation{
-				Name:   "provider_validation_failed",
-				Source: "ai:ModelRepository.RegisterProvider",
-				Fields: map[string]any{
-					"provider_name": provider.Name(),
-					"error":         err.Error(),
-				},
-				Err: err,
-			})
+	name := provider.Name()
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%w: provider name must not be empty or whitespace", ErrProviderInvalid)
+	}
+	if validator, ok := provider.(ProviderValidator); ok {
+		if err := validator.Validate(); err != nil {
+			if r.debug != nil {
+				gai.EmitObservation(ctx, r.debug, gai.Observation{
+					Name:   "provider_validation_failed",
+					Source: "ai:ModelRepository.RegisterProvider",
+					Fields: map[string]any{
+						"provider_name": name,
+						"error":         err.Error(),
+					},
+					Err: err,
+				})
+			}
+			return err
 		}
-		return err
 	}
 
-	_, exists := r.providers[provider.Name()]
+	_, exists := r.providers[name]
 	if exists {
 		if r.debug != nil {
 			gai.EmitObservation(ctx, r.debug, gai.Observation{
 				Name:   "provider_already_registered",
 				Source: "ai:ModelRepository.RegisterProvider",
 				Fields: map[string]any{
-					"provider_name": provider.Name(),
+					"provider_name": name,
 				},
 			})
 		}
 		return ErrProviderAlreadyExists
 	}
-	r.providers[provider.Name()] = provider
+	r.providers[name] = provider
 	if r.debug != nil {
 		gai.EmitObservation(ctx, r.debug, gai.Observation{
 			Name:   "provider_registered",
 			Source: "ai:ModelRepository.RegisterProvider",
 			Fields: map[string]any{
-				"provider_name": provider.Name(),
+				"provider_name": name,
 			},
 		})
 	}
@@ -118,6 +130,7 @@ func (r *ModelRepository) UnregisterProvider(ctx context.Context, providerName s
 }
 
 // GetModel resolves modelName through the named provider.
+// It calls Model directly and never invokes optional discovery capabilities.
 func (r *ModelRepository) GetModel(ctx context.Context, providerName, modelName string) (Model, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
@@ -151,21 +164,31 @@ func (r *ModelRepository) GetModel(ctx context.Context, providerName, modelName 
 }
 
 // ListModels returns all registered models as sorted "provider:model" names.
+// It prefers ModelCatalogProvider, deriving names from nonempty descriptor
+// Model fields, and otherwise uses ModelLister. If any provider supports
+// neither capability, it returns UnsupportedModelDiscoveryError and no partial
+// results. An empty successful catalog or list is valid.
+//
+// Providers are queried in name order. Cancellation is checked between calls;
+// only ModelCatalogProvider can honor cancellation during discovery itself.
 func (r *ModelRepository) ListModels(ctx context.Context) ([]string, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	var models []string
-	for _, provider := range r.providers {
-		providerModels, err := provider.ListModels()
+	for _, name := range r.providerNames() {
+		providerModels, err := listProviderModels(ctx, name, r.providers[name])
 		if err != nil {
 			if r.debug != nil {
 				gai.EmitObservation(ctx, r.debug, gai.Observation{
 					Name:   "list_provider_models_failed",
 					Source: "ai:ModelRepository.ListModels",
 					Fields: map[string]any{
-						"provider_name": provider.Name(),
+						"provider_name": name,
 						"error":         err.Error(),
 					},
 					Err: err,
@@ -174,7 +197,7 @@ func (r *ModelRepository) ListModels(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 		for _, model := range providerModels {
-			models = append(models, provider.Name()+":"+model)
+			models = append(models, name+":"+model)
 		}
 	}
 	sort.Strings(models)
@@ -190,19 +213,37 @@ func (r *ModelRepository) ListModels(ctx context.Context) ([]string, error) {
 	return models, nil
 }
 
-// ListModelDescriptors returns descriptors for registered models that expose
-// the optional ModelDescriber interface. Models without descriptors are
-// skipped, preserving compatibility with existing Model implementations.
+// ListModelDescriptors returns descriptors sorted by provider and model name.
+// It prefers ModelCatalogProvider, copying descriptors with nonempty Model
+// fields and assigning their registered provider name. Otherwise it uses
+// ModelLister, resolves each listed model, and copies its optional ModelDescriber
+// descriptor. Listed models without descriptors are skipped.
+//
+// If any provider supports neither discovery capability, it returns
+// UnsupportedModelDiscoveryError and no partial results. An empty successful
+// catalog or list is valid. Providers are queried in name order, and cancellation
+// is checked between discovery and model-resolution calls. Only
+// ModelCatalogProvider can honor cancellation during discovery itself.
 func (r *ModelRepository) ListModelDescriptors(ctx context.Context) ([]ModelDescriptor, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	var descriptors []ModelDescriptor
-	for _, provider := range r.providers {
+	for _, providerName := range r.providerNames() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		provider := r.providers[providerName]
 		if catalog, ok := provider.(ModelCatalogProvider); ok {
 			providerDescriptors, err := catalog.ListModelDescriptors(ctx)
 			if err != nil {
+				return nil, err
+			}
+			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 			for _, providerDescriptor := range providerDescriptors {
@@ -210,18 +251,24 @@ func (r *ModelRepository) ListModelDescriptors(ctx context.Context) ([]ModelDesc
 				if descriptor.Model == "" {
 					continue
 				}
-				descriptor.Provider = provider.Name()
+				descriptor.Provider = providerName
 				descriptors = append(descriptors, descriptor)
 			}
 			continue
 		}
-		models, err := provider.ListModels()
+		models, err := listProviderModels(ctx, providerName, provider)
 		if err != nil {
 			return nil, err
 		}
 		for _, name := range models {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			model, err := provider.Model(name)
 			if err != nil {
+				return nil, err
+			}
+			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 			describer, ok := model.(ModelDescriber)
@@ -229,7 +276,7 @@ func (r *ModelRepository) ListModelDescriptors(ctx context.Context) ([]ModelDesc
 				continue
 			}
 			descriptor := describer.Descriptor().Copy()
-			descriptor.Provider = provider.Name()
+			descriptor.Provider = providerName
 			if descriptor.Model == "" {
 				descriptor.Model = name
 			}
@@ -243,4 +290,56 @@ func (r *ModelRepository) ListModelDescriptors(ctx context.Context) ([]ModelDesc
 		return descriptors[i].Provider < descriptors[j].Provider
 	})
 	return descriptors, nil
+}
+
+func (r *ModelRepository) providerNames() []string {
+	names := make([]string, 0, len(r.providers))
+	for name := range r.providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func listProviderModels(ctx context.Context, name string, provider Provider) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var names []string
+	if catalog, ok := provider.(ModelCatalogProvider); ok {
+		descriptors, err := catalog.ListModelDescriptors(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, descriptor := range descriptors {
+			if descriptor.Model != "" {
+				names = append(names, descriptor.Model)
+			}
+		}
+	} else if lister, ok := provider.(ModelLister); ok {
+		var err error
+		names, err = lister.ListModels()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, &UnsupportedModelDiscoveryError{Provider: name}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return names, nil
+}
+
+func isNilProvider(provider Provider) bool {
+	if provider == nil {
+		return true
+	}
+	value := reflect.ValueOf(provider)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
