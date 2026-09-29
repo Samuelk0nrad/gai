@@ -231,21 +231,16 @@ support := agent.New(agent.Definition{
 
 The loop sends definitions to the model, executes requested calls, appends tool results to the conversation, and continues until the model commits a normal response or the iteration limit is reached.
 
-For per-run tools, set `RunInput.Execution.Tools`:
-
-- `nil` inherits `Definition.Tools`
-- a non-nil slice replaces them
-- an empty slice disables tools for that run
+Use `RunInput.Execution` to override an agent's defaults for one run. Omitted
+fields inherit from `Definition`.
 
 ```go
 workflow, err := support.NewRun(ctx, agent.RunInput{
-  Execution: agent.ExecutionConfig{
+  Execution: &agent.ExecutionOverrides{
     Tools: []loop.Tool{lookupOrderToolForUser(userID)},
   },
 })
 ```
-
-`Execution.ToolChoice` and `Execution.Reasoning` can also be configured per run.
 
 ## Ordered workflow events
 

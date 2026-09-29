@@ -20,16 +20,7 @@ func cloneRunInput(input RunInput) RunInput {
 		cloned.TraceContext = &traceContext
 	}
 	cloned.Prompt = input.Prompt.Clone()
-	cloned.ResponseFormat = cloneResponseFormat(input.ResponseFormat)
-	cloned.Execution.Tools = cloneTools(input.Execution.Tools)
-	if input.Execution.ToolChoice != nil {
-		choice := cloneToolChoice(*input.Execution.ToolChoice)
-		cloned.Execution.ToolChoice = &choice
-	}
-	if input.Execution.Reasoning != nil {
-		reasoning := *input.Execution.Reasoning
-		cloned.Execution.Reasoning = &reasoning
-	}
+	cloned.Execution = cloneExecution(input.Execution)
 	if input.Meta != nil {
 		cloned.Meta = make(map[string]any, len(input.Meta))
 		for key, value := range input.Meta {

@@ -53,7 +53,10 @@ type AgentMiddlewareConfig struct {
 	Name string
 	// Output controls how the stage changes visible workflow output.
 	Output OutputPolicy
-	// MapInput maps the accumulated workflow snapshot to the nested run.
+	// MapInput maps the accumulated workflow snapshot to the nested run. When nil, the
+	// current visible text is forwarded as named upstream_output context along
+	// with the original run ID and metadata. Execution overrides are not
+	// forwarded; the nested agent uses its own definition defaults.
 	MapInput func(context.Context, WorkflowResult) (RunInput, error)
 	// ErrorPolicy controls whether stage failures fail the workflow.
 	ErrorPolicy ErrorPolicy

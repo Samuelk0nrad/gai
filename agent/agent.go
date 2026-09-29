@@ -23,29 +23,11 @@ type RunInput struct {
 	TraceContext *gai.TraceContext
 	// Prompt separates genuine user content from structured machine context.
 	Prompt gaictx.PromptInput
-	// MaxTokens overrides Definition.Limits.MaxTokens when it is positive.
-	MaxTokens int
-	// ResponseFormat requests the output shape for every model call in this run.
-	ResponseFormat ai.ResponseFormat
-	// Execution overrides selected definition-level execution settings for this run.
-	// Tools replaces Definition.Tools when non-nil; an empty non-nil slice disables
-	// definition-level tools. Nil inherits Definition.Tools.
-	Execution ExecutionConfig
+	// Execution overrides definition-level execution settings for this run.
+	// Nil and an empty block both inherit all defaults.
+	Execution *ExecutionOverrides
 	// Meta carries application data such as user, session, or request IDs.
 	Meta map[string]any
-}
-
-// ExecutionConfig provides optional configuration for one workflow.
-//
-// Tool slices are copied when NewRun is called, preserving tool membership and
-// order for that workflow. Tool implementations themselves must remain safe for
-// concurrent use.
-type ExecutionConfig struct {
-	Tools []loop.Tool
-	// ToolChoice overrides the provider tool-choice setting when non-nil.
-	ToolChoice *ai.ToolChoice
-	// Reasoning overrides Definition.Reasoning when non-nil.
-	Reasoning *ai.ReasoningConfig
 }
 
 // Prompt creates and returns a run-owned prompt builder used by one workflow.
@@ -56,8 +38,10 @@ type Prompt func(ctx context.Context, input RunInput) (gaictx.PromptBuilder, err
 // Limits controls loop iterations and model output size.
 type Limits struct {
 	// MaxLoopIterations limits model/tool iterations. Zero uses the loop default.
+	// Negative limits are invalid.
 	MaxLoopIterations int
-	// MaxTokens is the default model output limit for the agent.
+	// MaxTokens is the default output limit for each model generation.
+	// Zero uses adapter/provider defaults. Negative limits are invalid.
 	MaxTokens int
 }
 
@@ -75,8 +59,14 @@ type Definition struct {
 	// fallback. Otherwise, the protocol is added as the first prompt context
 	// source unless its builder already contains a tool_definitions source.
 	Tools []loop.Tool
+	// ToolChoice is the default tool-use policy. The zero value uses the
+	// loop/provider default. Run overrides replace this policy atomically.
+	ToolChoice ai.ToolChoice
+	// ResponseFormat is the default output shape for each model generation.
+	ResponseFormat ai.ResponseFormat
 	// ToolDefinitionOptions configure the auto-prepended tool-definitions prompt
-	// source used for Tools.
+	// source used for Tools. The resolved ToolChoice takes precedence over
+	// WithToolChoice options; use the ToolChoice field for execution policy.
 	ToolDefinitionOptions []tooldefinitions.Option
 	// Prompt builds run-specific instructions and context.
 	Prompt Prompt
@@ -102,9 +92,11 @@ type Agent struct {
 	def Definition
 }
 
-// New creates an agent from def. Configuration is validated by NewRun.
+// New snapshots the definition's mutable configuration. Models, tools,
+// tokenizers, processors, and callbacks remain caller-owned shared dependencies.
+// The effective configuration is validated by NewRun.
 func New(def Definition) *Agent {
-	return &Agent{def: def}
+	return &Agent{def: cloneDefinition(def)}
 }
 
 // NewRun builds a single-use workflow for input.
@@ -112,6 +104,7 @@ func New(def Definition) *Agent {
 // Prompt construction happens before NewRun returns. Model execution and
 // middleware processing begin when Workflow.Run or Workflow.RunEvents is called.
 func (a *Agent) NewRun(ctx context.Context, input RunInput) (*Workflow, error) {
+	input = cloneRunInput(input)
 	if input.ID == "" {
 		var err error
 		input.ID, err = newRunID()
@@ -129,13 +122,26 @@ func (a *Agent) NewRun(ctx context.Context, input RunInput) (*Workflow, error) {
 			return nil, err
 		}
 	}
-	l, err := a.newLoop(ctx, input)
+	if a == nil {
+		obs.Failed(ctx, "execution_resolution", loop.ErrNilLoop)
+		obs.Finish(loop.ErrNilLoop)
+		return nil, loop.ErrNilLoop
+	}
+	execution, err := resolveExecution(a.def, input.Execution)
+	if err != nil {
+		obs.Failed(ctx, "execution_resolution", err)
+		obs.Finish(err)
+		return nil, err
+	}
+	obs.Resolved(execution)
+	l, err := a.newLoop(ctx, input, execution)
 	if err != nil {
 		obs.Failed(ctx, "loop_creation", err)
 		obs.Finish(err)
 		return nil, err
 	}
 	workflow := newWorkflow(input, l, a.name(), a.debugSink(), a.middleware())
+	obs.LoopConfigured(l.MaxLoopIterations)
 	obs.Created(ctx)
 	obs.Finish(nil)
 	return workflow, nil
@@ -180,46 +186,40 @@ func (a *Agent) middleware() []Middleware {
 	return a.def.Middleware
 }
 
-func (a *Agent) newLoop(ctx context.Context, input RunInput) (*loop.Loop, error) {
-	if a == nil {
-		return nil, loop.ErrNilLoop
-	}
-	if a.def.Model == nil {
-		return nil, loop.ErrModelNotConfigured
-	}
+func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedExecution) (*loop.Loop, error) {
 	if a.def.Prompt == nil {
 		return nil, loop.ErrPromptNotConfigured
 	}
-	nativeTools := usesNativeTools(a.def.Model)
-	execution, err := resolveExecution(a.def.Tools, input.Execution, nativeTools)
+	nativeTools := execution.nativeTools
+	promptBuilder, err := a.def.Prompt(ctx, cloneRunInput(input))
 	if err != nil {
 		return nil, err
 	}
-
-	promptBuilder, err := a.def.Prompt(ctx, input)
-	if err != nil {
-		return nil, err
-	}
-	if promptBuilder == nil {
+	if nilDependency(promptBuilder) {
 		return nil, loop.ErrPromptNotConfigured
 	}
 	promptBuilder.SetInput(input.Prompt)
-	if !nativeTools {
-		lookup, hasContextSourceLookup := promptBuilder.(contextSourceLookup)
-		hasToolDefinitions := hasContextSourceLookup && lookup.HasContextSource("tool_definitions")
-		manager, hasContextSourceManager := promptBuilder.(contextSourceManager)
-		if (execution.toolsOverridden || execution.textToolsConfigured) && hasToolDefinitions && len(execution.tools) == 0 {
+	lookup, hasContextSourceLookup := promptBuilder.(contextSourceLookup)
+	hasToolDefinitions := hasContextSourceLookup && lookup.HasContextSource("tool_definitions")
+	manager, hasContextSourceManager := promptBuilder.(contextSourceManager)
+	if nativeTools && execution.reconfigureTools && hasToolDefinitions {
+		if !hasContextSourceManager {
+			return nil, fmt.Errorf("prompt builder cannot remove existing tool definitions")
+		}
+		if err := manager.RemoveContextSource(ctx, "tool_definitions"); err != nil {
+			return nil, err
+		}
+	} else if !nativeTools {
+		if execution.reconfigureTools && hasToolDefinitions && len(execution.tools) == 0 {
 			if !hasContextSourceManager {
 				return nil, fmt.Errorf("prompt builder cannot remove existing tool definitions")
 			}
 			if err := manager.RemoveContextSource(ctx, "tool_definitions"); err != nil {
 				return nil, err
 			}
-		} else if len(execution.tools) > 0 && (!hasToolDefinitions || execution.toolsOverridden || execution.textToolsConfigured) {
+		} else if len(execution.tools) > 0 && (!hasToolDefinitions || execution.reconfigureTools) {
 			toolOptions := append([]tooldefinitions.Option(nil), a.def.ToolDefinitionOptions...)
-			if execution.hasToolChoice {
-				toolOptions = append(toolOptions, tooldefinitions.WithToolChoice(execution.toolChoice))
-			}
+			toolOptions = append(toolOptions, tooldefinitions.WithToolChoice(execution.toolChoice))
 			toolSource, err := tooldefinitions.New(nil, toolSignatures(execution.tools), a.def.ObservationSink, toolOptions...)
 			if err != nil {
 				return nil, err
@@ -237,40 +237,24 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput) (*loop.Loop, error)
 		}
 	}
 	if setter, ok := promptBuilder.(gaictx.TokenizerSetter); ok {
-		tokenizer := a.def.Tokenizer
-		if tokenizer == nil {
-			tokenizer = a.def.Model.Tokenizer()
-		}
-		if tokenizer != nil {
-			setter.SetTokenizer(tokenizer)
-		}
+		setter.SetTokenizer(execution.tokenizer)
+	} else if execution.requireTokenizerSetter {
+		return nil, ErrTokenizerNotConfigurable
 	}
 
-	l := loop.New(a.def.Model, execution.tools, promptBuilder, a.def.ToolResponseProcessor)
+	l := loop.New(execution.model, execution.tools, promptBuilder, execution.toolResponseProcessor)
 	l.ObservationSink = a.def.ObservationSink
 	if !nativeTools {
 		l.ToolTransport = loop.ToolTransportText
 	}
-	if a.def.Limits.MaxLoopIterations > 0 {
-		l.MaxLoopIterations = a.def.Limits.MaxLoopIterations
+	if execution.limits.MaxLoopIterations > 0 {
+		l.MaxLoopIterations = execution.limits.MaxLoopIterations
 	}
-	if input.MaxTokens > 0 {
-		l.MaxTokens = input.MaxTokens
-	} else {
-		l.MaxTokens = a.def.Limits.MaxTokens
-	}
-	l.ResponseFormat = cloneResponseFormat(input.ResponseFormat)
-	l.Reasoning = a.def.Reasoning
-	if execution.hasToolChoice {
-		l.ToolChoice = execution.toolChoice
-	}
-	if input.Execution.Reasoning != nil {
-		l.Reasoning = *input.Execution.Reasoning
-	}
-	if a.def.RetryPolicy != nil {
-		policy := *a.def.RetryPolicy
-		l.RetryPolicy = &policy
-	}
+	l.MaxTokens = execution.limits.MaxTokens
+	l.ResponseFormat = execution.responseFormat
+	l.Reasoning = execution.reasoning
+	l.ToolChoice = execution.toolChoice
+	l.RetryPolicy = execution.retryPolicy
 	return l, nil
 }
 
@@ -295,47 +279,6 @@ func cloneToolChoice(choice ai.ToolChoice) ai.ToolChoice {
 	cloned := choice
 	cloned.Names = append([]string(nil), choice.Names...)
 	return cloned
-}
-
-type executionResolution struct {
-	tools               []loop.Tool
-	toolChoice          ai.ToolChoice
-	hasToolChoice       bool
-	toolsOverridden     bool
-	textToolsConfigured bool
-}
-
-// resolveExecution snapshots one run's tools and choice, then resolves the
-// effective text-transport tool set before prompt or loop construction.
-func resolveExecution(definitionTools []loop.Tool, config ExecutionConfig, nativeTools bool) (executionResolution, error) {
-	resolved := executionResolution{
-		tools:           cloneTools(definitionTools),
-		toolsOverridden: config.Tools != nil,
-	}
-	if config.Tools != nil {
-		resolved.tools = cloneTools(config.Tools)
-	}
-	if config.ToolChoice != nil {
-		if err := config.ToolChoice.Validate(); err != nil {
-			return executionResolution{}, err
-		}
-		resolved.toolChoice = cloneToolChoice(*config.ToolChoice)
-		resolved.hasToolChoice = true
-	}
-	transport := loop.ToolTransportNative
-	if !nativeTools {
-		transport = loop.ToolTransportText
-	}
-	effectiveTools, err := loop.EffectiveTools(resolved.tools, resolved.toolChoice, transport)
-	if err != nil {
-		return executionResolution{}, err
-	}
-	resolved.tools = effectiveTools
-	if nativeTools || !resolved.hasToolChoice {
-		return resolved, nil
-	}
-	resolved.textToolsConfigured = resolved.toolChoice.Mode == ai.ToolChoiceNone || resolved.toolChoice.Mode == ai.ToolChoiceRequired
-	return resolved, nil
 }
 
 func usesNativeTools(model ai.Model) bool {
