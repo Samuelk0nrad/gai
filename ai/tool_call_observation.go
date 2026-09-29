@@ -39,12 +39,11 @@ func newToolCallStreamObserver(ctx context.Context, sink gai.ObservationSink) (c
 		"tool_call.detect_stream",
 		"ai:DetectToolCallsInStream",
 	)
-	policy, _ := gai.ContentCapturePolicyFromContext(ctx)
 	return ctx, &toolCallStreamObserver{
 		sink:              sink,
 		operation:         operation,
-		captureToolInput:  policy.ToolInput == gai.CaptureEnabled,
-		captureCompletion: policy.Completion == gai.CaptureEnabled,
+		captureToolInput:  gai.ObservationContentEnabled(ctx, sink, gai.ContentKindToolInput),
+		captureCompletion: gai.ObservationContentEnabled(ctx, sink, gai.ContentKindCompletion),
 	}
 }
 

@@ -91,6 +91,23 @@ func TestToolCallStreamObserverDoesNotRetainPayloadsWhenCaptureDisabled(t *testi
 	}
 }
 
+func TestToolCallStreamObserverDoesNotRetainPayloadsWithoutObservationDestination(t *testing.T) {
+	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{
+		Completion: gai.CaptureEnabled,
+		ToolInput:  gai.CaptureEnabled,
+	})
+	_, observer := newToolCallStreamObserver(ctx, nil)
+	result := toolCallStreamResult{}
+
+	observer.Detected(&result, &ToolCall{Name: "echo", Args: []byte(`{"value":"secret"}`)})
+	observer.CandidateRejected(&result, "parse_failed", []byte(`{"kind":"secret"}`))
+	observer.Pending(&result, []byte(`{"pending":"secret"}`))
+
+	if result.lastToolCallArgs != nil || result.lastRejectedPayload != nil || result.pendingPayload != nil {
+		t.Fatalf("observer without destination retained payloads: %#v", result)
+	}
+}
+
 func TestToolCallStreamObservationCapturesOnlyPolicyEnabledContent(t *testing.T) {
 	var observation gai.Observation
 	sink := gai.ObservationSinkFunc(func(_ context.Context, emitted gai.Observation) {
