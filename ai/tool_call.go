@@ -247,9 +247,10 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 			// non-text tokens: passthrough.
 			if t.Type != TokenTypeText {
 				if t.Type == TokenTypeCompletion && isJSONCandidate {
-					result.pendingPayload = joinTokenData(pending)
+					pendingPayload := joinTokenData(pending)
+					observer.Pending(&result, pendingPayload)
 					result.eofPending = true
-					observer.CandidateRejected(&result, "end_of_stream", result.pendingPayload)
+					observer.CandidateRejected(&result, "end_of_stream", pendingPayload)
 				}
 				pending = append(pending, t)
 				if !flushPending() {
@@ -355,10 +356,11 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 		// End of stream: an unresolved JSON candidate is rejected, then all
 		// buffered tokens are replayed unchanged.
 		if len(pending) > 0 {
-			result.pendingPayload = joinTokenData(pending)
+			pendingPayload := joinTokenData(pending)
+			observer.Pending(&result, pendingPayload)
 			if isJSONCandidate {
 				result.eofPending = true
-				observer.CandidateRejected(&result, "end_of_stream", result.pendingPayload)
+				observer.CandidateRejected(&result, "end_of_stream", pendingPayload)
 			}
 			if !flushPending() {
 				return

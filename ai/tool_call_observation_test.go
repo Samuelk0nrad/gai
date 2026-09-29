@@ -72,6 +72,25 @@ func TestToolCallStreamObservationConsolidatesCompletedOutcome(t *testing.T) {
 	assertStringAttribute(t, attrs, "ai.tool_call_stream.outcome", "completed")
 }
 
+func TestToolCallStreamObserverDoesNotRetainPayloadsWhenCaptureDisabled(t *testing.T) {
+	_, observer := newToolCallStreamObserver(t.Context(), nil)
+	result := toolCallStreamResult{}
+
+	observer.Detected(&result, &ToolCall{Name: "echo", Args: []byte(`{"value":"secret"}`)})
+	observer.CandidateRejected(&result, "parse_failed", []byte(`{"kind":"secret"}`))
+	observer.Pending(&result, []byte(`{"pending":"secret"}`))
+
+	if result.detectedToolCallCount != 1 || result.lastToolCallName != "echo" {
+		t.Fatalf("tool call summary = %#v", result)
+	}
+	if result.rejectedCandidateCount != 1 || result.lastRejectionReason != "parse_failed" {
+		t.Fatalf("rejection summary = %#v", result)
+	}
+	if result.lastToolCallArgs != nil || result.lastRejectedPayload != nil || result.pendingPayload != nil {
+		t.Fatalf("disabled capture retained payloads: %#v", result)
+	}
+}
+
 func TestToolCallStreamObservationCapturesOnlyPolicyEnabledContent(t *testing.T) {
 	var observation gai.Observation
 	sink := gai.ObservationSinkFunc(func(_ context.Context, emitted gai.Observation) {

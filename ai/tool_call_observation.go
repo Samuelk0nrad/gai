@@ -23,8 +23,10 @@ type toolCallStreamResult struct {
 }
 
 type toolCallStreamObserver struct {
-	sink      gai.ObservationSink
-	operation *observe.Operation
+	sink              gai.ObservationSink
+	operation         *observe.Operation
+	captureToolInput  bool
+	captureCompletion bool
 }
 
 func newToolCallStreamObserver(ctx context.Context, sink gai.ObservationSink) (context.Context, *toolCallStreamObserver) {
@@ -37,7 +39,13 @@ func newToolCallStreamObserver(ctx context.Context, sink gai.ObservationSink) (c
 		"tool_call.detect_stream",
 		"ai:DetectToolCallsInStream",
 	)
-	return ctx, &toolCallStreamObserver{sink: sink, operation: operation}
+	policy, _ := gai.ContentCapturePolicyFromContext(ctx)
+	return ctx, &toolCallStreamObserver{
+		sink:              sink,
+		operation:         operation,
+		captureToolInput:  policy.ToolInput == gai.CaptureEnabled,
+		captureCompletion: policy.Completion == gai.CaptureEnabled,
+	}
 }
 
 func (o *toolCallStreamObserver) Detected(result *toolCallStreamResult, toolCall *ToolCall) {
@@ -49,7 +57,9 @@ func (o *toolCallStreamObserver) Detected(result *toolCallStreamResult, toolCall
 		return
 	}
 	result.lastToolCallName = toolCall.Name
-	result.lastToolCallArgs = append(result.lastToolCallArgs[:0], toolCall.Args...)
+	if o != nil && o.captureToolInput {
+		result.lastToolCallArgs = append(result.lastToolCallArgs[:0], toolCall.Args...)
+	}
 }
 
 func (o *toolCallStreamObserver) CandidateRejected(result *toolCallStreamResult, reason string, payload []byte) {
@@ -58,7 +68,16 @@ func (o *toolCallStreamObserver) CandidateRejected(result *toolCallStreamResult,
 	}
 	result.rejectedCandidateCount++
 	result.lastRejectionReason = reason
-	result.lastRejectedPayload = append(result.lastRejectedPayload[:0], payload...)
+	if o != nil && o.captureCompletion {
+		result.lastRejectedPayload = append(result.lastRejectedPayload[:0], payload...)
+	}
+}
+
+func (o *toolCallStreamObserver) Pending(result *toolCallStreamResult, payload []byte) {
+	if result == nil || o == nil || !o.captureCompletion {
+		return
+	}
+	result.pendingPayload = append(result.pendingPayload[:0], payload...)
 }
 
 func (o *toolCallStreamObserver) Finished(ctx context.Context, result toolCallStreamResult) {
