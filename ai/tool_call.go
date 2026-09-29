@@ -237,6 +237,12 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 			var ok bool
 			select {
 			case <-ctx.Done():
+				if isJSONCandidate {
+					pendingPayload := joinTokenData(pending)
+					observer.Pending(&result, pendingPayload)
+					result.eofPending = true
+					observer.CandidateRejected(&result, "stream_canceled", pendingPayload)
+				}
 				canceled = true
 				return
 			case t, ok = <-in:

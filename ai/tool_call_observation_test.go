@@ -296,6 +296,40 @@ func TestToolCallStreamObservationReportsCancellation(t *testing.T) {
 	}
 }
 
+func TestToolCallStreamObservationReportsPendingCandidateAtCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	var observation gai.Observation
+	sink := gai.ObservationSinkFunc(func(_ context.Context, emitted gai.Observation) {
+		observation = emitted
+	})
+	ctx = gai.WithContentCapturePolicy(ctx, gai.ContentCapturePolicy{Completion: gai.CaptureEnabled})
+	in := make(chan Token)
+	out := DetectToolCallsInStream(ctx, in, sink)
+	in <- Token{Type: TokenTypeText, Data: []byte(`{"type":"function","name":"echo"`)}
+	cancel()
+
+	output := drainToolCallStream(out)
+
+	if len(output) != 0 {
+		t.Fatalf("output = %#v, want cancellation before pending candidate replay", output)
+	}
+	if observation.Fields["outcome"] != "canceled" || observation.Fields["eof_pending"] != true {
+		t.Fatalf("terminal outcome = %#v", observation.Fields)
+	}
+	if observation.Fields["input_token_events"] != 1 || observation.Fields["output_token_events"] != 0 {
+		t.Fatalf("cancellation counts = %#v", observation.Fields)
+	}
+	if observation.Fields["rejected_candidate_count"] != 1 || observation.Fields["last_rejection_reason"] != "stream_canceled" {
+		t.Fatalf("rejection summary = %#v", observation.Fields)
+	}
+	if observation.Fields["pending_data"] != `{"type":"function","name":"echo"` {
+		t.Fatalf("captured pending data = %#v", observation.Fields)
+	}
+	if observation.Fields["last_rejected_candidate"] != `{"type":"function","name":"echo"` {
+		t.Fatalf("captured rejected candidate = %#v", observation.Fields)
+	}
+}
+
 func TestToolCallStreamObservationCancellationWinsOverClosedInput(t *testing.T) {
 	recorder, restore := installToolCallStreamSpanRecorder(t)
 	defer restore()
