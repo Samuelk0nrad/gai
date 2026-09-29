@@ -271,8 +271,8 @@ func (m *traceTestModel) GenerateStream(ctx context.Context, _ ai.AIRequest) <-c
 	return out
 }
 
-func (*traceTestModel) Close() error            { return nil }
-func (*traceTestModel) Tokenizer() ai.Tokenizer { return &mocks.MockTokenizer{} }
+func (*traceTestModel) Close() error                  { return nil }
+func (*traceTestModel) TokenCounter() ai.TokenCounter { return &mocks.MockTokenCounter{} }
 
 type traceTestTool struct{ loop.Tool }
 

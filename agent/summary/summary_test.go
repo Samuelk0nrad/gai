@@ -111,6 +111,6 @@ func (m *recordingModel) Close() error {
 	return nil
 }
 
-func (m *recordingModel) Tokenizer() ai.Tokenizer {
-	return &mocks.MockTokenizer{}
+func (m *recordingModel) TokenCounter() ai.TokenCounter {
+	return &mocks.MockTokenCounter{}
 }

@@ -13,9 +13,9 @@ import (
 var (
 	// ErrInvalidExecutionConfig identifies an invalid effective run configuration.
 	ErrInvalidExecutionConfig = errors.New("invalid agent execution configuration")
-	// ErrTokenizerNotConfigurable means a prompt builder cannot honor an explicit
-	// tokenizer selection or a model override's automatic tokenizer selection.
-	ErrTokenizerNotConfigurable = errors.New("prompt builder does not implement TokenizerSetter")
+	// ErrTokenCounterNotConfigurable means a prompt builder cannot honor an explicit
+	// counter selection or a model override's automatic counter selection.
+	ErrTokenCounterNotConfigurable = errors.New("prompt builder does not implement TokenCounterSetter")
 )
 
 // Optional distinguishes inheritance from replacement with a possibly nil value.
@@ -49,9 +49,10 @@ type ExecutionOverrides struct {
 	ToolChoice     *ai.ToolChoice
 	ResponseFormat *ai.ResponseFormat
 	Reasoning      *ai.ReasoningConfig
-	// Tokenizer set to nil clears a custom tokenizer and selects from the
-	// effective model. It does not disable counting or introduce an estimator.
-	Tokenizer Optional[ai.Tokenizer]
+	// TokenCounter set to nil clears a custom counter and selects from the
+	// effective model, falling back to ai.TextTokenEstimator. It never disables
+	// counting. Counters supplied here must perform only local work.
+	TokenCounter Optional[ai.TokenCounter]
 	// RetryPolicy set to nil disables the entire policy, including its timeouts.
 	RetryPolicy Optional[*loop.RetryPolicy]
 	// ToolResponseProcessor set to nil disables the inherited processor.
@@ -59,18 +60,18 @@ type ExecutionOverrides struct {
 }
 
 type resolvedExecution struct {
-	model                  ai.Model
-	limits                 Limits
-	tools                  []loop.Tool
-	toolChoice             ai.ToolChoice
-	responseFormat         ai.ResponseFormat
-	reasoning              ai.ReasoningConfig
-	tokenizer              ai.Tokenizer
-	retryPolicy            *loop.RetryPolicy
-	toolResponseProcessor  loop.ToolResponseProcessor
-	nativeTools            bool
-	reconfigureTools       bool
-	requireTokenizerSetter bool
+	model                     ai.Model
+	limits                    Limits
+	tools                     []loop.Tool
+	toolChoice                ai.ToolChoice
+	responseFormat            ai.ResponseFormat
+	reasoning                 ai.ReasoningConfig
+	counter                   ai.TokenCounter
+	retryPolicy               *loop.RetryPolicy
+	toolResponseProcessor     loop.ToolResponseProcessor
+	nativeTools               bool
+	reconfigureTools          bool
+	requireTokenCounterSetter bool
 }
 
 // resolveExecution owns the configuration used by a run. It deliberately
@@ -79,7 +80,7 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 	r := resolvedExecution{
 		model: def.Model, limits: def.Limits, tools: def.Tools,
 		toolChoice: def.ToolChoice, responseFormat: def.ResponseFormat,
-		reasoning: def.Reasoning, tokenizer: def.Tokenizer,
+		reasoning: def.Reasoning, counter: def.TokenCounter,
 		retryPolicy: def.RetryPolicy, toolResponseProcessor: def.ToolResponseProcessor,
 		reconfigureTools: def.ToolChoice.Mode != "" || len(def.ToolChoice.Names) != 0,
 	}
@@ -87,7 +88,7 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 		if overrides.Model != nil {
 			r.model = overrides.Model
 			r.reconfigureTools = true
-			r.requireTokenizerSetter = true
+			r.requireTokenCounterSetter = true
 		}
 		if overrides.Limits.MaxTokens != nil {
 			r.limits.MaxTokens = *overrides.Limits.MaxTokens
@@ -109,9 +110,9 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 		if overrides.Reasoning != nil {
 			r.reasoning = *overrides.Reasoning
 		}
-		if overrides.Tokenizer.Set {
-			r.tokenizer = overrides.Tokenizer.Value
-			r.requireTokenizerSetter = true
+		if overrides.TokenCounter.Set {
+			r.counter = overrides.TokenCounter.Value
+			r.requireTokenCounterSetter = true
 		}
 		if overrides.RetryPolicy.Set {
 			r.retryPolicy = overrides.RetryPolicy.Value
@@ -129,11 +130,11 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 	if r.limits.MaxLoopIterations < 0 {
 		return resolvedExecution{}, fmt.Errorf("%w: MaxLoopIterations must be non-negative", ErrInvalidExecutionConfig)
 	}
-	if r.tokenizer != nil {
-		if nilDependency(r.tokenizer) {
-			return resolvedExecution{}, fmt.Errorf("%w: tokenizer is a typed nil", ErrInvalidExecutionConfig)
+	if r.counter != nil {
+		if nilDependency(r.counter) {
+			return resolvedExecution{}, fmt.Errorf("%w: counter is a typed nil", ErrInvalidExecutionConfig)
 		}
-		r.requireTokenizerSetter = true
+		r.requireTokenCounterSetter = true
 	}
 	if r.toolResponseProcessor != nil && nilDependency(r.toolResponseProcessor) {
 		return resolvedExecution{}, fmt.Errorf("%w: tool response processor is a typed nil", ErrInvalidExecutionConfig)
@@ -159,10 +160,15 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 	r.toolChoice = cloneToolChoice(r.toolChoice)
 	r.responseFormat = cloneResponseFormat(r.responseFormat)
 	r.retryPolicy = cloneRetryPolicy(r.retryPolicy)
-	if r.tokenizer == nil {
-		r.tokenizer = r.model.Tokenizer()
-		if r.tokenizer != nil && nilDependency(r.tokenizer) {
-			return resolvedExecution{}, fmt.Errorf("%w: model tokenizer is a typed nil", ErrInvalidExecutionConfig)
+	if r.counter == nil {
+		if provider, ok := r.model.(ai.TokenCounterProvider); ok {
+			r.counter = provider.TokenCounter()
+		}
+		if r.counter != nil && nilDependency(r.counter) {
+			return resolvedExecution{}, fmt.Errorf("%w: model counter is a typed nil", ErrInvalidExecutionConfig)
+		}
+		if r.counter == nil {
+			r.counter = ai.TextTokenEstimator{}
 		}
 	}
 	return r, nil

@@ -16,9 +16,9 @@ import (
 )
 
 type testPromptBuilder struct {
-	prompt    string
-	input     gaictx.PromptInput
-	tokenizer ai.Tokenizer
+	prompt  string
+	input   gaictx.PromptInput
+	counter ai.TokenCounter
 }
 
 // unclonablePromptBuilder models a fresh third-party builder returned for one
@@ -150,8 +150,8 @@ func (b *testPromptBuilder) SetInput(input gaictx.PromptInput) {
 	}
 }
 
-func (b *testPromptBuilder) SetTokenizer(tokenizer ai.Tokenizer) {
-	b.tokenizer = tokenizer
+func (b *testPromptBuilder) SetTokenCounter(counter ai.TokenCounter) {
+	b.counter = counter
 }
 
 func TestAgentNewRunAcceptsFreshUnclonablePromptBuilder(t *testing.T) {
@@ -207,8 +207,8 @@ func TestAgentNewRunCreatesLoop(t *testing.T) {
 	if len(request.Tools) != 1 || request.Tools[0].Name != tool.Name() {
 		t.Fatalf("request tools = %+v", request.Tools)
 	}
-	if builder.tokenizer == nil {
-		t.Fatal("expected model tokenizer to be set on prompt builder")
+	if builder.counter == nil {
+		t.Fatal("expected model counter to be set on prompt builder")
 	}
 }
 
@@ -1170,15 +1170,15 @@ func promptContextValue(input agent.RunInput, name string) string {
 	return ""
 }
 
-func TestAgentNewRunUsesConfiguredTokenizerOverride(t *testing.T) {
+func TestAgentNewRunUsesConfiguredTokenCounterOverride(t *testing.T) {
 	t.Parallel()
 
-	modelTokenizer := &mocks.MockTokenizer{IDValue: "model"}
-	overrideTokenizer := &mocks.MockTokenizer{IDValue: "override"}
+	modelTokenCounter := &mocks.MockTokenCounter{IDValue: "model"}
+	overrideTokenCounter := &mocks.MockTokenCounter{IDValue: "override"}
 	builder := &testPromptBuilder{}
 	assistant := agent.New(agent.Definition{
-		Model:     &mocks.MockModel{TokenizerValue: modelTokenizer},
-		Tokenizer: overrideTokenizer,
+		Model:        &mocks.MockModel{TokenCounterValue: modelTokenCounter},
+		TokenCounter: overrideTokenCounter,
 		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
 			return builder, nil
 		},
@@ -1189,18 +1189,18 @@ func TestAgentNewRunUsesConfiguredTokenizerOverride(t *testing.T) {
 		t.Fatalf("NewRun failed: %v", err)
 	}
 	runBuilder := builder
-	if runBuilder.tokenizer != overrideTokenizer {
-		t.Fatalf("expected configured tokenizer override, got %v", runBuilder.tokenizer)
+	if runBuilder.counter != overrideTokenCounter {
+		t.Fatalf("expected configured counter override, got %v", runBuilder.counter)
 	}
 }
 
-func TestAgentNewRunFallsBackToModelTokenizer(t *testing.T) {
+func TestAgentNewRunFallsBackToModelTokenCounter(t *testing.T) {
 	t.Parallel()
 
-	modelTokenizer := &mocks.MockTokenizer{IDValue: "model"}
+	modelTokenCounter := &mocks.MockTokenCounter{IDValue: "model"}
 	builder := &testPromptBuilder{}
 	assistant := agent.New(agent.Definition{
-		Model: &mocks.MockModel{TokenizerValue: modelTokenizer},
+		Model: &mocks.MockModel{TokenCounterValue: modelTokenCounter},
 		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
 			return builder, nil
 		},
@@ -1211,8 +1211,8 @@ func TestAgentNewRunFallsBackToModelTokenizer(t *testing.T) {
 		t.Fatalf("NewRun failed: %v", err)
 	}
 	runBuilder := builder
-	if runBuilder.tokenizer != modelTokenizer {
-		t.Fatalf("expected model tokenizer fallback, got %v", runBuilder.tokenizer)
+	if runBuilder.counter != modelTokenCounter {
+		t.Fatalf("expected model counter fallback, got %v", runBuilder.counter)
 	}
 }
 

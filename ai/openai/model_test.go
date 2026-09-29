@@ -40,7 +40,7 @@ func TestModelGenerateMapsCapabilitiesAndResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Model returned error: %v", err)
 	}
-	res, err := m.Generate(context.Background(), ai.AIRequest{
+	res, err := any(m).(ai.ModelGenerator).Generate(context.Background(), ai.AIRequest{
 		Prompt:         "hello",
 		MaxTokens:      42,
 		Tools:          []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`)}},
@@ -92,7 +92,7 @@ func TestModelGenerateWithResponsesTransportMapsToolContinuationAndNoneEffort(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := m.Generate(t.Context(), ai.AIRequest{
+	res, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{
 		Messages: []ai.RequestMessage{
 			{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{ID: "call_1", Name: "search", Arguments: json.RawMessage(`{"q":"first"}`)}}},
 			{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: "call_1", Name: "search", Content: "first result"}},
@@ -144,7 +144,7 @@ func TestModelResponsesTransportDisablesResponseStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Generate(t.Context(), ai.AIRequest{Prompt: "sync"}); err != nil {
+	if _, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "sync"}); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "stream"}) {
@@ -198,14 +198,14 @@ func TestModelGenerateWithResponsesTransportPreservesReasoningItemsAcrossToolCon
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := m.Generate(t.Context(), ai.AIRequest{Prompt: "find go", Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}}})
+	first, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "find go", Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}}})
 	if err != nil {
 		t.Fatalf("first Generate: %v", err)
 	}
 	if len(first.ToolCalls) != 1 || string(first.ToolCalls[0].ThoughtSignature) == "" {
 		t.Fatalf("first tool calls = %#v, want reasoning signature", first.ToolCalls)
 	}
-	_, err = m.Generate(t.Context(), ai.AIRequest{Messages: []ai.RequestMessage{
+	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.RequestMessage{
 		{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{ID: first.ToolCalls[0].ID, Name: first.ToolCalls[0].Name, Arguments: first.ToolCalls[0].Args, ThoughtSignature: first.ToolCalls[0].ThoughtSignature}}},
 		{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: first.ToolCalls[0].ID, Name: first.ToolCalls[0].Name, Content: "result"}},
 	}})
@@ -255,7 +255,7 @@ func TestModelGenerateStreamWithResponsesTransportPreservesReasoningItemsAcrossT
 	if call == nil || len(call.ThoughtSignature) == 0 {
 		t.Fatalf("streamed tool call = %#v, want reasoning signature", call)
 	}
-	_, err = m.Generate(t.Context(), ai.AIRequest{Messages: []ai.RequestMessage{
+	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.RequestMessage{
 		{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{ID: call.ID, Name: call.Name, Arguments: call.Args, ThoughtSignature: call.ThoughtSignature}}},
 		{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: call.ID, Name: call.Name, Content: "result"}},
 	}})
@@ -284,7 +284,7 @@ func TestModelGenerateWithResponsesTransportRejectsInvalidToolCallArguments(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = m.Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
+	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
 	if err == nil || err.Error() != `invalid JSON arguments for tool "search"` {
 		t.Fatalf("Generate error = %v, want invalid tool arguments error", err)
 	}
@@ -306,7 +306,7 @@ func TestModelGenerateWithResponsesTransportRejectsFailedResponseWithoutErrorMes
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = m.Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
+	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
 	if err == nil || err.Error() != "OpenAI Responses API: response failed" {
 		t.Fatalf("Generate error = %v, want failed response error", err)
 	}
@@ -328,7 +328,7 @@ func TestModelGenerateWithResponsesTransportReturnsRefusalText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := m.Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
+	res, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -809,7 +809,7 @@ func TestModelPreflightRejectsUnsupportedBeforeTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = m.Generate(t.Context(), ai.AIRequest{Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}})
+	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}})
 	if !errors.Is(err, ai.ErrUnsupportedCapability) || requests != 0 {
 		t.Fatalf("Generate error = %v, requests = %d; want local unsupported error and no request", err, requests)
 	}
@@ -837,7 +837,7 @@ func TestModelPreflightRejectsReasoningToolsOnChatCompletionsBeforeTransport(t *
 		Tools:     []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}},
 		Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh},
 	}
-	if _, err := m.Generate(t.Context(), req); !errors.Is(err, ai.ErrUnsupportedCapability) || requests != 0 {
+	if _, err := any(m).(ai.ModelGenerator).Generate(t.Context(), req); !errors.Is(err, ai.ErrUnsupportedCapability) || requests != 0 {
 		t.Fatalf("Generate error = %v, requests = %d; want local unsupported error and no request", err, requests)
 	}
 	for token := range m.GenerateStream(t.Context(), req) {
@@ -864,7 +864,7 @@ func TestModelPreflightRejectsNoneReasoningToolsOnChatCompletionsBeforeTransport
 		Tools:     []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}},
 		Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortNone},
 	}
-	if _, err := m.Generate(t.Context(), req); !errors.Is(err, ai.ErrUnsupportedCapability) || requests != 0 {
+	if _, err := any(m).(ai.ModelGenerator).Generate(t.Context(), req); !errors.Is(err, ai.ErrUnsupportedCapability) || requests != 0 {
 		t.Fatalf("Generate error = %v, requests = %d; want local unsupported error and no request", err, requests)
 	}
 	for token := range m.GenerateStream(t.Context(), req) {
@@ -893,7 +893,7 @@ func TestModelAllowsUnknownDynamicReasoningEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Generate(t.Context(), ai.AIRequest{Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}}); err != nil {
+	if _, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}}); err != nil {
 		t.Fatalf("dynamic model rejected locally: %v", err)
 	}
 	if got["reasoning_effort"] != "high" {
@@ -992,7 +992,7 @@ func TestModelGenerateValidatesToolCallArguments(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Model returned error: %v", err)
 			}
-			res, err := m.Generate(context.Background(), ai.AIRequest{Prompt: "hello"})
+			res, err := any(m).(ai.ModelGenerator).Generate(context.Background(), ai.AIRequest{Prompt: "hello"})
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected Generate to reject invalid tool-call arguments")

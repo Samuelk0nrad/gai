@@ -2,7 +2,10 @@ package ai
 
 import "context"
 
-// Tokenizer converts text to model tokens and estimates prompt size.
+// Tokenizer exposes the legacy concrete-provider tokenization API. Depending
+// on the provider it can perform network I/O. Runtime budgeting uses the
+// separate local-only TokenCounter contract and never selects Tokenizer
+// automatically. Concrete provider APIs retain it for explicit callers.
 type Tokenizer interface {
 	// Tokenize splits text into the tokenizer's token representation.
 	Tokenize(ctx context.Context, text string) ([]string, error)

@@ -98,7 +98,7 @@ func newLoopRunState(ctx context.Context, l *Loop) (context.Context, *loopRunSta
 		maxTokens = l.MaxTokens
 		toolCount = len(l.Tools)
 		if l.Model != nil {
-			modelName = l.Model.Name()
+			modelName = ai.ModelName(l.Model)
 		}
 		sink = l.ObservationSink
 	}

@@ -11,9 +11,9 @@ import (
 )
 
 type turnTokenUpdate struct {
-	turnID    string
-	tokenizer string
-	tokens    int
+	turnID  string
+	counter string
+	tokens  int
 }
 
 type turnTokenStore struct {
@@ -21,11 +21,11 @@ type turnTokenStore struct {
 	err     error
 }
 
-func (s *turnTokenStore) UpdateTurnTokens(ctx context.Context, turnID string, tokenizer string, tokens int) error {
+func (s *turnTokenStore) UpdateTurnTokens(ctx context.Context, turnID string, counter string, tokens int) error {
 	s.updates = append(s.updates, turnTokenUpdate{
-		turnID:    turnID,
-		tokenizer: tokenizer,
-		tokens:    tokens,
+		turnID:  turnID,
+		counter: counter,
+		tokens:  tokens,
 	})
 	return s.err
 }
@@ -33,25 +33,25 @@ func (s *turnTokenStore) UpdateTurnTokens(ctx context.Context, turnID string, to
 func TestTurnTokenizeUsesExistingTurnCount(t *testing.T) {
 	t.Parallel()
 
-	tokenizer := &mocks.MockTokenizer{}
+	counter := &mocks.MockTokenCounter{}
 	store := &turnTokenStore{}
 	turn := gaictx.Turn{
 		ID:         "turn-1",
-		TokenCount: map[string]int{"mock.tokenizer": 7},
+		TokenCount: map[string]int{"mock.counter": 7},
 		Messages: []gaictx.Message{
 			{Content: gaictx.NewTextContent("should not be counted")},
 		},
 	}
 
-	tokens, err := turn.Tokenize(context.Background(), tokenizer, store)
+	tokens, err := turn.Tokenize(context.Background(), counter, store)
 	if err != nil {
 		t.Fatalf("Tokenize failed: %v", err)
 	}
 	if tokens != 7 {
 		t.Fatalf("expected cached turn tokens, got %d", tokens)
 	}
-	if tokenizer.CountCalls != 0 {
-		t.Fatalf("expected tokenizer not to be called, got %d calls", tokenizer.CountCalls)
+	if counter.CountCalls != 0 {
+		t.Fatalf("expected counter not to be called, got %d calls", counter.CountCalls)
 	}
 	if len(store.updates) != 0 {
 		t.Fatalf("expected cached count not to be saved again, got %+v", store.updates)
@@ -61,37 +61,37 @@ func TestTurnTokenizeUsesExistingTurnCount(t *testing.T) {
 func TestTurnTokenizeSumsExistingMessageCounts(t *testing.T) {
 	t.Parallel()
 
-	tokenizer := &mocks.MockTokenizer{}
+	counter := &mocks.MockTokenCounter{}
 	store := &turnTokenStore{}
 	turn := gaictx.Turn{
 		ID: "turn-1",
 		UserMessage: &gaictx.Message{
 			Content:    gaictx.NewTextContent("hello"),
-			TokenCount: map[string]int{"mock.tokenizer": 1},
+			TokenCount: map[string]int{"mock.counter": 1},
 		},
 		Messages: []gaictx.Message{
 			{
 				Content:    gaictx.NewTextContent("assistant response"),
-				TokenCount: map[string]int{"mock.tokenizer": 2},
+				TokenCount: map[string]int{"mock.counter": 2},
 			},
 			{
 				Content:    gaictx.NewToolResultContent("tool", "result text", false, ""),
-				TokenCount: map[string]int{"mock.tokenizer": 3},
+				TokenCount: map[string]int{"mock.counter": 3},
 			},
 		},
 	}
 
-	tokens, err := turn.Tokenize(context.Background(), tokenizer, store)
+	tokens, err := turn.Tokenize(context.Background(), counter, store)
 	if err != nil {
 		t.Fatalf("Tokenize failed: %v", err)
 	}
 	if tokens != 6 {
 		t.Fatalf("expected summed message tokens, got %d", tokens)
 	}
-	if tokenizer.CountCalls != 0 {
-		t.Fatalf("expected tokenizer not to be called, got %d calls", tokenizer.CountCalls)
+	if counter.CountCalls != 0 {
+		t.Fatalf("expected counter not to be called, got %d calls", counter.CountCalls)
 	}
-	if turn.TokenCount["mock.tokenizer"] != 6 {
+	if turn.TokenCount["mock.counter"] != 6 {
 		t.Fatalf("expected turn token count to be cached, got %+v", turn.TokenCount)
 	}
 	if len(store.updates) != 1 {
@@ -105,7 +105,7 @@ func TestTurnTokenizeSumsExistingMessageCounts(t *testing.T) {
 func TestTurnTokenizeCountsCombinedMessagesWithoutUpdatingMessages(t *testing.T) {
 	t.Parallel()
 
-	tokenizer := &mocks.MockTokenizer{}
+	counter := &mocks.MockTokenCounter{}
 	store := &turnTokenStore{}
 	turn := gaictx.Turn{
 		ID: "turn-1",
@@ -118,15 +118,15 @@ func TestTurnTokenizeCountsCombinedMessagesWithoutUpdatingMessages(t *testing.T)
 		},
 	}
 
-	tokens, err := turn.Tokenize(context.Background(), tokenizer, store)
+	tokens, err := turn.Tokenize(context.Background(), counter, store)
 	if err != nil {
 		t.Fatalf("Tokenize failed: %v", err)
 	}
 	if tokens == 0 {
 		t.Fatal("expected combined messages to be counted")
 	}
-	if tokenizer.CountCalls != 1 {
-		t.Fatalf("expected one combined tokenizer call, got %d calls", tokenizer.CountCalls)
+	if counter.CountCalls != 1 {
+		t.Fatalf("expected one combined counter call, got %d calls", counter.CountCalls)
 	}
 	if turn.UserMessage.TokenCount != nil {
 		t.Fatalf("expected user message token count to stay untouched, got %+v", turn.UserMessage.TokenCount)
@@ -136,7 +136,7 @@ func TestTurnTokenizeCountsCombinedMessagesWithoutUpdatingMessages(t *testing.T)
 			t.Fatalf("expected message token count to stay untouched, got %+v", message.TokenCount)
 		}
 	}
-	if turn.TokenCount["mock.tokenizer"] != tokens {
+	if turn.TokenCount["mock.counter"] != tokens {
 		t.Fatalf("expected turn token count to be cached, got %+v", turn.TokenCount)
 	}
 	if len(store.updates) != 1 {
@@ -147,55 +147,55 @@ func TestTurnTokenizeCountsCombinedMessagesWithoutUpdatingMessages(t *testing.T)
 func TestTurnTokenizeHandlesNilMessageContent(t *testing.T) {
 	t.Parallel()
 
-	tokenizer := &mocks.MockTokenizer{}
+	counter := &mocks.MockTokenCounter{}
 	turn := gaictx.Turn{
 		ID:          "turn-1",
 		UserMessage: &gaictx.Message{Role: gaictx.RoleUser},
 		Messages:    []gaictx.Message{{Role: gaictx.RoleAssistant}},
 	}
 
-	tokens, err := turn.Tokenize(context.Background(), tokenizer, nil)
+	tokens, err := turn.Tokenize(context.Background(), counter, nil)
 	if err != nil {
 		t.Fatalf("Tokenize failed: %v", err)
 	}
 	if tokens != 0 {
 		t.Fatalf("expected nil content to contribute no tokens, got %d", tokens)
 	}
-	if tokenizer.CountCalls != 1 {
-		t.Fatalf("expected one tokenizer call, got %d", tokenizer.CountCalls)
+	if counter.CountCalls != 1 {
+		t.Fatalf("expected one counter call, got %d", counter.CountCalls)
 	}
 }
 
-func TestTurnTokenizeRequiresTokenizer(t *testing.T) {
+func TestTurnTokenizeRequiresTokenCounter(t *testing.T) {
 	t.Parallel()
 
 	turn := gaictx.Turn{ID: "turn-1"}
 	_, err := turn.Tokenize(context.Background(), nil, nil)
-	if !errors.Is(err, gaictx.ErrTokenizerNotFound) {
-		t.Fatalf("expected ErrTokenizerNotFound, got %v", err)
+	if !errors.Is(err, gaictx.ErrTokenCounterNotFound) {
+		t.Fatalf("expected ErrTokenCounterNotFound, got %v", err)
 	}
 }
 
 func TestMessageTokensRecountsNegativeCachedValue(t *testing.T) {
 	t.Parallel()
 
-	tokenizer := &mocks.MockTokenizer{Count: 4}
+	counter := &mocks.MockTokenCounter{Count: 4}
 	message := gaictx.Message{
 		Content:    gaictx.NewTextContent("hello world"),
-		TokenCount: map[string]int{"mock.tokenizer": -1},
+		TokenCount: map[string]int{"mock.counter": -1},
 	}
 
-	tokens, err := message.Tokens(context.Background(), tokenizer)
+	tokens, err := message.Tokens(context.Background(), counter)
 	if err != nil {
 		t.Fatalf("Tokens failed: %v", err)
 	}
 	if tokens != 4 {
-		t.Fatalf("expected tokenizer to recount invalid cached value, got %d", tokens)
+		t.Fatalf("expected counter to recount invalid cached value, got %d", tokens)
 	}
-	if tokenizer.CountCalls != 1 {
-		t.Fatalf("expected one tokenizer call, got %d", tokenizer.CountCalls)
+	if counter.CountCalls != 1 {
+		t.Fatalf("expected one counter call, got %d", counter.CountCalls)
 	}
-	if message.TokenCount["mock.tokenizer"] != 4 {
+	if message.TokenCount["mock.counter"] != 4 {
 		t.Fatalf("expected cache to be updated, got %+v", message.TokenCount)
 	}
 }
@@ -203,10 +203,10 @@ func TestMessageTokensRecountsNegativeCachedValue(t *testing.T) {
 func TestMessageTokensHandlesNilContent(t *testing.T) {
 	t.Parallel()
 
-	tokenizer := &mocks.MockTokenizer{}
+	counter := &mocks.MockTokenCounter{}
 	message := gaictx.Message{}
 
-	tokens, err := message.Tokens(context.Background(), tokenizer)
+	tokens, err := message.Tokens(context.Background(), counter)
 	if err != nil {
 		t.Fatalf("Tokens failed: %v", err)
 	}
@@ -218,33 +218,33 @@ func TestMessageTokensHandlesNilContent(t *testing.T) {
 func TestTurnTokenizeIgnoresNegativeCachedMessageCounts(t *testing.T) {
 	t.Parallel()
 
-	tokenizer := &mocks.MockTokenizer{}
+	counter := &mocks.MockTokenCounter{}
 	store := &turnTokenStore{}
 	turn := gaictx.Turn{
 		ID: "turn-1",
 		UserMessage: &gaictx.Message{
 			Content:    gaictx.NewTextContent("hello"),
-			TokenCount: map[string]int{"mock.tokenizer": -1},
+			TokenCount: map[string]int{"mock.counter": -1},
 		},
 		Messages: []gaictx.Message{
 			{
 				Content:    gaictx.NewTextContent("assistant response"),
-				TokenCount: map[string]int{"mock.tokenizer": 2},
+				TokenCount: map[string]int{"mock.counter": 2},
 			},
 		},
 	}
 
-	tokens, err := turn.Tokenize(context.Background(), tokenizer, store)
+	tokens, err := turn.Tokenize(context.Background(), counter, store)
 	if err != nil {
 		t.Fatalf("Tokenize failed: %v", err)
 	}
 	if tokens != 3 {
 		t.Fatalf("expected turn tokens to be recounted from messages, got %d", tokens)
 	}
-	if tokenizer.CountCalls != 1 {
-		t.Fatalf("expected tokenizer to be called once, got %d calls", tokenizer.CountCalls)
+	if counter.CountCalls != 1 {
+		t.Fatalf("expected counter to be called once, got %d calls", counter.CountCalls)
 	}
-	if turn.TokenCount["mock.tokenizer"] != 3 {
+	if turn.TokenCount["mock.counter"] != 3 {
 		t.Fatalf("expected turn token count to be cached, got %+v", turn.TokenCount)
 	}
 	if len(store.updates) != 1 || store.updates[0].tokens != 3 {
@@ -269,7 +269,7 @@ func TestTurnTokenizeEmitsObservationWhenSavingTokensFails(t *testing.T) {
 		event = emitted
 	}))
 
-	tokens, err := turn.Tokenize(context.Background(), &mocks.MockTokenizer{}, store)
+	tokens, err := turn.Tokenize(context.Background(), &mocks.MockTokenCounter{}, store)
 	if err != nil {
 		t.Fatalf("Tokenize failed: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestTurnTokenizeEmitsObservationWhenSavingTokensFails(t *testing.T) {
 		t.Fatalf("expected safe save-error observation, got %#v", event)
 	}
 	if event.Fields["turn_id"] != "turn-1" || event.Fields["turn_count"] != 2 ||
-		event.Fields["tokenizer_id"] != "mock.tokenizer" || event.Fields["token_count"] != 3 {
+		event.Fields["counter_id"] != "mock.counter" || event.Fields["token_count"] != 3 {
 		t.Fatalf("unexpected event fields: %+v", event.Fields)
 	}
 }

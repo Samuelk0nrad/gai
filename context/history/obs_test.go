@@ -37,7 +37,7 @@ func TestHistoryBuildObserverPreservesTelemetryContract(t *testing.T) {
 		events = append(events, event)
 	})
 	ctx, observer := newHistoryBuildObserver(t.Context(), sink, "session", 100, false)
-	observer.SetTokenizerID("test-tokenizer")
+	observer.SetTokenCounterID("test-counter")
 	observer.BuildFinished(ctx, nil, 80, 3, 2, 5)
 	observer.Finish(nil)
 
@@ -49,7 +49,7 @@ func TestHistoryBuildObserverPreservesTelemetryContract(t *testing.T) {
 		t.Fatalf("event name/source = %q/%q", event.Name, event.Source)
 	}
 	for key, want := range map[string]any{
-		"session_id": "session", "tokenizer_id": "test-tokenizer", "token_budget": 100,
+		"session_id": "session", "counter_id": "test-counter", "token_budget": 100,
 		"total_tokens": 80, "turn_count": 3, "message_count": 5, "content_count": 0,
 	} {
 		if got := event.Fields[key]; got != want {
@@ -78,7 +78,7 @@ func TestHistoryBuildObserverPreservesTelemetryContract(t *testing.T) {
 	}
 	for key, want := range map[string]string{
 		"context.operation": "build", "context.source": "history", "context.session_id": "session",
-		"context.token_budget": "100", "context.tokenizer_id": "test-tokenizer",
+		"context.token_budget": "100", "context.counter_id": "test-counter",
 		"context.history.total_tokens": "80", "context.history.turn_count": "3",
 		"context.history.included_turn_count": "2", "context.history.message_count": "5",
 	} {

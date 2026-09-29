@@ -117,32 +117,32 @@ func roleRenderType(role gaictx.Role) string {
 	return "message"
 }
 
-func (p *Part) Tokens(ctx context.Context, tokenizer ai.Tokenizer) (int, error) {
-	if tokenizer == nil {
-		return 0, gaictx.ErrTokenizerNotFound
+func (p *Part) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
+	if counter == nil {
+		return 0, gaictx.ErrTokenCounterNotFound
 	}
-	tokenizerID := tokenizer.ID()
-	if count, ok := p.TokenCount[tokenizerID]; ok && count >= 0 {
+	counterID := counter.ID()
+	if count, ok := p.TokenCount[counterID]; ok && count >= 0 {
 		return count, nil
 	} else if ok {
-		delete(p.TokenCount, tokenizerID)
+		delete(p.TokenCount, counterID)
 	}
 
 	count := 0
 	for _, content := range p.Contents {
-		tokens, err := tokenizer.CountTokens(ctx, content.String())
+		tokens, err := counter.CountTokens(ctx, content.String())
 		if err != nil {
 			return 0, err
 		}
 		count += tokens
 	}
-	p.saveTokens(tokenizerID, count)
+	p.saveTokens(counterID, count)
 	return count, nil
 }
 
-func (p *Part) saveTokens(tokenizerID string, tokens int) {
+func (p *Part) saveTokens(counterID string, tokens int) {
 	if p.TokenCount == nil {
 		p.TokenCount = make(map[string]int)
 	}
-	p.TokenCount[tokenizerID] = tokens
+	p.TokenCount[counterID] = tokens
 }

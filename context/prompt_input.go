@@ -57,11 +57,11 @@ func (p *NamedPart) Name() string {
 	return p.name
 }
 
-func (p *NamedPart) Tokens(ctx context.Context, tokenizer ai.Tokenizer) (int, error) {
+func (p *NamedPart) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
 	if p == nil {
 		return 0, nil
 	}
-	return p.text.Tokens(ctx, tokenizer)
+	return p.text.Tokens(ctx, counter)
 }
 
 func (p *NamedPart) Render(ctx context.Context) (RenderNode, error) {

@@ -52,7 +52,7 @@ func (s *HistorySource) summarizeState(ctx context.Context, state *HistoryState,
 		return nil, err
 	}
 	obs.ObserveState(len(state.Turns), state.Summary != nil)
-	obs.SetTokenizerID(s.tokenizer.ID())
+	obs.SetTokenCounterID(s.counter.ID())
 	if len(state.Turns) == 0 {
 		obs.SummarySkippedNoTurns(ctx)
 		return state, nil
@@ -99,12 +99,12 @@ func (s *HistorySource) summarizeState(ctx context.Context, state *HistoryState,
 		nextSummary.StartTurnID = state.Summary.StartTurnID
 		nextSummary.StartTurnCount = state.Summary.StartTurnCount
 	}
-	tokenCount, err := s.tokenizer.CountTokens(ctx, nextSummary.Content.String())
+	tokenCount, err := s.counter.CountTokens(ctx, nextSummary.Content.String())
 	if err != nil {
 		obs.SummaryTokenCountFailed(ctx, nextSummary, err)
 		return nil, err
 	}
-	nextSummary.SetTokenCount(s.tokenizer.ID(), tokenCount)
+	nextSummary.SetTokenCount(s.counter.ID(), tokenCount)
 	obs.SummaryGenerated(ctx, nextSummary, summarizedTurnCount, len(state.Turns)-summarizedTurnCount, state.Summary != nil)
 
 	nextState := &HistoryState{
@@ -146,31 +146,31 @@ func writeTurn(builder *strings.Builder, turn *gaictx.Turn) {
 	}
 }
 
-func (s *Summary) TokenCount(tokenizer ai.Tokenizer) (int, error) {
+func (s *Summary) TokenCount(counter ai.TokenCounter) (int, error) {
 	if s == nil {
 		return 0, fmt.Errorf("summary is nil")
 	}
-	if tokenizer == nil {
-		return 0, fmt.Errorf("tokenizer is required")
+	if counter == nil {
+		return 0, fmt.Errorf("counter is required")
 	}
 	if s.tokenCount == nil {
 		s.tokenCount = map[string]int{}
 	}
-	tokenizerID := tokenizer.ID()
-	if count, ok := s.tokenCount[tokenizerID]; ok && count >= 0 {
+	counterID := counter.ID()
+	if count, ok := s.tokenCount[counterID]; ok && count >= 0 {
 		return count, nil
 	} else if ok {
-		delete(s.tokenCount, tokenizerID)
+		delete(s.tokenCount, counterID)
 	}
-	count, err := tokenizer.CountTokens(context.Background(), s.Content.String())
+	count, err := counter.CountTokens(context.Background(), s.Content.String())
 	if err != nil {
 		return 0, err
 	}
-	s.SetTokenCount(tokenizerID, count)
+	s.SetTokenCount(counterID, count)
 	return count, nil
 }
 
-func (s *Summary) SetTokenCount(tokenizerID string, tokens int) {
+func (s *Summary) SetTokenCount(counterID string, tokens int) {
 	if s == nil {
 		return
 	}
@@ -178,10 +178,10 @@ func (s *Summary) SetTokenCount(tokenizerID string, tokens int) {
 		s.tokenCount = map[string]int{}
 	}
 	if tokens < 0 {
-		delete(s.tokenCount, tokenizerID)
+		delete(s.tokenCount, counterID)
 		return
 	}
-	s.tokenCount[tokenizerID] = tokens
+	s.tokenCount[counterID] = tokens
 }
 
 func (s *Summary) SetTokenCounts(tokenCounts map[string]int) {
@@ -189,10 +189,10 @@ func (s *Summary) SetTokenCounts(tokenCounts map[string]int) {
 		return
 	}
 	s.tokenCount = make(map[string]int, len(tokenCounts))
-	for tokenizerID, tokens := range tokenCounts {
+	for counterID, tokens := range tokenCounts {
 		if tokens < 0 {
 			continue
 		}
-		s.tokenCount[tokenizerID] = tokens
+		s.tokenCount[counterID] = tokens
 	}
 }

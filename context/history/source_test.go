@@ -194,7 +194,7 @@ func (s *historyStore) SaveHistoryState(ctx context.Context, sessionID string, s
 	return nil
 }
 
-func (s *historyStore) UpdateTurnTokens(ctx context.Context, turnID string, tokenizer string, tokens int) error {
+func (s *historyStore) UpdateTurnTokens(ctx context.Context, turnID string, counter string, tokens int) error {
 	return nil
 }
 
@@ -217,7 +217,7 @@ func TestHistorySourceDoesNotDiscardTurnsExcludedFromPrompt(t *testing.T) {
 					Count: 3,
 					UserMessage: &gaictx.Message{
 						Content:    gaictx.NewTextContent("hello"),
-						TokenCount: map[string]int{"mock.tokenizer": 1},
+						TokenCount: map[string]int{"mock.counter": 1},
 					},
 				},
 				{
@@ -225,7 +225,7 @@ func TestHistorySourceDoesNotDiscardTurnsExcludedFromPrompt(t *testing.T) {
 					Count: 4,
 					UserMessage: &gaictx.Message{
 						Content:    gaictx.NewTextContent("this message is too long"),
-						TokenCount: map[string]int{"mock.tokenizer": 100},
+						TokenCount: map[string]int{"mock.counter": 100},
 					},
 				},
 			},
@@ -233,7 +233,7 @@ func TestHistorySourceDoesNotDiscardTurnsExcludedFromPrompt(t *testing.T) {
 	}
 
 	source := history.NewHistory("session-1", store)
-	source.SetTokenizer(&mocks.MockTokenizer{})
+	source.SetTokenCounter(&mocks.MockTokenCounter{})
 
 	part, err := source.Function(context.Background(), 10)
 	if err != nil {
@@ -262,24 +262,24 @@ func TestHistorySourceIncludesNewestFittingTurnsInChronologicalOrder(t *testing.
 				{
 					ID:       "turn-1",
 					Count:    1,
-					Messages: []gaictx.Message{{Role: gaictx.RoleAssistant, Content: gaictx.NewTextContent("oldest"), TokenCount: map[string]int{"mock.tokenizer": 100}}},
+					Messages: []gaictx.Message{{Role: gaictx.RoleAssistant, Content: gaictx.NewTextContent("oldest"), TokenCount: map[string]int{"mock.counter": 100}}},
 				},
 				{
 					ID:       "turn-2",
 					Count:    2,
-					Messages: []gaictx.Message{{Role: gaictx.RoleAssistant, Content: gaictx.NewTextContent("middle"), TokenCount: map[string]int{"mock.tokenizer": 2}}},
+					Messages: []gaictx.Message{{Role: gaictx.RoleAssistant, Content: gaictx.NewTextContent("middle"), TokenCount: map[string]int{"mock.counter": 2}}},
 				},
 				{
 					ID:       "turn-3",
 					Count:    3,
-					Messages: []gaictx.Message{{Role: gaictx.RoleAssistant, Content: gaictx.NewTextContent("newest"), TokenCount: map[string]int{"mock.tokenizer": 2}}},
+					Messages: []gaictx.Message{{Role: gaictx.RoleAssistant, Content: gaictx.NewTextContent("newest"), TokenCount: map[string]int{"mock.counter": 2}}},
 				},
 			},
 		},
 	}
 
 	source := history.NewHistory("session-1", store)
-	source.SetTokenizer(&mocks.MockTokenizer{})
+	source.SetTokenCounter(&mocks.MockTokenCounter{})
 
 	result, err := source.Function(context.Background(), 4)
 	if err != nil {
@@ -316,7 +316,7 @@ func TestHistorySourceDoesNotSummarizeWhenHistoryFitsBudget(t *testing.T) {
 					Count: 1,
 					UserMessage: &gaictx.Message{
 						Content:    gaictx.NewTextContent("first user"),
-						TokenCount: map[string]int{"mock.tokenizer": 2},
+						TokenCount: map[string]int{"mock.counter": 2},
 					},
 				},
 				{
@@ -324,7 +324,7 @@ func TestHistorySourceDoesNotSummarizeWhenHistoryFitsBudget(t *testing.T) {
 					Count: 2,
 					UserMessage: &gaictx.Message{
 						Content:    gaictx.NewTextContent("second user"),
-						TokenCount: map[string]int{"mock.tokenizer": 2},
+						TokenCount: map[string]int{"mock.counter": 2},
 					},
 				},
 				{
@@ -332,7 +332,7 @@ func TestHistorySourceDoesNotSummarizeWhenHistoryFitsBudget(t *testing.T) {
 					Count: 3,
 					UserMessage: &gaictx.Message{
 						Content:    gaictx.NewTextContent("third user"),
-						TokenCount: map[string]int{"mock.tokenizer": 2},
+						TokenCount: map[string]int{"mock.counter": 2},
 					},
 				},
 			},
@@ -351,7 +351,7 @@ func TestHistorySourceDoesNotSummarizeWhenHistoryFitsBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
-	source.SetTokenizer(&mocks.MockTokenizer{})
+	source.SetTokenCounter(&mocks.MockTokenCounter{})
 
 	part, err := source.Function(context.Background(), 100)
 	if err != nil {
@@ -385,7 +385,7 @@ func TestHistorySourceSummarizesOldestTurnsWhenBudgetReached(t *testing.T) {
 					Count: 1,
 					UserMessage: &gaictx.Message{
 						Content:    gaictx.NewTextContent("first user"),
-						TokenCount: map[string]int{"mock.tokenizer": 2},
+						TokenCount: map[string]int{"mock.counter": 2},
 					},
 				},
 				{
@@ -393,7 +393,7 @@ func TestHistorySourceSummarizesOldestTurnsWhenBudgetReached(t *testing.T) {
 					Count: 2,
 					UserMessage: &gaictx.Message{
 						Content:    gaictx.NewTextContent("second user"),
-						TokenCount: map[string]int{"mock.tokenizer": 2},
+						TokenCount: map[string]int{"mock.counter": 2},
 					},
 				},
 				{
@@ -401,7 +401,7 @@ func TestHistorySourceSummarizesOldestTurnsWhenBudgetReached(t *testing.T) {
 					Count: 3,
 					UserMessage: &gaictx.Message{
 						Content:    gaictx.NewTextContent("third user"),
-						TokenCount: map[string]int{"mock.tokenizer": 2},
+						TokenCount: map[string]int{"mock.counter": 2},
 					},
 				},
 			},
@@ -420,7 +420,7 @@ func TestHistorySourceSummarizesOldestTurnsWhenBudgetReached(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
-	source.SetTokenizer(&mocks.MockTokenizer{})
+	source.SetTokenCounter(&mocks.MockTokenCounter{})
 
 	part, err := source.Function(context.Background(), 5)
 	if err != nil {
@@ -490,7 +490,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 						Count: 3,
 						UserMessage: &gaictx.Message{
 							Content:    gaictx.NewTextContent("hello"),
-							TokenCount: map[string]int{"mock.tokenizer": 1},
+							TokenCount: map[string]int{"mock.counter": 1},
 						},
 					},
 					{
@@ -498,7 +498,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 						Count: 4,
 						UserMessage: &gaictx.Message{
 							Content:    gaictx.NewTextContent("this message is too long"),
-							TokenCount: map[string]int{"mock.tokenizer": 100},
+							TokenCount: map[string]int{"mock.counter": 100},
 						},
 					},
 				},
@@ -518,7 +518,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 						Count: 1,
 						UserMessage: &gaictx.Message{
 							Content:    gaictx.NewTextContent("first user"),
-							TokenCount: map[string]int{"mock.tokenizer": 2},
+							TokenCount: map[string]int{"mock.counter": 2},
 						},
 					},
 					{
@@ -526,7 +526,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 						Count: 2,
 						UserMessage: &gaictx.Message{
 							Content:    gaictx.NewTextContent("second user"),
-							TokenCount: map[string]int{"mock.tokenizer": 2},
+							TokenCount: map[string]int{"mock.counter": 2},
 						},
 					},
 					{
@@ -534,7 +534,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 						Count: 3,
 						UserMessage: &gaictx.Message{
 							Content:    gaictx.NewTextContent("third user"),
-							TokenCount: map[string]int{"mock.tokenizer": 2},
+							TokenCount: map[string]int{"mock.counter": 2},
 						},
 					},
 				},
@@ -559,7 +559,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 						Count: 1,
 						UserMessage: &gaictx.Message{
 							Content:    gaictx.NewTextContent("first user"),
-							TokenCount: map[string]int{"mock.tokenizer": 2},
+							TokenCount: map[string]int{"mock.counter": 2},
 						},
 					},
 					{
@@ -567,7 +567,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 						Count: 2,
 						UserMessage: &gaictx.Message{
 							Content:    gaictx.NewTextContent("second user"),
-							TokenCount: map[string]int{"mock.tokenizer": 2},
+							TokenCount: map[string]int{"mock.counter": 2},
 						},
 					},
 					{
@@ -575,7 +575,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 						Count: 3,
 						UserMessage: &gaictx.Message{
 							Content:    gaictx.NewTextContent("third user"),
-							TokenCount: map[string]int{"mock.tokenizer": 2},
+							TokenCount: map[string]int{"mock.counter": 2},
 						},
 					},
 				},
@@ -621,7 +621,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 				t.Fatalf("New failed: %v", err)
 			}
 
-			source.SetTokenizer(&mocks.MockTokenizer{})
+			source.SetTokenCounter(&mocks.MockTokenCounter{})
 
 			part, err := source.Function(context.Background(), tt.tokenBudget)
 			if err != nil {

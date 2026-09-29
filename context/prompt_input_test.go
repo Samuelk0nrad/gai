@@ -23,8 +23,8 @@ func TestJSONPartUsesOneStructuredRepresentation(t *testing.T) {
 	if node.Type != "memory_observation" || node.Value != `{"name":"Sam"}` {
 		t.Fatalf("unexpected node: %+v", node)
 	}
-	tokenizer := &mocks.MockTokenizer{}
-	if _, err := part.Tokens(t.Context(), tokenizer); err != nil {
+	counter := &mocks.MockTokenCounter{}
+	if _, err := part.Tokens(t.Context(), counter); err != nil {
 		t.Fatalf("Tokens failed: %v", err)
 	}
 

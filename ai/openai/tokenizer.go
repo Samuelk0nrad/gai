@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/lace-ai/gai/ai"
 	tiktoken "github.com/tiktoken-go/tokenizer"
@@ -43,16 +44,49 @@ func NewTokenizer(model string) (ai.Tokenizer, error) {
 	return &Tokenizer{codec: codec, encoding: encoding}, nil
 }
 
-// Tokenizer is a local text-encoding tokenizer backed by tiktoken-go.
-// Its API is deliberately limited to ai.Tokenizer so it can be adapted to the
-// count-only TokenCounter contract planned in #144 without exposing a second
-// provider-specific abstraction.
+// Tokenizer is a local text-encoding tokenizer backed by tiktoken-go. It also
+// implements the count-only runtime capability, without network I/O.
 type Tokenizer struct {
 	codec    tiktoken.Codec
 	encoding tiktoken.Encoding
 }
 
 var _ ai.Tokenizer = (*Tokenizer)(nil)
+var _ ai.TokenCounter = (*Tokenizer)(nil)
+
+func (*Tokenizer) Fidelity() ai.TokenCountFidelity { return ai.TokenCountExact }
+
+// TokenCounter returns a local counter for a known encoding. Unknown models
+// return nil so runtime budgeting selects the generic estimator. Encoding
+// initialization errors are returned by CountTokens rather than hidden behind
+// an estimate.
+func (m *Model) TokenCounter() ai.TokenCounter {
+	encoding, ok := openAIEncodingForModel(strings.TrimSpace(m.name))
+	if !ok {
+		return nil
+	}
+	return &modelTokenCounter{encoding: encoding}
+}
+
+type modelTokenCounter struct {
+	encoding tiktoken.Encoding
+	once     sync.Once
+	codec    tiktoken.Codec
+	err      error
+}
+
+func (c *modelTokenCounter) ID() string                    { return tokenizerIDPrefix + string(c.encoding) }
+func (*modelTokenCounter) Fidelity() ai.TokenCountFidelity { return ai.TokenCountExact }
+func (c *modelTokenCounter) CountTokens(ctx context.Context, text string) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	c.once.Do(func() { c.codec, c.err = tiktoken.Get(c.encoding) })
+	if c.err != nil {
+		return 0, fmt.Errorf("load OpenAI counter %q: %w", c.encoding, c.err)
+	}
+	return (&Tokenizer{codec: c.codec, encoding: c.encoding}).CountTokens(ctx, text)
+}
 
 func (t *Tokenizer) ID() string { return tokenizerIDPrefix + string(t.encoding) }
 
@@ -63,6 +97,9 @@ func (t *Tokenizer) CountTokens(ctx context.Context, text string) (int, error) {
 	count, err := t.codec.Count(text)
 	if err != nil {
 		return 0, fmt.Errorf("count OpenAI tokens: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
 	return count, nil
 }

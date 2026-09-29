@@ -25,7 +25,7 @@ func TestModelDescriptorRejectsUnknownReasoningEffortBeforeTransport(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = m.Generate(t.Context(), ai.AIRequest{Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffort("maximum")}})
+	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffort("maximum")}})
 	if !errors.Is(err, ai.ErrUnsupportedCapability) || requests != 0 {
 		t.Fatalf("Generate error = %v, requests = %d; want local unsupported error and no request", err, requests)
 	}
@@ -207,7 +207,7 @@ func TestGenerateEmitsObservationOnGenerationFailure(t *testing.T) {
 		t.Fatalf("Model error: %v", err)
 	}
 
-	_, err = model.Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
+	_, err = any(model).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
 	if err == nil {
 		t.Fatal("Generate error = nil, want API error")
 	}

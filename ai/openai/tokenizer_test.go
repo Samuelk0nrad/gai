@@ -143,3 +143,28 @@ func TestTokenizerCountsRealisticToolSchemaJSONFixtures(t *testing.T) {
 		})
 	}
 }
+
+func TestAutomaticCounterMatchesLocalEncodingAndPreservesFailures(t *testing.T) {
+	counter := (&Model{name: GPT41}).TokenCounter()
+	if counter.Fidelity() != ai.TokenCountExact {
+		t.Fatalf("fidelity = %v", counter.Fidelity())
+	}
+	for _, fixture := range realisticToolSchemaJSONFixtures {
+		count, err := counter.CountTokens(t.Context(), fixture.json)
+		if err != nil || count != fixture.want {
+			t.Fatalf("counter %s = %d, %v; want %d", fixture.name, count, err, fixture.want)
+		}
+	}
+	if got := (&Model{name: "unknown-model"}).TokenCounter(); got != nil {
+		t.Fatalf("unknown model counter = %T", got)
+	}
+	broken := &modelTokenCounter{encoding: "unknown-encoding"}
+	if _, err := broken.CountTokens(t.Context(), "text"); err == nil {
+		t.Fatal("invalid encoding was silently estimated")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := counter.CountTokens(ctx, "text"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled count = %v", err)
+	}
+}

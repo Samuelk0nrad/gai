@@ -47,8 +47,8 @@ func TestProviderDynamicallyListsModelsAndAcceptsThem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Model returned error: %v", err)
 	}
-	if model.Name() != "gpt-dynamic" {
-		t.Fatalf("unexpected model name: %q", model.Name())
+	if ai.ModelName(model) != "gpt-dynamic" {
+		t.Fatalf("unexpected model name: %q", ai.ModelName(model))
 	}
 	if len(requests) != 1 {
 		t.Fatalf("expected one discovery request, got %d", len(requests))
@@ -205,7 +205,7 @@ func TestProviderModelValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected dynamically discoverable model name to be accepted, got %v", err)
 	}
-	if model == nil || model.Name() != "unknown-model" {
+	if model == nil || ai.ModelName(model) != "unknown-model" {
 		t.Fatalf("unexpected model for dynamic name: %#v", model)
 	}
 }
@@ -218,7 +218,7 @@ func TestProviderModelAndFallbackList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Model returned error: %v", err)
 	}
-	if model == nil || model.Name() != GPT41Mini {
+	if model == nil || ai.ModelName(model) != GPT41Mini {
 		t.Fatalf("unexpected model: %#v", model)
 	}
 
@@ -268,7 +268,7 @@ func TestProviderValidation(t *testing.T) {
 	if err := New("   ", nil).Validate(); !errors.Is(err, ErrInvalidAPIKey) {
 		t.Fatalf("expected ErrInvalidAPIKey, got %v", err)
 	}
-	if model, err := New("test-key", nil).Model("unknown"); err != nil || model == nil || model.Name() != "unknown" {
+	if model, err := New("test-key", nil).Model("unknown"); err != nil || model == nil || ai.ModelName(model) != "unknown" {
 		t.Fatalf("expected dynamic model acceptance, got model=%#v err=%v", model, err)
 	}
 }

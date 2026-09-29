@@ -73,8 +73,8 @@ func cloneMessages(messages []gaictx.Message) []gaictx.Message {
 		cloned[i] = message
 		if message.TokenCount != nil {
 			cloned[i].TokenCount = make(map[string]int, len(message.TokenCount))
-			for tokenizer, count := range message.TokenCount {
-				cloned[i].TokenCount[tokenizer] = count
+			for counter, count := range message.TokenCount {
+				cloned[i].TokenCount[counter] = count
 			}
 		}
 	}

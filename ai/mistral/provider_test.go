@@ -50,8 +50,8 @@ func TestProviderDynamicallyListsModelsAndAcceptsThem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Model returned error: %v", err)
 	}
-	if model.Name() != "mistral-chat" {
-		t.Fatalf("unexpected model name: %q", model.Name())
+	if ai.ModelName(model) != "mistral-chat" {
+		t.Fatalf("unexpected model name: %q", ai.ModelName(model))
 	}
 	if len(requests) != 1 {
 		t.Fatalf("expected one discovery request, got %d", len(requests))
@@ -167,7 +167,7 @@ func TestProviderModelValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected dynamically discoverable model name to be accepted, got %v", err)
 	}
-	if model == nil || model.Name() != "unknown-model" {
+	if model == nil || ai.ModelName(model) != "unknown-model" {
 		t.Fatalf("unexpected model for dynamic name: %#v", model)
 	}
 }
@@ -183,8 +183,8 @@ func TestProviderModelAndListModels(t *testing.T) {
 	if model == nil {
 		t.Fatalf("expected non-nil model")
 	}
-	if model.Name() != MistralSmallLatest {
-		t.Fatalf("unexpected model name: %q", model.Name())
+	if ai.ModelName(model) != MistralSmallLatest {
+		t.Fatalf("unexpected model name: %q", ai.ModelName(model))
 	}
 
 	models, err := p.ListModels()

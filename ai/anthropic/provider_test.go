@@ -103,7 +103,7 @@ func TestProviderValidationAndModels(t *testing.T) {
 	}
 	for _, name := range models {
 		model, err := p.Model(name)
-		if err != nil || model.Name() != name {
+		if err != nil || ai.ModelName(model) != name {
 			t.Fatalf("Model(%q) = %v, %v", name, model, err)
 		}
 	}

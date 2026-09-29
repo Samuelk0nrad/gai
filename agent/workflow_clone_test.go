@@ -17,7 +17,7 @@ func TestCloneWorkflowResultOwnsMutableExecutionData(t *testing.T) {
 			Messages: []gaictx.Message{{
 				Role:       gaictx.RoleUser,
 				Content:    gaictx.NewTextContent("original"),
-				TokenCount: map[string]int{"tokenizer": 1},
+				TokenCount: map[string]int{"counter": 1},
 			}},
 			Iterations: []loop.Iteration{{
 				Parts: []loop.IterationPart{{
@@ -33,7 +33,7 @@ func TestCloneWorkflowResultOwnsMutableExecutionData(t *testing.T) {
 	cloned.Input.Prompt.Context[0] = gaictx.NewTextPart("changed")
 	cloned.Primary.Tokens[0].Data[0] = 'X'
 	cloned.Primary.Tokens[0].ToolCall.Args[0] = 'X'
-	cloned.Primary.Messages[0].TokenCount["tokenizer"] = 99
+	cloned.Primary.Messages[0].TokenCount["counter"] = 99
 	cloned.Primary.Iterations[0].Parts[0].Response.Text = "changed"
 	cloned.Primary.Iterations[0].Parts[0].ToolReq.Args[0] = 'X'
 	*cloned.Primary.Iterations[0].Parts[0].ToolResp.Text = "changed"
@@ -45,7 +45,7 @@ func TestCloneWorkflowResultOwnsMutableExecutionData(t *testing.T) {
 	if string(result.Primary.Tokens[0].Data) != "original" || string(result.Primary.Tokens[0].ToolCall.Args) != `{"query":"original"}` {
 		t.Fatalf("token data was shared with clone: %+v", result.Primary.Tokens[0])
 	}
-	if result.Primary.Messages[0].TokenCount["tokenizer"] != 1 {
+	if result.Primary.Messages[0].TokenCount["counter"] != 1 {
 		t.Fatalf("message token counts were shared with clone: %+v", result.Primary.Messages[0].TokenCount)
 	}
 	part := result.Primary.Iterations[0].Parts[0]

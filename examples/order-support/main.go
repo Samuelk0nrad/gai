@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -123,11 +124,13 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create model: %w", err)
 	}
-	defer func() {
-		if err := model.Close(); err != nil {
-			log.Printf("close model: %v", err)
-		}
-	}()
+	if closer, ok := model.(io.Closer); ok {
+		defer func() {
+			if err := closer.Close(); err != nil {
+				log.Printf("close model: %v", err)
+			}
+		}()
+	}
 
 	supportAgent := agent.New(agent.Definition{
 		Name:  "order-support",

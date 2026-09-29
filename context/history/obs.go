@@ -18,7 +18,7 @@ type historyObserver struct {
 	operation *observe.Operation
 
 	sessionID     string
-	tokenizerID   string
+	counterID     string
 	tokenBudget   int
 	summaryAmount float32
 
@@ -119,12 +119,12 @@ func (o *historyObserver) Finish(err error) {
 	o.operation.Finish(err)
 }
 
-func (o *historyObserver) SetTokenizerID(tokenizerID string) {
+func (o *historyObserver) SetTokenCounterID(counterID string) {
 	if o == nil || o.operation == nil {
 		return
 	}
-	o.tokenizerID = tokenizerID
-	o.operation.Set(attribute.String("context.tokenizer_id", tokenizerID))
+	o.counterID = counterID
+	o.operation.Set(attribute.String("context.counter_id", counterID))
 }
 
 func (o *historyObserver) MarkStatePresent() {
@@ -168,23 +168,23 @@ func (o *historyObserver) StoreMissing(ctx context.Context) {
 	}, gaictx.ErrSessionStoreNotFound)
 }
 
-func (o *historyObserver) TokenizerMissing(ctx context.Context) {
-	o.emit(ctx, "history_source_tokenizer_missing", map[string]any{
+func (o *historyObserver) TokenCounterMissing(ctx context.Context) {
+	o.emit(ctx, "history_source_counter_missing", map[string]any{
 		"session_id": o.sessionID,
-	}, gaictx.ErrTokenizerNotFound)
+	}, gaictx.ErrTokenCounterNotFound)
 }
 
 func (o *historyObserver) StateLoadFailed(ctx context.Context, err error) {
 	o.emit(ctx, "history_source_state_load_failed", map[string]any{
-		"session_id":   o.sessionID,
-		"tokenizer_id": o.tokenizerID,
+		"session_id": o.sessionID,
+		"counter_id": o.counterID,
 	}, err)
 }
 
 func (o *historyObserver) StateMissing(ctx context.Context) {
 	o.emit(ctx, "history_source_state_missing", map[string]any{
-		"session_id":   o.sessionID,
-		"tokenizer_id": o.tokenizerID,
+		"session_id": o.sessionID,
+		"counter_id": o.counterID,
 	}, nil)
 }
 
@@ -192,7 +192,7 @@ func (o *historyObserver) SummaryAttempted(ctx context.Context, turnCount int) {
 	o.MarkSummaryAttempted()
 	o.emit(ctx, "history_source_summary_attempted", map[string]any{
 		"session_id":     o.sessionID,
-		"tokenizer_id":   o.tokenizerID,
+		"counter_id":     o.counterID,
 		"token_budget":   o.tokenBudget,
 		"turn_count":     turnCount,
 		"summary_amount": float64(o.summaryAmount),
@@ -202,23 +202,23 @@ func (o *historyObserver) SummaryAttempted(ctx context.Context, turnCount int) {
 func (o *historyObserver) SummaryFailed(ctx context.Context, err error) {
 	o.emit(ctx, "history_source_summary_failed", map[string]any{
 		"session_id":   o.sessionID,
-		"tokenizer_id": o.tokenizerID,
+		"counter_id":   o.counterID,
 		"token_budget": o.tokenBudget,
 	}, err)
 }
 
 func (o *historyObserver) SummarySkippedDisabled(ctx context.Context) {
 	o.emit(ctx, "history_source_summary_skipped", map[string]any{
-		"session_id":   o.sessionID,
-		"tokenizer_id": o.tokenizerID,
-		"reason":       "disabled",
+		"session_id": o.sessionID,
+		"counter_id": o.counterID,
+		"reason":     "disabled",
 	}, nil)
 }
 
 func (o *historyObserver) StateSaveFailed(ctx context.Context, err error) {
 	o.emit(ctx, "history_source_state_save_failed", map[string]any{
-		"session_id":   o.sessionID,
-		"tokenizer_id": o.tokenizerID,
+		"session_id": o.sessionID,
+		"counter_id": o.counterID,
 	}, err)
 }
 
@@ -229,8 +229,8 @@ func (o *historyObserver) SummaryIncluded(ctx context.Context, summary *Summary)
 	o.summaryIncluded = true
 	fields := map[string]any{
 		"session_id":          o.sessionID,
-		"tokenizer_id":        o.tokenizerID,
-		"summary_tokens":      summary.tokenCount[o.tokenizerID],
+		"counter_id":          o.counterID,
+		"summary_tokens":      summary.tokenCount[o.counterID],
 		"summary_start_turn":  summary.StartTurnID,
 		"summary_end_turn":    summary.EndTurnID,
 		"summary_start_count": summary.StartTurnCount,
@@ -246,7 +246,7 @@ func (o *historyObserver) SummaryTokenCountFailed(ctx context.Context, summary *
 	}
 	fields := map[string]any{
 		"session_id":          o.sessionID,
-		"tokenizer_id":        o.tokenizerID,
+		"counter_id":          o.counterID,
 		"summary_start_turn":  summary.StartTurnID,
 		"summary_end_turn":    summary.EndTurnID,
 		"summary_start_count": summary.StartTurnCount,
@@ -258,17 +258,17 @@ func (o *historyObserver) SummaryTokenCountFailed(ctx context.Context, summary *
 
 func (o *historyObserver) SummaryMissing(ctx context.Context) {
 	o.emit(ctx, "history_source_summary_missing", map[string]any{
-		"session_id":   o.sessionID,
-		"tokenizer_id": o.tokenizerID,
+		"session_id": o.sessionID,
+		"counter_id": o.counterID,
 	}, nil)
 }
 
 func (o *historyObserver) TurnTokenizeFailed(ctx context.Context, turn *gaictx.Turn, err error) {
 	o.emit(ctx, "history_source_turn_tokenize_failed", map[string]any{
-		"session_id":   o.sessionID,
-		"tokenizer_id": o.tokenizerID,
-		"turn_id":      turn.ID,
-		"turn_count":   turn.Count,
+		"session_id": o.sessionID,
+		"counter_id": o.counterID,
+		"turn_id":    turn.ID,
+		"turn_count": turn.Count,
 	}, err)
 }
 
@@ -276,7 +276,7 @@ func (o *historyObserver) BudgetReached(ctx context.Context, totalTokens int, tu
 	o.MarkBudgetReached()
 	fields := map[string]any{
 		"session_id":   o.sessionID,
-		"tokenizer_id": o.tokenizerID,
+		"counter_id":   o.counterID,
 		"token_budget": o.tokenBudget,
 		"total_tokens": totalTokens,
 	}
@@ -301,7 +301,7 @@ func (o *historyObserver) BuildFinished(ctx context.Context, part *Part, tokenCo
 
 	fields := map[string]any{
 		"session_id":    o.sessionID,
-		"tokenizer_id":  o.tokenizerID,
+		"counter_id":    o.counterID,
 		"token_budget":  o.tokenBudget,
 		"total_tokens":  tokenCount,
 		"turn_count":    turnCount,
@@ -324,12 +324,12 @@ func (o *historyObserver) SummaryGenerated(ctx context.Context, summary *Summary
 	o.summaryTotalTurnCount = summarizedTurnCount + remainingTurnCount
 	o.summaryTurnCount = summarizedTurnCount
 	o.summaryRemainingCount = remainingTurnCount
-	o.summaryTokens = summary.tokenCount[o.tokenizerID]
+	o.summaryTokens = summary.tokenCount[o.counterID]
 	o.summaryExisting = previousSummaryFound
 
 	fields := map[string]any{
 		"session_id":             o.sessionID,
-		"tokenizer_id":           o.tokenizerID,
+		"counter_id":             o.counterID,
 		"token_budget":           o.tokenBudget,
 		"summary_tokens":         o.summaryTokens,
 		"summarized_turn_count":  summarizedTurnCount,

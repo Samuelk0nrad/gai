@@ -34,6 +34,11 @@ var _ ai.ModelDescriber = (*Model)(nil)
 func (m *Model) Name() string      { return m.name }
 func (m *Model) NativeTools() bool { return true }
 func (m *Model) Close() error      { return nil }
+
+// TokenCounter uses a local estimate for automatic budgeting. Tokenizer is
+// still available explicitly, but may perform network I/O.
+func (m *Model) TokenCounter() ai.TokenCounter { return ai.TextTokenEstimator{} }
+
 func (m *Model) Tokenizer() ai.Tokenizer {
 	return &Tokenizer{modelName: m.name, client: m.client, debug: m.debug}
 }

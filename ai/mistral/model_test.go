@@ -47,7 +47,7 @@ func TestModelGenerate(t *testing.T) {
 		t.Fatalf("Model error: %v", err)
 	}
 
-	res, err := m.Generate(context.Background(), ai.AIRequest{
+	res, err := any(m).(ai.ModelGenerator).Generate(context.Background(), ai.AIRequest{
 		Prompt:    "sys\n\nctx\n\nhello",
 		MaxTokens: 42,
 	})
@@ -108,7 +108,7 @@ func TestModelGenerateUsesContentCapturePolicy(t *testing.T) {
 			return []byte(strings.ReplaceAll(string(value), "secret", "[redacted]")), nil
 		},
 	})
-	if _, err := m.Generate(ctx, ai.AIRequest{Prompt: "question-secret"}); err != nil {
+	if _, err := any(m).(ai.ModelGenerator).Generate(ctx, ai.AIRequest{Prompt: "question-secret"}); err != nil {
 		t.Fatalf("Generate error: %v", err)
 	}
 
@@ -174,7 +174,7 @@ func TestModelGenerateMapsRequestCapabilities(t *testing.T) {
 		t.Fatalf("Model error: %v", err)
 	}
 
-	_, err = m.Generate(context.Background(), ai.AIRequest{
+	_, err = any(m).(ai.ModelGenerator).Generate(context.Background(), ai.AIRequest{
 		Prompt: "hello",
 		Tools: []ai.ToolDefinition{
 			{
@@ -269,7 +269,7 @@ func TestModelGenerateMapsMultipleResponseToolCalls(t *testing.T) {
 		t.Fatalf("Model error: %v", err)
 	}
 
-	res, err := m.Generate(context.Background(), ai.AIRequest{Prompt: "call tools"})
+	res, err := any(m).(ai.ModelGenerator).Generate(context.Background(), ai.AIRequest{Prompt: "call tools"})
 	if err != nil {
 		t.Fatalf("Generate error: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestModelGenerateNoChoices(t *testing.T) {
 		t.Fatalf("Model error: %v", err)
 	}
 
-	_, err = m.Generate(context.Background(), ai.AIRequest{Prompt: "hello"})
+	_, err = any(m).(ai.ModelGenerator).Generate(context.Background(), ai.AIRequest{Prompt: "hello"})
 	if err != ErrNoChoices {
 		t.Fatalf("expected ErrNoChoices, got %v", err)
 	}
@@ -345,7 +345,7 @@ func TestModelTokenizerTokenizeUnsupported(t *testing.T) {
 		t.Fatalf("Model error: %v", err)
 	}
 
-	tokens, err := m.Tokenizer().Tokenize(context.Background(), "hello")
+	tokens, err := m.(*Model).Tokenizer().Tokenize(context.Background(), "hello")
 	if !errors.Is(err, ai.ErrTokenizerUnsupported) {
 		t.Fatalf("expected ErrTokenizerUnsupported, got %v", err)
 	}
@@ -384,7 +384,7 @@ func TestModelTokenizerCountTokens(t *testing.T) {
 		t.Fatalf("Model error: %v", err)
 	}
 
-	got, err := m.Tokenizer().(*Tokenizer).CountTokens(context.Background(), "hello")
+	got, err := m.(*Model).Tokenizer().(*Tokenizer).CountTokens(context.Background(), "hello")
 	if err != nil {
 		t.Fatalf("CountTokens error: %v", err)
 	}
@@ -416,7 +416,7 @@ func TestModelTokenizerID(t *testing.T) {
 		t.Fatalf("Model error: %v", err)
 	}
 
-	tokenizer := m.Tokenizer()
+	tokenizer := m.(*Model).Tokenizer()
 	if tokenizer.ID() != "mistral."+MistralSmallLatest {
 		t.Fatalf("unexpected tokenizer ID: %q", tokenizer.ID())
 	}
@@ -436,7 +436,7 @@ func TestModelTokenizerCountTokensHTTPError(t *testing.T) {
 		t.Fatalf("Model error: %v", err)
 	}
 
-	_, err = m.Tokenizer().(*Tokenizer).CountTokens(context.Background(), "hello")
+	_, err = m.(*Model).Tokenizer().(*Tokenizer).CountTokens(context.Background(), "hello")
 	if err == nil {
 		t.Fatal("expected error")
 	}
