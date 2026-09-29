@@ -131,6 +131,33 @@ func TestToolCallStreamObservationReportsEOFPendingCandidate(t *testing.T) {
 	}
 }
 
+func TestToolCallStreamObservationReportsPendingCandidateBeforeCompletion(t *testing.T) {
+	var observation gai.Observation
+	sink := gai.ObservationSinkFunc(func(_ context.Context, emitted gai.Observation) {
+		observation = emitted
+	})
+	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{Completion: gai.CaptureEnabled})
+	in := make(chan Token, 2)
+	in <- Token{Type: TokenTypeText, Data: []byte(`{"type":"function","name":"echo"`)}
+	in <- Token{Type: TokenTypeCompletion, Completion: &Completion{}}
+	close(in)
+
+	output := drainToolCallStream(DetectToolCallsInStream(ctx, in, sink))
+
+	if len(output) != 2 || output[0].Type != TokenTypeText || output[1].Type != TokenTypeCompletion {
+		t.Fatalf("output = %#v, want unresolved candidate followed by completion", output)
+	}
+	if observation.Fields["eof_pending"] != true {
+		t.Fatalf("terminal outcome = %#v", observation.Fields)
+	}
+	if observation.Fields["rejected_candidate_count"] != 1 || observation.Fields["last_rejection_reason"] != "end_of_stream" {
+		t.Fatalf("rejection summary = %#v", observation.Fields)
+	}
+	if observation.Fields["pending_data"] != `{"type":"function","name":"echo"` {
+		t.Fatalf("captured pending data = %#v", observation.Fields)
+	}
+}
+
 func TestToolCallStreamObservationReportsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	var observation gai.Observation
