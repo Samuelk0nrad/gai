@@ -28,15 +28,13 @@ type TokenizerSetter interface {
 }
 
 // PromptBuilder is the prompt-construction contract consumed by agent loops.
+// Input exposes the user content recorded in the loop's conversation. Builder
+// configuration methods remain available on the concrete Builder; consumers
+// that configure a custom builder may require additional capabilities.
 type PromptBuilder interface {
-	PrependContextSource(ctx context.Context, source ContextSource) error
-	AppendContextSource(ctx context.Context, source ContextSource) error
-	AppendContextSources(ctx context.Context, sources ...ContextSource) error
-	AppendSystemInstructions(ctx context.Context, instructions ...Part) error
 	BuildContext(ctx context.Context) ([]Part, error)
 	BuildPrompt(ctx context.Context, conv Conversation) (string, error)
 	Input() PromptInput
-	SetInput(input PromptInput)
 }
 
 // NativeMessageBuilder optionally constructs both representations of a model

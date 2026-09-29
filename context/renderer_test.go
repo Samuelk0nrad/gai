@@ -9,6 +9,7 @@ import (
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
 	gaictx "github.com/lace-ai/gai/context"
+	"github.com/lace-ai/gai/context/tooldefinitions"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -548,7 +549,10 @@ func TestRenderersNotifyRenderResultCallback(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		renderer gaictx.Renderer
+		renderer interface {
+			gaictx.Renderer
+			SetRenderResultCallback(context.Context, gaictx.RenderResultCallback) error
+		}
 	}{
 		{name: "xml", renderer: &gaictx.XMLRenderer{}},
 		{name: "simple", renderer: &gaictx.SimpleRenderer{}},
@@ -625,7 +629,7 @@ func TestRenderToolSignatures(t *testing.T) {
 	}
 	want := "\n<tool name=\"search\">\n<description>Searches docs.</description>\n<signature>{\"type\":\"object\"}</signature>\n</tool>\n<tool name=\"weather\">\n<description>Gets weather.</description>\n<signature>{\"type\":\"object\"}</signature>\n</tool>"
 
-	renderers := []gaictx.Renderer{
+	renderers := []tooldefinitions.ToolSignatureRenderer{
 		&gaictx.XMLRenderer{},
 		&gaictx.SimpleRenderer{},
 	}

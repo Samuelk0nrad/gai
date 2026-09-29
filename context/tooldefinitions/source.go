@@ -24,12 +24,19 @@ const toolUseProtocol = `When a tool is required, output each tool call as a sta
 
 The name must match a listed tool, type must be exactly "function" and arguments must match its signature. Do not include an id, do not wrap the JSON in Markdown, and separate multiple calls with a blank line. If no tool is needed, respond normally. Do not repeat a completed tool call when its result is already present.`
 
+// ToolSignatureRenderer formats tool signatures for the source's token-counting
+// text. It does not need to render prompt parts or provide render callbacks.
+// Both context.XMLRenderer and context.SimpleRenderer implement this interface.
+type ToolSignatureRenderer interface {
+	RenderToolSignatures(tools []gaictx.ToolSignature) (string, error)
+}
+
 // Source renders tool signatures and their text-based invocation protocol as
 // prompt context. Executable loop tools satisfy context.ToolSignature but are
 // not required by this package.
 type Source struct {
 	tools         []gaictx.ToolSignature
-	renderer      gaictx.Renderer
+	renderer      ToolSignatureRenderer
 	debug         gai.ObservationSink
 	usageProtocol string
 	toolChoice    ai.ToolChoice
@@ -73,7 +80,8 @@ func toolChoiceInstruction(choice ai.ToolChoice) string {
 
 // New creates a context source from tool signatures and a renderer. The slice is
 // copied so callers can safely reuse or modify their input slice after construction.
-func New(renderer gaictx.Renderer, tools []gaictx.ToolSignature, debug gai.ObservationSink, options ...Option) (*Source, error) {
+// A nil renderer uses context.XMLRenderer for tool signature formatting.
+func New(renderer ToolSignatureRenderer, tools []gaictx.ToolSignature, debug gai.ObservationSink, options ...Option) (*Source, error) {
 	if len(tools) == 0 {
 		return nil, ErrToolsEmpty
 	}
