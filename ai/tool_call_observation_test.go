@@ -194,30 +194,34 @@ func TestToolCallStreamObservationReportsPendingCandidateBeforeCompletion(t *tes
 	}
 }
 
-func TestToolCallStreamObservationReportsPendingCandidateBeforeError(t *testing.T) {
+func TestToolCallStreamObservationRejectsCandidateAtErrorWithoutReportingEOF(t *testing.T) {
 	var observation gai.Observation
 	sink := gai.ObservationSinkFunc(func(_ context.Context, emitted gai.Observation) {
 		observation = emitted
 	})
 	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{Completion: gai.CaptureEnabled})
-	in := make(chan Token, 2)
+	in := make(chan Token, 3)
 	in <- Token{Type: TokenTypeText, Data: []byte(`{"type":"function","name":"echo"`)}
 	in <- Token{Type: TokenTypeErr, Err: context.Canceled}
+	in <- Token{Type: TokenTypeText, Data: []byte(`{"type":"function","name":"after_error"}`)}
 	close(in)
 
 	output := drainToolCallStream(DetectToolCallsInStream(ctx, in, sink))
 
-	if len(output) != 2 || output[0].Type != TokenTypeText || output[1].Type != TokenTypeErr {
-		t.Fatalf("output = %#v, want unresolved candidate followed by error", output)
+	if len(output) != 3 || output[0].Type != TokenTypeText || output[1].Type != TokenTypeErr || output[2].Type != TokenTypeToolCall || output[2].ToolCall == nil || output[2].ToolCall.Name != "after_error" {
+		t.Fatalf("output = %#v, want unresolved candidate, error, and following tool call", output)
 	}
-	if observation.Fields["eof_pending"] != true {
+	if observation.Fields["eof_pending"] != false {
 		t.Fatalf("terminal outcome = %#v", observation.Fields)
 	}
-	if observation.Fields["rejected_candidate_count"] != 1 || observation.Fields["last_rejection_reason"] != "end_of_stream" {
+	if observation.Fields["rejected_candidate_count"] != 1 || observation.Fields["last_rejection_reason"] != "stream_error" {
 		t.Fatalf("rejection summary = %#v", observation.Fields)
 	}
-	if observation.Fields["pending_data"] != `{"type":"function","name":"echo"` {
-		t.Fatalf("captured pending data = %#v", observation.Fields)
+	if observation.Fields["last_rejected_candidate"] != `{"type":"function","name":"echo"` {
+		t.Fatalf("captured rejected candidate = %#v", observation.Fields)
+	}
+	if _, ok := observation.Fields["pending_data"]; ok {
+		t.Fatalf("error token recorded EOF-pending data: %#v", observation.Fields)
 	}
 }
 
