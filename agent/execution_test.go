@@ -347,8 +347,22 @@ func TestExecutionSnapshotsDefinitionRequestedPatchAndCallback(t *testing.T) {
 		patch.Tools[0] = namedTool{name: "caller or result"}
 	}
 	for _, workflow := range []*agent.Workflow{defaultRun, run} {
-		if got := consumeWorkflow(t, workflow); len(got.errs) != 0 {
-			t.Fatal(got.errs)
+		result, err := workflow.Run(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		waited, err := workflow.Wait()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, patch := range []*agent.ExecutionOverrides{result.Input.Execution, waited.Input.Execution} {
+			if patch == nil {
+				continue
+			}
+			*patch.Limits.MaxTokens = 777
+			patch.ResponseFormat.Schema[0] = '['
+			patch.RetryPolicy.Value.MaxRetries = -1
+			patch.Tools[0] = namedTool{name: "completed result"}
 		}
 	}
 	requests := model.Requests()

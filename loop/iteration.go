@@ -17,34 +17,6 @@ const (
 	IterationTypeToolError IterationType = "tool_error"
 )
 
-// IterationInformation reports progress after an iteration or retry attempt.
-type IterationInformation struct {
-	// Iteration contains the completed iteration when one is available.
-	Iteration Iteration
-	// IterationCount is the one-based current iteration number.
-	IterationCount int
-	// PartCount is the number of parts accumulated in the iteration.
-	PartCount int
-	// RetryCount is the number of consecutive generation retries.
-	RetryCount int
-	// Retrying reports that this status describes a failed generation attempt
-	// that will be retried for the same iteration.
-	Retrying bool
-	// AttemptID is the one-based model generation attempt for IterationCount.
-	AttemptID int
-	// DiscardIteration reports that a real-time streamed attempt was superseded.
-	// Consumers that keep visible token state must remove that attempt's tokens;
-	// preserving real-time delivery takes precedence over delaying tokens until
-	// a retry outcome is known.
-	DiscardIteration bool
-	// Canceled reports that the loop ended because its context was canceled or
-	// its deadline expired.
-	Canceled bool
-	// CancellationErr contains context.Canceled or context.DeadlineExceeded when
-	// Canceled is true.
-	CancellationErr error
-}
-
 // Iteration records one model generation and its tool interactions.
 type Iteration struct {
 	// Count is the one-based iteration number.
