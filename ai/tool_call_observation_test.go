@@ -194,6 +194,33 @@ func TestToolCallStreamObservationReportsPendingCandidateBeforeCompletion(t *tes
 	}
 }
 
+func TestToolCallStreamObservationRejectsCandidateInterruptedByNativeToolCall(t *testing.T) {
+	var observation gai.Observation
+	sink := gai.ObservationSinkFunc(func(_ context.Context, emitted gai.Observation) {
+		observation = emitted
+	})
+	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{Completion: gai.CaptureEnabled})
+	in := make(chan Token, 2)
+	in <- Token{Type: TokenTypeText, Data: []byte(`{"type":"function","name":"partial"`)}
+	in <- Token{Type: TokenTypeToolCall, ToolCall: &ToolCall{Name: "native"}}
+	close(in)
+
+	output := drainToolCallStream(DetectToolCallsInStream(ctx, in, sink))
+
+	if len(output) != 2 || output[0].Type != TokenTypeText || output[1].Type != TokenTypeToolCall || output[1].ToolCall == nil || output[1].ToolCall.Name != "native" {
+		t.Fatalf("output = %#v, want unresolved candidate followed by native tool call", output)
+	}
+	if observation.Fields["eof_pending"] != false {
+		t.Fatalf("terminal outcome = %#v", observation.Fields)
+	}
+	if observation.Fields["rejected_candidate_count"] != 1 || observation.Fields["last_rejection_reason"] != "interrupted" {
+		t.Fatalf("rejection summary = %#v", observation.Fields)
+	}
+	if observation.Fields["last_rejected_candidate"] != `{"type":"function","name":"partial"` {
+		t.Fatalf("captured rejected candidate = %#v", observation.Fields)
+	}
+}
+
 func TestToolCallStreamObservationRejectsCandidateAtErrorWithoutReportingEOF(t *testing.T) {
 	var observation gai.Observation
 	sink := gai.ObservationSinkFunc(func(_ context.Context, emitted gai.Observation) {

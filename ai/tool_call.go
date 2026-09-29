@@ -253,6 +253,8 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 					observer.CandidateRejected(&result, "end_of_stream", pendingPayload)
 				} else if t.Type == TokenTypeErr && isJSONCandidate {
 					observer.CandidateRejected(&result, "stream_error", joinTokenData(pending))
+				} else if isJSONCandidate {
+					observer.CandidateRejected(&result, "interrupted", joinTokenData(pending))
 				}
 				pending = append(pending, t)
 				if !flushPending() {
