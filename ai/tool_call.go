@@ -246,7 +246,7 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 			result.inputTokenEvents++
 			// non-text tokens: passthrough.
 			if t.Type != TokenTypeText {
-				if t.Type == TokenTypeCompletion && isJSONCandidate {
+				if (t.Type == TokenTypeCompletion || t.Type == TokenTypeErr) && isJSONCandidate {
 					pendingPayload := joinTokenData(pending)
 					observer.Pending(&result, pendingPayload)
 					result.eofPending = true
