@@ -162,33 +162,27 @@ func run(ctx context.Context) error {
 
 	fmt.Printf("User: %s\nAssistant: ", userPrompt)
 
-	var runErr error
 	for event := range workflow.RunEvents(ctx) {
 		switch event.Type {
-		case loop.EventToken:
-			if text := visibleText(event.Token); text != "" {
+		case agent.EventOutput:
+			if text := visibleText(event.Output); text != "" {
 				fmt.Print(text)
 			}
-		case loop.EventError, loop.EventCanceled:
-			runErr = event.Err
 		}
 	}
 	fmt.Println()
 
-	if runErr != nil {
-		return fmt.Errorf("run workflow: %w", runErr)
+	if _, err := workflow.Wait(); err != nil {
+		return fmt.Errorf("run workflow: %w", err)
 	}
 	return nil
 }
 
-func visibleText(token *ai.Token) string {
-	if token == nil || token.Type != ai.TokenTypeText {
+func visibleText(output *agent.OutputPart) string {
+	if output == nil || output.Kind != agent.OutputText {
 		return ""
 	}
-	if token.Text != "" {
-		return token.Text
-	}
-	return token.String()
+	return output.Text
 }
 
 func promptFromArgs(args []string) string {

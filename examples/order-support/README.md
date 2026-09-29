@@ -5,7 +5,7 @@ This example shows the shortest end-to-end GAI workflow that is still representa
 - an OpenAI-backed agent;
 - a typed `lookup_order` tool;
 - provider-native tool calling;
-- ordered streaming through `Workflow.RunEvents`;
+- ordered streaming through `Workflow.RunEvents`, followed by `Workflow.Wait` for the final result;
 - deterministic local data, so only one API key is required.
 
 ## Run it

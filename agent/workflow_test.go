@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"sync"
 	"testing"
 
 	"github.com/lace-ai/gai/agent"
@@ -27,8 +26,21 @@ func workflowAgent(name, response string, middleware ...agent.Middleware) *agent
 
 type consumedWorkflow struct {
 	tokens   []ai.Token
-	statuses []loop.IterationInformation
+	statuses []consumedStatus
 	errs     []error
+	events   []agent.Event
+}
+
+type consumedStatus struct {
+	Iteration        loop.Iteration
+	IterationCount   int
+	PartCount        int
+	RetryCount       int
+	Retrying         bool
+	AttemptID        int
+	DiscardIteration bool
+	Canceled         bool
+	CancellationErr  error
 }
 
 func consumeWorkflow(t *testing.T, workflow *agent.Workflow) consumedWorkflow {
@@ -37,31 +49,42 @@ func consumeWorkflow(t *testing.T, workflow *agent.Workflow) consumedWorkflow {
 
 func consumeWorkflowContext(t *testing.T, workflow *agent.Workflow, ctx context.Context) consumedWorkflow {
 	t.Helper()
-	tokens, statuses, errs := workflow.Run(ctx)
 	var consumed consumedWorkflow
-	var wg sync.WaitGroup
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		for token := range tokens {
-			consumed.tokens = append(consumed.tokens, token)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		for status := range statuses {
-			consumed.statuses = append(consumed.statuses, status)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		for err := range errs {
-			if err != nil {
-				consumed.errs = append(consumed.errs, err)
+	for event := range workflow.RunEvents(ctx) {
+		consumed.events = append(consumed.events, event)
+		switch event.Type {
+		case agent.EventOutput:
+			if event.Output == nil {
+				continue
 			}
+			switch event.Output.Kind {
+			case agent.OutputText:
+				consumed.tokens = append(consumed.tokens, ai.Token{Type: ai.TokenTypeText, Text: event.Output.Text})
+			case agent.OutputReasoning:
+				consumed.tokens = append(consumed.tokens, ai.Token{Type: ai.TokenTypeThought, Text: event.Output.Text})
+			}
+		case agent.EventRetry, agent.EventDiscard, agent.EventIterationDone:
+			status := consumedStatus{IterationCount: event.IterationCount, AttemptID: event.AttemptID, RetryCount: event.RetryCount, PartCount: event.PartCount, Retrying: event.Type == agent.EventRetry, DiscardIteration: event.Type == agent.EventRetry || event.Type == agent.EventDiscard}
+			if event.Iteration != nil {
+				status.Iteration = *event.Iteration
+			}
+			consumed.statuses = append(consumed.statuses, status)
+		case agent.EventStageFinish:
+			if event.Source.Kind == agent.SourcePrimary && event.AttemptID != 0 && (event.StageOutcome == agent.StageFailed || event.StageOutcome == agent.StageCanceled) {
+				status := consumedStatus{IterationCount: event.IterationCount, AttemptID: event.AttemptID, RetryCount: event.RetryCount, PartCount: event.PartCount, DiscardIteration: true, Canceled: event.StageOutcome == agent.StageCanceled, CancellationErr: event.Err}
+				if event.Iteration != nil {
+					status.Iteration = *event.Iteration
+				}
+				consumed.statuses = append(consumed.statuses, status)
+			}
+		case agent.EventError:
+			if event.Err != nil {
+				consumed.errs = append(consumed.errs, event.Err)
+			}
+		case agent.EventCanceled:
+			consumed.statuses = append(consumed.statuses, consumedStatus{Canceled: true, DiscardIteration: true, CancellationErr: event.Err})
 		}
-	}()
-	wg.Wait()
+	}
 	return consumed
 }
 
@@ -82,7 +105,7 @@ func tokensText(tokens []ai.Token) string {
 
 type nilMiddleware struct{}
 
-func (*nilMiddleware) Process(context.Context, *agent.MiddlewareContext, agent.Stream) agent.Stream {
+func (*nilMiddleware) Process(context.Context, *agent.MiddlewareContext, <-chan agent.Event) <-chan agent.Event {
 	panic("typed-nil middleware should be rejected before Process")
 }
 
@@ -128,8 +151,8 @@ func TestAgentMiddlewareOutputPolicies(t *testing.T) {
 			if len(consumed.errs) != 0 {
 				t.Fatalf("unexpected errors: %v", consumed.errs)
 			}
-			if len(consumed.statuses) != 1 {
-				t.Fatalf("expected only the primary status, got %d", len(consumed.statuses))
+			if len(consumed.statuses) != 2 {
+				t.Fatalf("expected primary and middleware statuses, got %d", len(consumed.statuses))
 			}
 			if postInput.ID != "run-1" || promptContextValue(postInput, "upstream_output") != "main" || postInput.Meta["session_id"] != "session-1" {
 				t.Fatalf("unexpected automatic post input: %+v", postInput)
@@ -454,8 +477,8 @@ func TestWorkflowRejectsRepeatedRun(t *testing.T) {
 		t.Fatalf("NewRun failed: %v", err)
 	}
 	consumeWorkflow(t, workflow)
-	_, _, errs := workflow.Run(context.Background())
-	if err := <-errs; !errors.Is(err, agent.ErrWorkflowAlreadyRun) {
+	_, err = workflow.Run(context.Background())
+	if !errors.Is(err, agent.ErrWorkflowAlreadyRun) {
 		t.Fatalf("expected repeated-run error, got %v", err)
 	}
 }
