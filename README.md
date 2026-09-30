@@ -79,6 +79,7 @@ package main
 import (
   "context"
   "fmt"
+  "io"
   "log"
   "os"
 
@@ -100,11 +101,13 @@ func run(ctx context.Context) error {
   if err != nil {
     return err
   }
-  defer func() {
-    if err := model.Close(); err != nil {
-      log.Printf("close model: %v", err)
-    }
-  }()
+  if closer, ok := model.(io.Closer); ok {
+    defer func() {
+      if err := closer.Close(); err != nil {
+        log.Printf("close model: %v", err)
+      }
+    }()
+  }
 
   assistant := agent.New(agent.Definition{
     Name:  "assistant",
@@ -337,10 +340,14 @@ Use `history.NewHistory(sessionID, store)` for budgeted history selection. Use `
 
 ## Structured output and direct model calls
 
-Call a model directly when no agent loop is needed or when you want provider-native request controls:
+Call a model directly when no agent loop is needed or when you want provider-native request controls. Synchronous calls require the optional `ai.ModelGenerator` capability:
 
 ```go
-response, err := model.Generate(ctx, ai.AIRequest{
+generator, ok := model.(ai.ModelGenerator)
+if !ok {
+  return fmt.Errorf("%w: model does not support synchronous generation", ai.ErrUnsupportedCapability)
+}
+response, err := generator.Generate(ctx, ai.AIRequest{
   Prompt:    "Return one JSON object describing Paris.",
   MaxTokens: 200,
   ResponseFormat: ai.ResponseFormat{
