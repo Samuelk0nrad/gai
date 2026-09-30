@@ -124,7 +124,8 @@ var (
 	ErrInvalidToolDefinition = errors.New("invalid tool definition")
 	// ErrInvalidResponseFormat indicates a malformed structured response request.
 	ErrInvalidResponseFormat = errors.New("invalid response format")
-	// ErrUnsupportedCapability indicates that a provider cannot satisfy a request feature.
+	// ErrUnsupportedCapability indicates that a provider cannot satisfy a
+	// requested feature or optional operation, such as model discovery.
 	ErrUnsupportedCapability = errors.New("unsupported provider capability")
 	// ErrTokenizerUnsupported indicates that a tokenizer does not support an operation.
 	ErrTokenizerUnsupported = errors.New("tokenizer operation unsupported")
