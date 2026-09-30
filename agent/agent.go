@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/lace-ai/gai"
@@ -14,6 +15,10 @@ import (
 )
 
 var readRunID = rand.Read
+
+// ErrPromptInputNotConfigurable means a prompt builder cannot receive the
+// current run's input through SetInput(context.PromptInput).
+var ErrPromptInputNotConfigurable = errors.New("prompt builder does not implement SetInput(context.PromptInput)")
 
 // RunInput contains the application input for one agent run.
 type RunInput struct {
@@ -33,6 +38,12 @@ type RunInput struct {
 // Prompt creates and returns a run-owned prompt builder used by one workflow.
 // Callers must return a fresh builder for every invocation; Agent mutates the
 // returned builder while applying that run's input and execution configuration.
+// The builder must implement SetInput(context.PromptInput); otherwise NewRun
+// returns ErrPromptInputNotConfigurable. For text-based tools it must also
+// implement PrependContextSource(context.Context, context.ContextSource) error
+// unless HasContextSource already reports a tool_definitions source. Run
+// overrides that change an existing tool source additionally require
+// ReplaceContextSource and RemoveContextSource, as provided by context.Builder.
 type Prompt func(ctx context.Context, input RunInput) (gaictx.PromptBuilder, error)
 
 // Limits controls loop iterations and model output size.
@@ -198,7 +209,11 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 	if nilDependency(promptBuilder) {
 		return nil, loop.ErrPromptNotConfigured
 	}
-	promptBuilder.SetInput(input.Prompt)
+	inputSetter, ok := promptBuilder.(promptInputSetter)
+	if !ok {
+		return nil, ErrPromptInputNotConfigurable
+	}
+	inputSetter.SetInput(input.Prompt)
 	lookup, hasContextSourceLookup := promptBuilder.(contextSourceLookup)
 	hasToolDefinitions := hasContextSourceLookup && lookup.HasContextSource("tool_definitions")
 	manager, hasContextSourceManager := promptBuilder.(contextSourceManager)
@@ -231,8 +246,14 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 				if err := manager.ReplaceContextSource(ctx, "tool_definitions", toolSource); err != nil {
 					return nil, err
 				}
-			} else if err := promptBuilder.PrependContextSource(ctx, toolSource); err != nil {
-				return nil, err
+			} else {
+				prepender, ok := promptBuilder.(contextSourcePrepender)
+				if !ok {
+					return nil, fmt.Errorf("prompt builder cannot prepend tool definitions: does not implement PrependContextSource")
+				}
+				if err := prepender.PrependContextSource(ctx, toolSource); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -287,6 +308,17 @@ func usesNativeTools(model ai.Model) bool {
 	}
 	native, ok := model.(interface{ NativeTools() bool })
 	return ok && native.NativeTools()
+}
+
+// promptInputSetter is required by Agent to inject each run's input, but is not
+// needed by loops whose prompt builders already own their input.
+type promptInputSetter interface {
+	SetInput(input gaictx.PromptInput)
+}
+
+// contextSourcePrepender is needed only when Agent injects text tool definitions.
+type contextSourcePrepender interface {
+	PrependContextSource(ctx context.Context, source gaictx.ContextSource) error
 }
 
 // contextSourceLookup is the optional agent-internal prompt-builder capability

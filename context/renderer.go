@@ -15,10 +15,10 @@ import (
 )
 
 // Renderer converts ordered prompt parts into the model-facing prompt string.
+// The built-in renderers also provide render-result callbacks and tool signature
+// formatting, but custom renderers only need to implement Render.
 type Renderer interface {
 	Render(ctx context.Context, contextParts []Part) (string, error)
-	SetRenderResultCallback(ctx context.Context, callback RenderResultCallback) error
-	RenderToolSignatures(tools []ToolSignature) (string, error)
 }
 
 // ToolSignature is the minimal tool metadata required for prompt formatting.

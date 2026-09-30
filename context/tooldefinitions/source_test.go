@@ -92,7 +92,7 @@ signature: {"type":"object","properties":{"query":{"type":"string"}}}
 	}
 }
 
-func TestSourceDoesNotExposeStoredToolsToRenderer(t *testing.T) {
+func TestSourceUsesSignatureOnlyRendererWithoutExposingStoredTools(t *testing.T) {
 	source, err := tooldefinitions.New(mutatingRenderer{}, []gaictx.ToolSignature{
 		staticTool{name: "search", description: "Searches the web.", params: testParams("query")},
 	}, nil)
@@ -284,13 +284,7 @@ type staticTool struct {
 
 type mutatingRenderer struct{}
 
-func (mutatingRenderer) Render(context.Context, []gaictx.Part) (string, error) {
-	return "", nil
-}
-
-func (mutatingRenderer) SetRenderResultCallback(context.Context, gaictx.RenderResultCallback) error {
-	return nil
-}
+var _ tooldefinitions.ToolSignatureRenderer = mutatingRenderer{}
 
 func (mutatingRenderer) RenderToolSignatures(tools []gaictx.ToolSignature) (string, error) {
 	tools[0] = staticTool{name: "replacement", description: "Replaces the stored tool.", params: testParams("query")}
