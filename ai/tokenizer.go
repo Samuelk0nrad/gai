@@ -9,7 +9,8 @@ import "context"
 type Tokenizer interface {
 	// Tokenize splits text into the tokenizer's token representation.
 	Tokenize(ctx context.Context, text string) ([]string, error)
-	// CountTokens returns the number of tokens required for text.
+	// CountTokens counts or estimates tokens according to the provider's policy.
+	// Its result may differ from len(Tokenize(ctx, text)).
 	CountTokens(ctx context.Context, text string) (int, error)
 	// ID returns a stable identifier for the tokenizer implementation.
 	ID() string

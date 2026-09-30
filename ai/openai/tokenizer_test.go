@@ -18,13 +18,13 @@ func TestNewTokenizerResolvesKnownOpenAIModels(t *testing.T) {
 		text   string
 		want   int
 	}{
-		{model: "gpt-5", wantID: "openai.tiktoken-go/v0.8.1:o200k_base", text: "hello", want: 1},
-		{model: "gpt-5.1", wantID: "openai.tiktoken-go/v0.8.1:o200k_base", text: "hello", want: 1},
-		{model: "gpt-5.1-codex", wantID: "openai.tiktoken-go/v0.8.1:o200k_base", text: "hello", want: 1},
-		{model: "o1", wantID: "openai.tiktoken-go/v0.8.1:o200k_base", text: "hello", want: 1},
-		{model: GPT41, wantID: "openai.tiktoken-go/v0.8.1:o200k_base", text: "hello", want: 1},
-		{model: GPT4oMini, wantID: "openai.tiktoken-go/v0.8.1:o200k_base", text: "hello", want: 1},
-		{model: "gpt-4-0125-preview", wantID: "openai.tiktoken-go/v0.8.1:cl100k_base", text: `{"tool":"weather","city":"München"}`, want: 10},
+		{model: "gpt-5", wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:o200k_base", text: "hello", want: 1},
+		{model: "gpt-5.1", wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:o200k_base", text: "hello", want: 1},
+		{model: "gpt-5.1-codex", wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:o200k_base", text: "hello", want: 1},
+		{model: "o1", wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:o200k_base", text: "hello", want: 1},
+		{model: GPT41, wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:o200k_base", text: "hello", want: 1},
+		{model: GPT4oMini, wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:o200k_base", text: "hello", want: 1},
+		{model: "gpt-4-0125-preview", wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:cl100k_base", text: `{"tool":"weather","city":"München"}`, want: 10},
 	}
 	for _, tt := range tests {
 		t.Run(tt.model, func(t *testing.T) {
@@ -147,7 +147,7 @@ func TestTokenizerCountsRealisticToolSchemaJSONFixtures(t *testing.T) {
 
 func TestAutomaticCounterMatchesLocalEncodingAndPreservesFailures(t *testing.T) {
 	counter := (&Model{name: GPT41}).TokenCounter()
-	if counter.Fidelity() != ai.TokenCountExact {
+	if counter.Fidelity() != ai.TokenCountEstimated {
 		t.Fatalf("fidelity = %v", counter.Fidelity())
 	}
 	for _, fixture := range realisticToolSchemaJSONFixtures {

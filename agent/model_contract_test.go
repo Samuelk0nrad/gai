@@ -104,7 +104,7 @@ func TestAutomaticProviderCountersBuildPromptsWithoutNetwork(t *testing.T) {
 		model    string
 		fidelity ai.TokenCountFidelity
 	}{
-		{"openai", openai.New("test", nil), openai.GPT41, ai.TokenCountExact},
+		{"openai", openai.New("test", nil), openai.GPT41, ai.TokenCountEstimated},
 		{"openai unknown", openai.New("test", nil), "future-model", ai.TokenCountEstimated},
 		{"anthropic", anthropic.New("test", nil), anthropic.ClaudeSonnet4_6, ai.TokenCountEstimated},
 		{"gemini", gemini.New("test", nil), "gemini-3-flash-preview", ai.TokenCountEstimated},

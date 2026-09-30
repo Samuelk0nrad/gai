@@ -14,8 +14,11 @@
 // algorithm/data version, and Fidelity distinguishes an exact text encoding
 // from an estimate. Neither describes full request overhead or billed usage.
 // Agent selects a supplied counter, then a model's optional TokenCounterProvider,
-// then TextTokenEstimator. OpenAI uses an exact local encoding where known;
-// Anthropic, Gemini, Mistral, and unknown mappings use the generic estimate.
+// then TextTokenEstimator. OpenAI uses its upstream local tokenizer on blocks of
+// at most 10,000 Unicode code points, checking cancellation between blocks.
+// Block boundaries can change counts, so this has estimated fidelity and a
+// distinct counter ID. Anthropic, Gemini, Mistral, and unknown mappings use the
+// generic estimate.
 // Counter selection and counting must not make network requests. Legacy
 // Tokenizer methods remain available explicitly on concrete built-in models;
 // some of these APIs can make provider requests or download tokenizer data.
