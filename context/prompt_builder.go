@@ -302,20 +302,21 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 		if part != nil {
 			contextParts = append(contextParts, part)
 			stats.IncludedSourceCount++
-			tokens, err := b.partTokens(ctx, part, map[string]any{
-				"source": source.Name(),
-				"part":   part.Name(),
-			})
-			if err != nil {
-				return nil, err
+			var tokenStats promptPartTokenStats
+			if b.TokenBudget > 0 {
+				tokens, err := b.partTokens(ctx, part, map[string]any{
+					"source": source.Name(),
+					"part":   part.Name(),
+				})
+				if err != nil {
+					return nil, err
+				}
+				tokenStats = promptPartTokenStats{Tokens: tokens, TokensCounted: b.counter != nil}
+				if tokenStats.TokensCounted {
+					stats.RemainingTokens -= tokens
+				}
 			}
-			if b.counter != nil && b.TokenBudget > 0 {
-				stats.RemainingTokens -= tokens
-			}
-			obs.SourceIncluded(ctx, source.Name(), part.Name(), promptPartTokenStats{
-				Tokens:        tokens,
-				TokensCounted: b.counter != nil,
-			}, stats.RemainingTokens)
+			obs.SourceIncluded(ctx, source.Name(), part.Name(), tokenStats, stats.RemainingTokens)
 		}
 	}
 	for _, part := range b.input.Context {
@@ -326,6 +327,9 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 			continue
 		}
 		contextParts = append(contextParts, part)
+		if b.TokenBudget <= 0 {
+			continue
+		}
 		tokens, err := b.partTokens(ctx, part, map[string]any{
 			"source": "prompt_input",
 			"part":   part.Name(),
@@ -333,7 +337,7 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 		if err != nil {
 			return nil, err
 		}
-		if b.counter != nil && b.TokenBudget > 0 {
+		if b.counter != nil {
 			stats.RemainingTokens -= tokens
 		}
 	}

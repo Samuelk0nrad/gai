@@ -3,6 +3,7 @@ package context
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -475,4 +476,68 @@ func TestConcurrentBuildersCanShareImmutablePromptParts(t *testing.T) {
 	}
 	close(start)
 	group.Wait()
+}
+
+type budgetCountingPart struct {
+	calls int
+}
+
+var errBudgetTestCount = errors.New("budget test count failed")
+
+func (*budgetCountingPart) Name() string { return "text" }
+func (p *budgetCountingPart) Tokens(context.Context, ai.TokenCounter) (int, error) {
+	p.calls++
+	return 0, errBudgetTestCount
+}
+func (*budgetCountingPart) Render(context.Context) (RenderNode, error) {
+	return RenderNode{Type: "text", Value: "renderable context"}, nil
+}
+
+type budgetPartSource struct {
+	part Part
+	err  error
+}
+
+func (budgetPartSource) Name() string                                  { return "context" }
+func (s budgetPartSource) Function(context.Context, int) (Part, error) { return s.part, s.err }
+
+func TestBuildContextSkipsUnusedCountsWhenBudgetDisabled(t *testing.T) {
+	for _, budget := range []int{0, -1} {
+		t.Run(fmt.Sprint(budget), func(t *testing.T) {
+			part := &budgetCountingPart{}
+			sink := &debugEventSink{}
+			builder := New(Definition{
+				TokenBudget:        budget,
+				SystemInstructions: []Part{part},
+				ContextSources:     []ContextSource{budgetPartSource{part: part}},
+				PromptInput:        PromptInput{Context: []Part{part}},
+				ObservationSink:    sink,
+			})
+			parts, err := builder.BuildContext(t.Context())
+			if err != nil || len(parts) != 2 || part.calls != 0 {
+				t.Fatalf("BuildContext = %v, %v; count calls = %d", parts, err, part.calls)
+			}
+			prompt, err := builder.BuildPrompt(t.Context(), nil)
+			if err != nil || strings.Count(prompt, "renderable context") != 3 {
+				t.Fatalf("BuildPrompt = %q, %v", prompt, err)
+			}
+			sawSource := false
+			for _, event := range sink.events {
+				if event.Name == "prompt_builder_source_included" {
+					sawSource = true
+					if event.Fields["tokens_counted"] != false || event.Fields["tokens"] != 0 {
+						t.Fatalf("uncounted source observation = %v", event.Fields)
+					}
+				}
+			}
+			if !sawSource {
+				t.Fatal("missing source-included observation")
+			}
+			sourceErr := errors.New("source failure")
+			builder.ContextSources = []ContextSource{budgetPartSource{err: sourceErr}}
+			if _, err := builder.BuildContext(t.Context()); !errors.Is(err, sourceErr) {
+				t.Fatalf("source failure = %v, want %v", err, sourceErr)
+			}
+		})
+	}
 }

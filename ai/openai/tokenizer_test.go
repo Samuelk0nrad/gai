@@ -168,3 +168,34 @@ func TestAutomaticCounterMatchesLocalEncodingAndPreservesFailures(t *testing.T) 
 		t.Fatalf("canceled count = %v", err)
 	}
 }
+
+// These reference encodings independently catch the fallback's former Unicode
+// undercount. The estimator remains a heuristic, not a bound for all inputs.
+func TestGenericEstimatorCoversMultilingualReferenceCounts(t *testing.T) {
+	fixtures := []string{
+		"这是一个用于测试多语言令牌计数的中文句子。",
+		"これは多言語のトークン数を確認するための日本語の文章です。",
+		"다국어 토큰 수를 확인하기 위한 한국어 문장입니다.",
+		"🙂🚀👨‍👩‍👧‍👦🎉",
+		"Please summarize 中文内容、日本語、한국어 and 🙂.",
+	}
+	for _, model := range []string{"gpt-4", GPT41} {
+		reference, err := NewTokenizer(model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, text := range fixtures {
+			exact, err := reference.CountTokens(t.Context(), text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			estimate, err := (ai.TextTokenEstimator{}).CountTokens(t.Context(), text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if estimate < exact {
+				t.Fatalf("%s: estimate %d below reference %d for %q", model, estimate, exact, text)
+			}
+		}
+	}
+}

@@ -11,7 +11,9 @@
 // receive it through TokenCounterSetter. Custom Part.Tokens implementations take
 // ai.TokenCounter; legacy ai.Tokenizer is no longer the budgeting dependency.
 // SystemInstructionsTokens now returns (int, error), and BuildContext propagates
-// counting errors instead of continuing with an uncounted part. TextPart,
+// counting errors when budgeting is enabled. With a non-positive TokenBudget,
+// the builder skips its own counts; context sources still run and may perform
+// their own counting. Source and rendering errors remain errors. TextPart,
 // NamedPart, and MessagePart count without hidden mutable caches, so immutable
 // parts can be shared between fresh builders. History cache removal is separate.
 // Counts remain

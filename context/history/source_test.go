@@ -670,3 +670,29 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultEstimatorRecountsCJKHistoryUnderNewIdentity(t *testing.T) {
+	t.Parallel()
+	store := &historyStore{state: &history.HistoryState{Turns: []gaictx.Turn{
+		{ID: "old", Count: 1, UserMessage: &gaictx.Message{Role: gaictx.RoleUser, Content: gaictx.NewTextContent(strings.Repeat("界", 40))}, TokenCount: map[string]int{"gai.estimate/chars-v1": 10}},
+		{ID: "new", Count: 2, UserMessage: &gaictx.Message{Role: gaictx.RoleUser, Content: gaictx.NewTextContent("ok")}},
+	}}}
+	source := history.NewHistory("session", store)
+	builder := gaictx.New(gaictx.Definition{TokenBudget: 20, ContextSources: []gaictx.ContextSource{source}})
+	if _, err := builder.BuildContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	prompt, err := builder.BuildPrompt(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "ok") || strings.Contains(prompt, "界") {
+		t.Fatalf("expected newest turn only, got %q", prompt)
+	}
+	if count := store.state.Turns[0].TokenCount[builder.TokenCounter().ID()]; count <= 20 {
+		t.Fatalf("old CJK turn was not recounted above budget: %d", count)
+	}
+	if len(store.state.Turns) != 2 {
+		t.Fatal("prompt selection discarded persisted history")
+	}
+}
