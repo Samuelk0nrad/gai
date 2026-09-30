@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/lace-ai/gai"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 // ToolCall describes a model request to invoke a function tool.
@@ -130,20 +129,20 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 	out := make(chan Token, 8)
 
 	go func() {
-		ctx, span := gai.StartOperationSpan(ctx, aiTracerName, "ai", "ai.operation", "tool_call.detect_stream")
-		defer span.End()
+		ctx, observer := newToolCallStreamObserver(ctx, debug)
 		defer close(out)
 
 		var pending []Token
-		inputTokenCount := 0
-		outputTokenCount := 0
-		detectedToolCallCount := 0
+		result := toolCallStreamResult{}
+		canceled := false
 		defer func() {
-			span.SetAttributes(
-				attribute.Int("ai.input_token_events", inputTokenCount),
-				attribute.Int("ai.output_token_events", outputTokenCount),
-				attribute.Int("ai.tool_call_count", detectedToolCallCount),
-			)
+			// Cancellation observable at terminal finalization takes precedence
+			// over a concurrently closed input channel.
+			if canceled || ctx.Err() != nil {
+				observer.Canceled(ctx, result)
+				return
+			}
+			observer.Finished(ctx, result)
 		}()
 
 		// JSON tracking state
@@ -165,20 +164,22 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 			escape = false
 		}
 
-		flushPending := func() {
+		flushPending := func() bool {
 			for _, t := range pending {
-				outputTokenCount++
 				if !SendToken(ctx, out, t) {
-					return
+					canceled = true
+					return false
 				}
+				result.outputTokenEvents++
 			}
 			resetTracking()
 			pending = nil
+			return true
 		}
 
-		flushBeforeCandidate := func(current []byte, idx int) {
+		flushBeforeCandidate := func(current []byte, idx int) bool {
 			if len(pending) == 0 {
-				return
+				return true
 			}
 
 			if idx > 0 {
@@ -189,28 +190,18 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 			if len(bytes.TrimSpace(joinTokenData(pending))) == 0 {
 				resetTracking()
 				pending = nil
-				return
+				return true
 			}
-			flushPending()
+			return flushPending()
 		}
 
-		maybeToolCall := func(last string) bool {
+		maybeToolCall := func(last string) (handled bool, keepGoing bool) {
 			if !isJSONCandidate {
-				return false
+				return false, true
 			}
 			if inString || objDepth != 0 || arrDepth != 0 {
-				if gai.ObservationEnabled(ctx, debug) {
-					fields := map[string]any{
-						"reason": fmt.Sprintf("inString=%v objDepth=%d arrDepth=%d", inString, objDepth, arrDepth),
-					}
-					gai.AddObservationContent(ctx, debug, fields, "data", gai.ContentKindCompletion, joinTokenData(pending))
-					gai.EmitObservation(ctx, debug, gai.Observation{
-						Name:   "tool_call_stream_non_tool_call",
-						Source: "ai:DetectToolCallsInStream.maybeToolCall",
-						Fields: fields,
-					})
-				}
-				return false
+				observer.CandidateRejected(&result, fmt.Sprintf("inString=%v objDepth=%d arrDepth=%d", inString, objDepth, arrDepth), joinTokenData(pending))
+				return false, true
 			}
 
 			payload := []byte(last)
@@ -218,46 +209,27 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 				payload = append(joinTokenData(pending[:len(pending)-1]), payload...)
 			}
 			if tc, ok := parseToolCall(payload); ok {
-				if gai.ObservationEnabled(ctx, debug) {
-					fields := map[string]any{
-						"id":   tc.ID,
-						"type": tc.Type,
-						"name": tc.Name,
-					}
-					gai.AddObservationContent(ctx, debug, fields, "args", gai.ContentKindToolInput, tc.Args)
-					gai.EmitObservation(ctx, debug, gai.Observation{
-						Name:   "tool_call_stream_tool_call_detected",
-						Source: "ai:DetectToolCallsInStream.maybeToolCall",
-						Fields: fields,
-					})
-				}
+				detected := observer.snapshotDetected(tc)
 				if !SendToken(ctx, out, Token{
 					Type:     TokenTypeToolCall,
 					Data:     payload,
 					ToolCall: tc,
 				}) {
-					return false
+					canceled = true
+					return false, false
 				}
-				outputTokenCount++
-				detectedToolCallCount++
+				result.outputTokenEvents++
+				observer.Detected(&result, detected)
 				resetTracking()
 			} else {
-				if gai.ObservationEnabled(ctx, debug) {
-					fields := map[string]any{
-						"reason": "parse failed",
-					}
-					gai.AddObservationContent(ctx, debug, fields, "data", gai.ContentKindCompletion, payload)
-					gai.EmitObservation(ctx, debug, gai.Observation{
-						Name:   "tool_call_stream_tool_call_parse_failed",
-						Source: "ai:DetectToolCallsInStream.maybeToolCall",
-						Fields: fields,
-					})
+				observer.CandidateRejected(&result, "parse_failed", payload)
+				if !flushPending() {
+					return false, false
 				}
-				flushPending()
 			}
 
 			pending = nil
-			return true
+			return true, true
 		}
 
 		for {
@@ -265,17 +237,36 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 			var ok bool
 			select {
 			case <-ctx.Done():
+				if isJSONCandidate {
+					pendingPayload := joinTokenData(pending)
+					observer.Pending(&result, pendingPayload)
+					result.eofPending = true
+					observer.CandidateRejected(&result, "stream_canceled", pendingPayload)
+				}
+				canceled = true
 				return
 			case t, ok = <-in:
 				if !ok {
 					goto streamDone
 				}
 			}
-			inputTokenCount++
+			result.inputTokenEvents++
 			// non-text tokens: passthrough.
 			if t.Type != TokenTypeText {
+				if t.Type == TokenTypeCompletion && isJSONCandidate {
+					pendingPayload := joinTokenData(pending)
+					observer.Pending(&result, pendingPayload)
+					result.eofPending = true
+					observer.CandidateRejected(&result, "end_of_stream", pendingPayload)
+				} else if t.Type == TokenTypeErr && isJSONCandidate {
+					observer.CandidateRejected(&result, "stream_error", joinTokenData(pending))
+				} else if isJSONCandidate {
+					observer.CandidateRejected(&result, "interrupted", joinTokenData(pending))
+				}
 				pending = append(pending, t)
-				flushPending()
+				if !flushPending() {
+					return
+				}
 				continue
 			}
 
@@ -294,15 +285,6 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 						}
 						seenNonWS = true
 						if b == '{' {
-							if gai.ObservationEnabled(ctx, debug) {
-								fields := map[string]any{}
-								gai.AddObservationContent(ctx, debug, fields, "data", gai.ContentKindCompletion, tokenStr.String())
-								gai.EmitObservation(ctx, debug, gai.Observation{
-									Name:   "tool_call_stream_json_candidate",
-									Source: "ai:DetectToolCallsInStream",
-									Fields: fields,
-								})
-							}
 							isJSONCandidate = true
 							objDepth = 1
 						}
@@ -314,19 +296,12 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 							newLines++
 						}
 						if newLines >= 2 && b == '{' {
-							flushBeforeCandidate(remaining, idx)
+							if !flushBeforeCandidate(remaining, idx) {
+								return
+							}
 							pending = append(pending, Token{Type: TokenTypeText, Data: remaining[idx:]})
 							tokenStr.Reset()
 							tokenStr.WriteByte(b)
-							if gai.ObservationEnabled(ctx, debug) {
-								fields := map[string]any{}
-								gai.AddObservationContent(ctx, debug, fields, "data", gai.ContentKindCompletion, tokenStr.String())
-								gai.EmitObservation(ctx, debug, gai.Observation{
-									Name:   "tool_call_stream_json_candidate_after_newlines",
-									Source: "ai:DetectToolCallsInStream",
-									Fields: fields,
-								})
-							}
 							isJSONCandidate = true
 							objDepth = 1
 							seenNonWS = true
@@ -365,7 +340,11 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 
 					// If JSON candidate is balanced at this byte, decide now.
 					if isJSONCandidate && !inString && objDepth == 0 && arrDepth == 0 {
-						if maybeToolCall(tokenStr.String()) {
+						handled, keepGoing := maybeToolCall(tokenStr.String())
+						if !keepGoing {
+							return
+						}
+						if handled {
 							handledCandidate = true
 							if idx+1 < len(remaining) {
 								remaining = append([]byte(nil), remaining[idx+1:]...)
@@ -385,20 +364,18 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 		}
 
 	streamDone:
-
-		if gai.ObservationEnabled(ctx, debug) {
-			fields := map[string]any{}
-			gai.AddObservationContent(ctx, debug, fields, "pending_data", gai.ContentKindCompletion, joinTokenData(pending))
-			gai.EmitObservation(ctx, debug, gai.Observation{
-				Name:   "tool_call_stream_end_of_stream",
-				Source: "ai:DetectToolCallsInStream",
-				Fields: fields,
-			})
-		}
-
-		// End of stream: unresolved buffer is not a tool call, replay it.
+		// End of stream: an unresolved JSON candidate is rejected, then all
+		// buffered tokens are replayed unchanged.
 		if len(pending) > 0 {
-			flushPending()
+			pendingPayload := joinTokenData(pending)
+			observer.Pending(&result, pendingPayload)
+			if isJSONCandidate {
+				result.eofPending = true
+				observer.CandidateRejected(&result, "end_of_stream", pendingPayload)
+			}
+			if !flushPending() {
+				return
+			}
 		}
 	}()
 
