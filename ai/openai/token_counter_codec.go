@@ -18,11 +18,17 @@ const (
 	cl100kSplit       = `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`
 	o200kSplit        = `[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+`
 	countPollInterval = 1024
+	// Bound synchronous calls to the upstream codec. Longer text is split at
+	// encoding boundaries; oversized pieces use cancellation-aware pair merging.
+	countDirectLimit = 256
+	countMemoLimit   = 256
 )
 
 type countCodec struct {
-	ranks map[string]uint
-	split *regexp2.Regexp
+	encoding tiktoken.Encoding
+	source   tiktoken.Codec
+	split    *regexp2.Regexp
+	ranks    countRanksCache
 }
 
 type countCodecCache struct {
@@ -32,7 +38,7 @@ type countCodecCache struct {
 
 var cl100kCounter, o200kCounter countCodecCache
 
-func localCountCodec(ctx context.Context, encoding tiktoken.Encoding) (*countCodec, error) {
+func localCountCodec(ctx context.Context, encoding tiktoken.Encoding, source tiktoken.Codec) (*countCodec, error) {
 	var cache *countCodecCache
 	switch encoding {
 	case tiktoken.Cl100kBase:
@@ -42,10 +48,10 @@ func localCountCodec(ctx context.Context, encoding tiktoken.Encoding) (*countCod
 	default:
 		return nil, tiktoken.ErrEncodingNotSupported
 	}
-	return cache.load(ctx, encoding)
+	return cache.load(ctx, encoding, source)
 }
 
-func (c *countCodecCache) load(ctx context.Context, encoding tiktoken.Encoding) (*countCodec, error) {
+func (c *countCodecCache) load(ctx context.Context, encoding tiktoken.Encoding, source tiktoken.Codec) (*countCodec, error) {
 	if err := c.mu.Lock(ctx); err != nil {
 		return nil, err
 	}
@@ -56,28 +62,79 @@ func (c *countCodecCache) load(ctx context.Context, encoding tiktoken.Encoding) 
 	if c.codec != nil {
 		return c.codec, nil
 	}
-	codec, err := newCountCodec(ctx, encoding)
+	codec, err := newCountCodec(ctx, encoding, source)
 	if err != nil {
 		return nil, err
 	}
-	// Publish only complete immutable data. A canceled initializer may be retried.
+	// Publish only a complete wrapper. A canceled initializer may be retried.
 	c.codec = codec
 	return codec, nil
 }
 
-func newCountCodec(ctx context.Context, encoding tiktoken.Encoding) (*countCodec, error) {
+func newCountCodec(ctx context.Context, encoding tiktoken.Encoding, source tiktoken.Codec) (*countCodec, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var pattern string
+	switch encoding {
+	case tiktoken.Cl100kBase:
+		pattern = cl100kSplit
+	case tiktoken.O200kBase:
+		pattern = o200kSplit
+	default:
+		return nil, tiktoken.ErrEncodingNotSupported
+	}
+	if source == nil {
+		var err error
+		source, err = tiktoken.Get(encoding)
+		if err != nil {
+			return nil, err
+		}
+	}
+	split := regexp2.MustCompile(pattern, regexp2.None)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &countCodec{encoding: encoding, source: source, split: split}, nil
+}
+
+type countRanksCache struct {
+	mu    ai.ContextMutex
+	ranks map[string]uint
+}
+
+func (c *countRanksCache) load(ctx context.Context, encoding tiktoken.Encoding) (map[string]uint, error) {
+	if err := c.mu.Lock(ctx); err != nil {
+		return nil, err
+	}
+	defer c.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.ranks != nil {
+		return c.ranks, nil
+	}
+	ranks, err := newCountRanks(ctx, encoding)
+	if err != nil {
+		return nil, err
+	}
+	// Readers share this immutable map only after successful initialization.
+	c.ranks = ranks
+	return ranks, nil
+}
+
+func newCountRanks(ctx context.Context, encoding tiktoken.Encoding) (map[string]uint, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var size uint
 	// These are the contiguous ordinary-token ranks in the pinned v0.8.1 data.
 	// Special tokens are not recognized by that codec's Count/Encode methods.
 	switch encoding {
 	case tiktoken.Cl100kBase:
-		pattern, size = cl100kSplit, 100256
+		size = 100256
 	case tiktoken.O200kBase:
-		pattern, size = o200kSplit, 199998
+		size = 199998
 	default:
 		return nil, tiktoken.ErrEncodingNotSupported
 	}
@@ -101,36 +158,55 @@ func newCountCodec(ctx context.Context, encoding tiktoken.Encoding) (*countCodec
 		}
 		ranks[piece] = rank
 	}
-	split := regexp2.MustCompile(pattern, regexp2.None)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return &countCodec{ranks: ranks, split: split}, nil
+	return ranks, nil
 }
 
 func (c *countCodec) count(ctx context.Context, text string) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
+	if len(text) <= countDirectLimit {
+		count, err := c.source.Count(text)
+		if canceled := ctx.Err(); canceled != nil {
+			return 0, canceled
+		}
+		return count, err
+	}
 	match, err := c.split.FindStringMatch(text)
 	if err != nil {
 		return 0, err
 	}
+	// Repeated words and JSON keys need counting only once per call. Bound the
+	// memo and discard it on return so user text never enters a shared cache.
+	counts := make(map[string]int)
 	count := 0
 	for match != nil {
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
 		piece := match.String()
-		if _, ok := c.ranks[piece]; ok {
-			count++
-		} else {
-			n, err := c.countPiece(ctx, piece)
-			if err != nil {
-				return 0, err
+		var n int
+		if len(piece) <= countDirectLimit {
+			var cached bool
+			n, cached = counts[piece]
+			if !cached {
+				// Re-count only whole matches, never arbitrary chunks. For these
+				// pinned patterns each match remains one match on its own.
+				n, err = c.source.Count(piece)
+				if err == nil && len(counts) < countMemoLimit {
+					counts[piece] = n
+				}
 			}
-			count += n
+		} else {
+			n, err = c.countPiece(ctx, piece)
 		}
+		if err != nil {
+			return 0, err
+		}
+		count += n
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
@@ -154,6 +230,13 @@ func (c *countCodec) countPiece(ctx context.Context, piece string) (int, error) 
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
+	ranks, err := c.ranks.load(ctx, c.encoding)
+	if err != nil {
+		return 0, err
+	}
+	if _, ok := ranks[piece]; ok {
+		return 1, nil
+	}
 	parts := make([]countPart, len(piece)+1)
 	for i := range parts {
 		if i%countPollInterval == 0 {
@@ -165,7 +248,7 @@ func (c *countCodec) countPiece(ctx context.Context, piece string) (int, error) 
 	}
 	getRank := func(index, skip int) uint {
 		if index+skip+2 < len(parts) {
-			if rank, ok := c.ranks[piece[parts[index].offset:parts[index+skip+2].offset]]; ok {
+			if rank, ok := ranks[piece[parts[index].offset:parts[index+skip+2].offset]]; ok {
 				return rank
 			}
 		}

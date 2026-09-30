@@ -155,7 +155,7 @@ func TestPublicCountersCancelDuringSingleLongPiece(t *testing.T) {
 			} {
 				t.Run(name, func(t *testing.T) {
 					// Warm the cache so cancellation must interrupt actual counting.
-					if _, err := count(t.Context(), "warmup"); err != nil {
+					if _, err := count(t.Context(), strings.Repeat("a", countDirectLimit+1)); err != nil {
 						t.Fatal(err)
 					}
 					ctx := newCancelAfterCounterChecks(t, 200)
@@ -189,12 +189,15 @@ func TestPublicCountersCancelDuringSingleLongPiece(t *testing.T) {
 }
 
 func TestCountPieceCancellationInsideMergeScan(t *testing.T) {
-	codec, err := localCountCodec(t.Context(), tiktoken.Cl100kBase)
+	codec, err := localCountCodec(t.Context(), tiktoken.Cl100kBase, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// For 8192 bytes: entry + 9 initialization polls + 8 rank polls +
-	// first merge entry consume 19 checks; check 22 is inside its minimum scan.
+	if _, err := codec.ranks.load(t.Context(), codec.encoding); err != nil {
+		t.Fatal(err)
+	}
+	// For 8192 bytes: entry + cached rank lookup + 9 initialization polls +
+	// 8 rank polls + first merge entry consume 20 checks; check 22 is in the scan.
 	ctx := newCancelAfterCounterChecks(t, 22)
 	got, err := codec.countPiece(ctx, strings.Repeat("a", 8192))
 	if got != 0 || !errors.Is(err, context.Canceled) || ctx.calls.Load() != 22 {
@@ -206,12 +209,12 @@ func TestCountCodecCacheRetriesCanceledInitialization(t *testing.T) {
 	for _, encoding := range counterEncodings {
 		t.Run(encoding.name, func(t *testing.T) {
 			var cache countCodecCache
-			ctx := newCancelAfterCounterChecks(t, 5)
-			codec, err := cache.load(ctx, encoding.encoding)
+			ctx := newCancelAfterCounterChecks(t, 3)
+			codec, err := cache.load(ctx, encoding.encoding, nil)
 			if codec != nil || !errors.Is(err, context.Canceled) || cache.codec != nil {
 				t.Fatalf("canceled initialization = %p, %v; published codec=%p", codec, err, cache.codec)
 			}
-			codec, err = cache.load(t.Context(), encoding.encoding)
+			codec, err = cache.load(t.Context(), encoding.encoding, nil)
 			if err != nil || codec == nil {
 				t.Fatalf("retry initialization = %p, %v", codec, err)
 			}
@@ -219,7 +222,7 @@ func TestCountCodecCacheRetriesCanceledInitialization(t *testing.T) {
 			if err != nil || got != 1 {
 				t.Fatalf("retried codec count = %d, %v", got, err)
 			}
-			reused, err := cache.load(t.Context(), encoding.encoding)
+			reused, err := cache.load(t.Context(), encoding.encoding, nil)
 			if err != nil || reused != codec {
 				t.Fatalf("cache reuse = %p, %v; want %p", reused, err, codec)
 			}
@@ -228,7 +231,7 @@ func TestCountCodecCacheRetriesCanceledInitialization(t *testing.T) {
 }
 
 func TestCountCodecCacheWaitHonorsDeadline(t *testing.T) {
-	codec, err := localCountCodec(t.Context(), tiktoken.Cl100kBase)
+	codec, err := localCountCodec(t.Context(), tiktoken.Cl100kBase, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +242,7 @@ func TestCountCodecCacheWaitHonorsDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	got, err := cache.load(ctx, tiktoken.Cl100kBase)
+	got, err := cache.load(ctx, tiktoken.Cl100kBase, nil)
 	cache.mu.Unlock()
 	if got != nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("blocked cache = %p, %v", got, err)
@@ -247,9 +250,53 @@ func TestCountCodecCacheWaitHonorsDeadline(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("cache wait took %s", elapsed)
 	}
-	got, err = cache.load(t.Context(), tiktoken.Cl100kBase)
+	got, err = cache.load(t.Context(), tiktoken.Cl100kBase, nil)
 	if err != nil || got != codec {
 		t.Fatalf("canceled waiter damaged cache: %p, %v", got, err)
+	}
+}
+
+func TestCountRanksCacheRetriesCanceledInitialization(t *testing.T) {
+	for _, encoding := range counterEncodings {
+		t.Run(encoding.name, func(t *testing.T) {
+			codec, err := newCountCodec(t.Context(), encoding.encoding, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := newCancelAfterCounterChecks(t, 5)
+			ranks, err := codec.ranks.load(ctx, encoding.encoding)
+			if ranks != nil || !errors.Is(err, context.Canceled) || codec.ranks.ranks != nil {
+				t.Fatalf("canceled rank initialization published data or hid cancellation: %v", err)
+			}
+			// Retrying the actual long-piece path must construct a complete map.
+			text := strings.Repeat("a", countDirectLimit+1)
+			want, err := codec.source.Count(text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := codec.count(t.Context(), text)
+			if err != nil || got != want || codec.ranks.ranks == nil {
+				t.Fatalf("retry after canceled ranks = %d, %v; want %d", got, err, want)
+			}
+		})
+	}
+}
+
+func TestCountRanksCacheWaitHonorsDeadline(t *testing.T) {
+	var cache countRanksCache
+	if err := cache.mu.Lock(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	got, err := cache.load(ctx, tiktoken.Cl100kBase)
+	cache.mu.Unlock()
+	if got != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocked rank cache returned data or hid deadline: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("rank cache wait took %s", elapsed)
 	}
 }
 
@@ -312,7 +359,7 @@ func TestCountCodecCachePublishesOneCompleteCodecConcurrently(t *testing.T) {
 				go func() {
 					defer workers.Done()
 					<-start
-					codecs[worker], loadErrors[worker] = cache.load(t.Context(), encoding.encoding)
+					codecs[worker], loadErrors[worker] = cache.load(t.Context(), encoding.encoding, nil)
 					if loadErrors[worker] == nil {
 						counts[worker], loadErrors[worker] = codecs[worker].count(t.Context(), "hello")
 					}

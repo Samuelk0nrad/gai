@@ -74,7 +74,7 @@ type modelTokenCounter struct {
 func (c *modelTokenCounter) ID() string                    { return tokenizerIDPrefix + string(c.encoding) }
 func (*modelTokenCounter) Fidelity() ai.TokenCountFidelity { return ai.TokenCountExact }
 func (c *modelTokenCounter) CountTokens(ctx context.Context, text string) (int, error) {
-	return countLocalTokens(ctx, c.encoding, text)
+	return countLocalTokens(ctx, c.encoding, text, nil)
 }
 
 func (t *Tokenizer) ID() string { return tokenizerIDPrefix + string(t.encoding) }
@@ -82,14 +82,17 @@ func (t *Tokenizer) ID() string { return tokenizerIDPrefix + string(t.encoding) 
 // CountTokens preserves the pinned encoding's split boundaries and merge order.
 // Cancellation is checked during counting work, including long pair merges.
 func (t *Tokenizer) CountTokens(ctx context.Context, text string) (int, error) {
-	return countLocalTokens(ctx, t.encoding, text)
+	return countLocalTokens(ctx, t.encoding, text, t.codec)
 }
 
-func countLocalTokens(ctx context.Context, encoding tiktoken.Encoding, text string) (int, error) {
+func countLocalTokens(ctx context.Context, encoding tiktoken.Encoding, text string, source tiktoken.Codec) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	codec, err := localCountCodec(ctx, encoding)
+	if text == "" {
+		return 0, nil
+	}
+	codec, err := localCountCodec(ctx, encoding, source)
 	if err != nil {
 		return 0, fmt.Errorf("load OpenAI counter %q: %w", encoding, err)
 	}
