@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/lace-ai/gai/ai"
 	tiktoken "github.com/tiktoken-go/tokenizer"
@@ -70,36 +69,33 @@ func (m *Model) TokenCounter() ai.TokenCounter {
 
 type modelTokenCounter struct {
 	encoding tiktoken.Encoding
-	once     sync.Once
-	codec    tiktoken.Codec
-	err      error
 }
 
 func (c *modelTokenCounter) ID() string                    { return tokenizerIDPrefix + string(c.encoding) }
 func (*modelTokenCounter) Fidelity() ai.TokenCountFidelity { return ai.TokenCountExact }
 func (c *modelTokenCounter) CountTokens(ctx context.Context, text string) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	c.once.Do(func() { c.codec, c.err = tiktoken.Get(c.encoding) })
-	if c.err != nil {
-		return 0, fmt.Errorf("load OpenAI counter %q: %w", c.encoding, c.err)
-	}
-	return (&Tokenizer{codec: c.codec, encoding: c.encoding}).CountTokens(ctx, text)
+	return countLocalTokens(ctx, c.encoding, text)
 }
 
 func (t *Tokenizer) ID() string { return tokenizerIDPrefix + string(t.encoding) }
 
+// CountTokens preserves the pinned encoding's split boundaries and merge order.
+// Cancellation is checked during counting work, including long pair merges.
 func (t *Tokenizer) CountTokens(ctx context.Context, text string) (int, error) {
+	return countLocalTokens(ctx, t.encoding, text)
+}
+
+func countLocalTokens(ctx context.Context, encoding tiktoken.Encoding, text string) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	count, err := t.codec.Count(text)
+	codec, err := localCountCodec(ctx, encoding)
+	if err != nil {
+		return 0, fmt.Errorf("load OpenAI counter %q: %w", encoding, err)
+	}
+	count, err := codec.count(ctx, text)
 	if err != nil {
 		return 0, fmt.Errorf("count OpenAI tokens: %w", err)
-	}
-	if err := ctx.Err(); err != nil {
-		return 0, err
 	}
 	return count, nil
 }

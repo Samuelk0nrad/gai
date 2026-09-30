@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/lace-ai/gai/ai"
+	tiktoken "github.com/tiktoken-go/tokenizer"
 )
 
 func TestNewTokenizerResolvesKnownOpenAIModels(t *testing.T) {
@@ -179,13 +180,13 @@ func TestGenericEstimatorCoversMultilingualReferenceCounts(t *testing.T) {
 		"🙂🚀👨‍👩‍👧‍👦🎉",
 		"Please summarize 中文内容、日本語、한국어 and 🙂.",
 	}
-	for _, model := range []string{"gpt-4", GPT41} {
-		reference, err := NewTokenizer(model)
+	for _, encoding := range []tiktoken.Encoding{tiktoken.Cl100kBase, tiktoken.O200kBase} {
+		reference, err := tiktoken.Get(encoding)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, text := range fixtures {
-			exact, err := reference.CountTokens(t.Context(), text)
+			exact, err := reference.Count(text)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -194,7 +195,7 @@ func TestGenericEstimatorCoversMultilingualReferenceCounts(t *testing.T) {
 				t.Fatal(err)
 			}
 			if estimate < exact {
-				t.Fatalf("%s: estimate %d below reference %d for %q", model, estimate, exact, text)
+				t.Fatalf("%s: estimate %d below reference %d for %q", encoding, estimate, exact, text)
 			}
 		}
 	}
