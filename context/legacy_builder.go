@@ -9,6 +9,7 @@ import (
 // LegacyPromptBuilder is the rendered-prompt contract used before canonical
 // request construction. Its Conversation and PromptInput values use the current
 // canonical types so migrating a custom builder need not duplicate message data.
+//
 // Deprecated: implement PromptBuilder.BuildRequest directly.
 type LegacyPromptBuilder interface {
 	BuildContext(context.Context) ([]Part, error)

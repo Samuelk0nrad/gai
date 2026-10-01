@@ -248,8 +248,13 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			}
 
 			for _, part := range resp.Candidates[0].Content.Parts {
-				if part == nil {
+				if part == nil || isEmptyGeminiPart(part) {
 					continue
+				}
+				if hasUnsupportedGeminiPartPayload(part) {
+					streamErr = fmt.Errorf("%w: Gemini stream output part", ai.ErrUnsupportedCapability)
+					emit(ai.Token{Type: ai.TokenTypeErr, Err: streamErr, Text: streamErr.Error()})
+					return
 				}
 
 				switch {
@@ -749,8 +754,11 @@ func mapCanonicalResponse(result *genai.GenerateContentResponse) (ai.Message, er
 	message := ai.Message{Role: ai.RoleAssistant}
 	if result != nil && len(result.Candidates) > 0 && result.Candidates[0] != nil && result.Candidates[0].Content != nil {
 		for _, part := range result.Candidates[0].Content.Parts {
-			if part == nil {
+			if part == nil || isEmptyGeminiPart(part) {
 				continue
+			}
+			if hasUnsupportedGeminiPartPayload(part) {
+				return ai.Message{}, fmt.Errorf("%w: Gemini output part", ai.ErrUnsupportedCapability)
 			}
 			switch {
 			case part.Text != "":
@@ -777,6 +785,23 @@ func mapCanonicalResponse(result *genai.GenerateContentResponse) (ai.Message, er
 		message.Parts = ai.TextParts("")
 	}
 	return message, nil
+}
+
+// isEmptyGeminiPart identifies no-op parts, including terminal empty text chunks.
+// Flags, signatures, and unsupported payloads must not be mistaken for no content.
+func isEmptyGeminiPart(part *genai.Part) bool {
+	return part.Text == "" && !part.Thought && part.FunctionCall == nil &&
+		len(part.ThoughtSignature) == 0 && !hasUnsupportedGeminiPartPayload(part)
+}
+
+// Reject unsupported content even when a supported field is also populated;
+// selecting the first supported field would silently discard the other payload.
+func hasUnsupportedGeminiPartPayload(part *genai.Part) bool {
+	return part.MediaResolution != nil || part.CodeExecutionResult != nil ||
+		part.ExecutableCode != nil || part.FileData != nil || part.FunctionResponse != nil ||
+		part.InlineData != nil || part.VideoMetadata != nil || part.ToolCall != nil ||
+		part.ToolResponse != nil || len(part.PartMetadata) != 0 ||
+		part.AudioTranscription != nil || part.MediaProcessing != ""
 }
 
 func mapFunctionCall(functionCall *genai.FunctionCall) (*ai.ToolCall, error) {

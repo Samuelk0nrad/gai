@@ -7,6 +7,7 @@ import (
 )
 
 // Content decodes the legacy message payload format.
+//
 // Deprecated: use ai.ContentPart for all new conversation content.
 type Content interface {
 	String() string

@@ -348,7 +348,7 @@ func renderContentPart(out *bytes.Buffer, p ContentPart, esc func(string)) error
 		esc(r.ToolCallID)
 		out.WriteString("\" name=\"")
 		esc(r.Name)
-		out.WriteString(fmt.Sprintf("\" is_error=\"%t\">", r.IsError))
+		fmt.Fprintf(out, "\" is_error=\"%t\">", r.IsError)
 		for _, child := range r.Parts {
 			if err := renderContentPart(out, child, esc); err != nil {
 				return err
