@@ -22,9 +22,11 @@ type ModelDescriptor struct {
 	// through ModelRepository. Direct model descriptors may leave it empty.
 	Provider string
 	Model    string
-	// NativeMessages reports support for AIRequest.Messages.
+	// NativeMessages reports native role/part transport support. Canonical
+	// AIRequest.Messages may also be lowered with the explicit RenderMessages helper.
 	NativeMessages FeatureSupport
-	// NativeTools reports support for AIRequest.Tools and tool-call/result history.
+	// NativeTools reports support for provider-native AIRequest.Tools.
+	// Canonical call/result history remains semantic conversation content.
 	NativeTools FeatureSupport
 	// ToolChoiceModes lists the tool-choice modes supported by the adapter.
 	// An empty list means the adapter does not know the supported modes.
@@ -39,15 +41,15 @@ type ModelDescriptor struct {
 	JSONSchemaOutput FeatureSupport
 	Reasoning        FeatureSupport
 	// ReasoningEfforts enumerates supported values. An empty list means the
-	// supported values are not known. ReasoningEffort remains the compatibility
-	// summary for callers that only need a yes/no/unknown answer.
+	// supported values are not known. ReasoningEffort reports whether effort
+	// selection is available.
 	ReasoningEfforts []ReasoningEffort
 	ReasoningEffort  FeatureSupport
 }
 
 // SupportsNativeTools reports whether native tool calling is known to be
 // supported. Unknown capability is intentionally treated as unsupported so
-// callers can retain the text-based tool protocol as a compatibility fallback.
+// callers use the text tool protocol when native support is unavailable.
 func (d ModelDescriptor) SupportsNativeTools() bool {
 	return d.NativeTools == FeatureSupportSupported
 }
@@ -60,9 +62,7 @@ func (d ModelDescriptor) Copy() ModelDescriptor {
 	return d
 }
 
-// ModelDescriber is an optional extension to Model. Model intentionally does
-// not include Descriptor so existing custom Model implementations keep source
-// compatibility.
+// ModelDescriber supplies optional model capability information.
 type ModelDescriber interface {
 	Descriptor() ModelDescriptor
 }
@@ -97,17 +97,9 @@ func (d ModelDescriptor) ValidateRequest(req AIRequest) error {
 	if err := req.Validate(); err != nil {
 		return err
 	}
-	if len(req.Messages) > 0 && d.NativeMessages == FeatureSupportUnsupported {
-		return d.unsupported("native messages")
-	}
-	usesToolHistory := false
-	for _, message := range req.Messages {
-		if len(message.ToolCalls) > 0 || message.ToolResult != nil {
-			usesToolHistory = true
-			break
-		}
-	}
-	if (len(req.Tools) > 0 || usesToolHistory) && d.NativeTools == FeatureSupportUnsupported {
+	// Messages are canonical semantic input, including for text rendering.
+	// NativeTools constrains explicit native tool definitions.
+	if len(req.Tools) > 0 && d.NativeTools == FeatureSupportUnsupported {
 		return d.unsupported("native tools")
 	}
 	if len(req.Tools) > 0 && req.ToolChoice.Mode != "" && len(d.ToolChoiceModes) > 0 && !containsToolChoiceMode(d.ToolChoiceModes, req.ToolChoice.Mode) {

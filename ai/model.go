@@ -35,16 +35,3 @@ func ModelName(model Model) string {
 	}
 	return ""
 }
-
-// NativeToolModel is optionally implemented by legacy models that send tool
-// definitions through their provider's native tool-calling API. New models
-// should implement ModelDescriber and report ModelDescriptor.NativeTools
-// instead. Agent consults NativeToolModel only when ModelDescriber is absent.
-//
-// It is deliberately separate from Model so existing custom Model
-// implementations retain the text-based compatibility protocol by default.
-//
-// Deprecated: implement ModelDescriber instead.
-type NativeToolModel interface {
-	NativeTools() bool
-}

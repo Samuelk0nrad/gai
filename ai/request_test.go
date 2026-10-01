@@ -1,21 +1,15 @@
 package ai_test
 
 import (
-	"testing"
-
 	"github.com/lace-ai/gai/ai"
+	"testing"
 )
 
-func TestAIRequestStoresPromptString(t *testing.T) {
-	req := ai.AIRequest{
-		Prompt:    "system\n\n<context>...</context>\n\nuser prompt",
-		MaxTokens: 42,
+func TestAIRequestRequiresCanonicalMessages(t *testing.T) {
+	if err := (ai.AIRequest{}).Validate(); err == nil {
+		t.Fatal("empty request accepted")
 	}
-
-	if req.Prompt != "system\n\n<context>...</context>\n\nuser prompt" {
-		t.Fatalf("unexpected prompt: %q", req.Prompt)
-	}
-	if req.MaxTokens != 42 {
-		t.Fatalf("unexpected max tokens: %d", req.MaxTokens)
+	if err := (ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "")}}).Validate(); err != nil {
+		t.Fatal(err)
 	}
 }

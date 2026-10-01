@@ -1,6 +1,7 @@
 package history
 
 import (
+	"github.com/lace-ai/gai/ai"
 	"strings"
 	"testing"
 
@@ -12,14 +13,16 @@ func TestWriteTurnHandlesNilMessageContent(t *testing.T) {
 	t.Parallel()
 
 	turn := gaictx.Turn{
-		UserMessage: &gaictx.Message{Role: gaictx.RoleUser},
-		Messages:    []gaictx.Message{{Role: gaictx.RoleAssistant}},
+		UserMessage: &gaictx.StoredMessage{Message: ai.TextMessage(ai.RoleUser, "")},
+		Messages:    []gaictx.StoredMessage{{Message: ai.TextMessage(ai.RoleAssistant, "")}},
 	}
 	var builder strings.Builder
 
-	writeTurn(&builder, &turn)
+	if err := writeTurn(t.Context(), &builder, &turn); err != nil {
+		t.Fatal(err)
+	}
 
-	if got, want := builder.String(), "user: \nassistant: \n"; got != want {
+	if got, want := builder.String(), "<user>\n\n</user>\n<assistant>\n\n</assistant>\n\n"; got != want {
 		t.Fatalf("unexpected serialized turn: want %q got %q", want, got)
 	}
 }
@@ -29,7 +32,7 @@ func TestSummaryTokenCountRecountsNegativeCachedValue(t *testing.T) {
 
 	counter := &mocks.MockTokenCounter{Count: 5}
 	summary := &Summary{
-		Content:    gaictx.NewTextContent("older turns"),
+		Content:    ai.ContentPart{Kind: ai.ContentText, Text: "older turns"},
 		tokenCount: map[string]int{"mock.counter": -1},
 	}
 

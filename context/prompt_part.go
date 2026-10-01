@@ -2,6 +2,7 @@ package context
 
 import (
 	"context"
+	"strconv"
 
 	"github.com/lace-ai/gai/ai"
 )
@@ -40,55 +41,64 @@ func (t TextPart) Render(ctx context.Context) (RenderNode, error) {
 	return RenderNode{Type: "text", Value: t.Content}, nil
 }
 
-// MessagePart associates message content with a conversation role.
-type MessagePart struct {
-	Role    Role
-	Content Content
-}
+// MessagePart wraps canonical conversation content for context sources and
+// standalone renderers. Builders consume ConversationMessages directly.
+type MessagePart struct{ Message ai.Message }
 
-// NewMessagePart creates a role-aware message part.
-func NewMessagePart(role Role, content Content) MessagePart {
-	return MessagePart{
-		Role:    role,
-		Content: content,
-	}
-}
+func NewMessagePart(message ai.Message) MessagePart { return MessagePart{Message: message.Clone()} }
 
-func (m MessagePart) Name() string {
-	return "message"
-}
+func (m MessagePart) Name() string { return "message" }
+
+func (m MessagePart) ConversationMessages() []ai.Message { return []ai.Message{m.Message.Clone()} }
 
 func (m MessagePart) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
 	if counter == nil {
 		return 0, ErrTokenCounterNotFound
 	}
-	content := ""
-	if m.Content != nil {
-		content = m.Content.String()
+	text, err := messageTokenText(m.Message)
+	if err != nil {
+		return 0, err
 	}
-	return counter.CountTokens(ctx, content)
+	return counter.CountTokens(ctx, text)
 }
 
 func (m MessagePart) Render(ctx context.Context) (RenderNode, error) {
-	node := RenderNode{
-		Type: roleRenderType(m.Role),
-	}
-	if m.Content == nil {
-		return node, nil
-	}
-	child, err := m.Content.Render(ctx)
-	if err != nil {
+	// Enforce the canonical fallback's capability policy before formatting.
+	if _, err := ai.RenderMessages(ctx, []ai.Message{m.Message}); err != nil {
 		return RenderNode{}, err
 	}
-	if child.Type == ContentTypeText && len(child.Fields) == 0 && len(child.Children) == 0 {
-		node.Value = child.Value
-		return node, nil
+	node := RenderNode{Type: roleRenderType(m.Message.Role)}
+	for _, part := range m.Message.Parts {
+		child := RenderNode{Type: string(part.Kind)}
+		switch part.Kind {
+		case ai.ContentText, ai.ContentReasoning:
+			child.Value = part.Text
+		case ai.ContentJSON:
+			child.Value = string(part.JSON)
+		case ai.ContentToolCall:
+			child.Fields = []RenderField{{Key: "id", Value: part.ToolCall.ID}, {Key: "name", Value: part.ToolCall.Name}}
+			child.Children = []RenderNode{{Type: "arguments", Value: string(part.ToolCall.Args)}}
+		case ai.ContentToolResult:
+			result := part.ToolResult
+			child.Fields = []RenderField{{Key: "id", Value: result.ToolCallID}, {Key: "name", Value: result.Name}, {Key: "is_error", Value: strconv.FormatBool(result.IsError)}}
+			for _, resultPart := range result.Parts {
+				value := resultPart.Text
+				if resultPart.Kind == ai.ContentJSON {
+					value = string(resultPart.JSON)
+				}
+				child.Children = append(child.Children, RenderNode{Type: "result", Value: value})
+			}
+		}
+		node.Children = append(node.Children, child)
 	}
-	node.Children = []RenderNode{child}
+	if len(node.Children) == 1 && node.Children[0].Type == string(ai.ContentText) {
+		node.Value = node.Children[0].Value
+		node.Children = nil
+	}
 	return node, nil
 }
 
-func roleRenderType(role Role) string {
+func roleRenderType(role ai.Role) string {
 	if IsValidRole(role) {
 		return string(role)
 	}

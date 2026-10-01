@@ -2,6 +2,7 @@ package context_test
 
 import (
 	"context"
+	"github.com/lace-ai/gai/ai"
 	"testing"
 
 	gaictx "github.com/lace-ai/gai/context"
@@ -33,16 +34,16 @@ func TestBuilderAcceptsRenderOnlyRenderer(t *testing.T) {
 	t.Parallel()
 	builder := gaictx.New(gaictx.Definition{
 		Renderer:    plainRenderer{},
-		PromptInput: gaictx.PromptInput{User: gaictx.NewTextContent("question")},
+		PromptInput: gaictx.PromptInput{User: ai.TextParts("question")},
 	})
 	if _, err := builder.BuildContext(t.Context()); err != nil {
 		t.Fatalf("BuildContext: %v", err)
 	}
-	prompt, messages, err := builder.BuildRequest(t.Context(), nil)
+	request, err := builder.BuildRequest(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
-	if prompt != "question" || len(messages) != 1 || messages[0].Text != prompt {
-		t.Fatalf("BuildRequest = (%q, %#v), want custom rendered question", prompt, messages)
+	if len(request.Messages) != 1 || request.Messages[0].Text() != "question" {
+		t.Fatalf("BuildRequest = %#v, want canonical question", request)
 	}
 }

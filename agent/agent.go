@@ -66,8 +66,7 @@ type Definition struct {
 	// Tools are available to the model during loop execution. When the model's
 	// ai.ModelDescriber descriptor reports native tools are supported, their
 	// definitions and text-based invocation protocol are not added to the
-	// prompt. Models without a descriptor use ai.NativeToolModel as a legacy
-	// fallback. Otherwise, the protocol is added as the first prompt context
+	// prompt. Otherwise, the protocol is added as the first prompt context
 	// source unless its builder already contains a tool_definitions source.
 	Tools []loop.Tool
 	// ToolChoice is the default tool-use policy. The zero value uses the
@@ -307,8 +306,7 @@ func usesNativeTools(model ai.Model) bool {
 	if describer, ok := model.(ai.ModelDescriber); ok {
 		return describer.Descriptor().SupportsNativeTools()
 	}
-	native, ok := model.(interface{ NativeTools() bool })
-	return ok && native.NativeTools()
+	return false
 }
 
 // promptInputSetter is required by Agent to inject each run's input, but is not

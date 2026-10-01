@@ -22,9 +22,15 @@ type ToolCall struct {
 	Name string
 	// Args contains the function arguments as JSON.
 	Args json.RawMessage
-	// ThoughtSignature is opaque provider state that must accompany a tool call
-	// in a subsequent provider-native history request.
-	ThoughtSignature []byte
+	// Extensions retains provider continuity state on this exact call.
+	Extensions []Extension
+}
+
+// Clone snapshots a call and its scoped continuity state.
+func (tc ToolCall) Clone() ToolCall {
+	tc.Args = append(json.RawMessage(nil), tc.Args...)
+	tc.Extensions = CloneExtensions(tc.Extensions)
+	return tc
 }
 
 // Validate checks that the tool call has an ID, the "function" type, and a
@@ -177,22 +183,21 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 			return true
 		}
 
-		flushBeforeCandidate := func(current []byte, idx int) bool {
-			if len(pending) == 0 {
-				return true
-			}
-
+		flushBeforeCandidate := func(current []byte, idx int) (int, bool) {
+			carryUsage := 0
 			if idx > 0 {
-				pending[len(pending)-1].Data = current[:idx]
+				pending[len(pending)-1].Part.Text = string(current[:idx])
 			} else {
+				carryUsage = pending[len(pending)-1].TokenUsage
 				pending = pending[:len(pending)-1]
 			}
-			if len(bytes.TrimSpace(joinTokenData(pending))) == 0 {
+			if len(bytes.TrimSpace(joinTokenText(pending))) == 0 {
+				carryUsage += sumTokenUsage(pending)
 				resetTracking()
 				pending = nil
-				return true
+				return carryUsage, true
 			}
-			return flushPending()
+			return carryUsage, flushPending()
 		}
 
 		maybeToolCall := func(last string) (handled bool, keepGoing bool) {
@@ -200,20 +205,19 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 				return false, true
 			}
 			if inString || objDepth != 0 || arrDepth != 0 {
-				observer.CandidateRejected(&result, fmt.Sprintf("inString=%v objDepth=%d arrDepth=%d", inString, objDepth, arrDepth), joinTokenData(pending))
+				observer.CandidateRejected(&result, fmt.Sprintf("inString=%v objDepth=%d arrDepth=%d", inString, objDepth, arrDepth), joinTokenText(pending))
 				return false, true
 			}
 
 			payload := []byte(last)
 			if len(pending) > 0 {
-				payload = append(joinTokenData(pending[:len(pending)-1]), payload...)
+				payload = append(joinTokenText(pending[:len(pending)-1]), payload...)
 			}
 			if tc, ok := parseToolCall(payload); ok {
 				detected := observer.snapshotDetected(tc)
 				if !SendToken(ctx, out, Token{
-					Type:     TokenTypeToolCall,
-					Data:     payload,
-					ToolCall: tc,
+					Part:       &ContentPart{Kind: ContentToolCall, ToolCall: tc},
+					TokenUsage: sumTokenUsage(pending),
 				}) {
 					canceled = true
 					return false, false
@@ -223,6 +227,9 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 				resetTracking()
 			} else {
 				observer.CandidateRejected(&result, "parse_failed", payload)
+				// Replay only the balanced candidate; the remaining suffix is
+				// handled separately without duplicating text or usage.
+				pending[len(pending)-1].Part.Text = last
 				if !flushPending() {
 					return false, false
 				}
@@ -238,7 +245,7 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 			select {
 			case <-ctx.Done():
 				if isJSONCandidate {
-					pendingPayload := joinTokenData(pending)
+					pendingPayload := joinTokenText(pending)
 					observer.Pending(&result, pendingPayload)
 					result.eofPending = true
 					observer.CandidateRejected(&result, "stream_canceled", pendingPayload)
@@ -251,17 +258,31 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 				}
 			}
 			result.inputTokenEvents++
-			// non-text tokens: passthrough.
-			if t.Type != TokenTypeText {
-				if t.Type == TokenTypeCompletion && isJSONCandidate {
-					pendingPayload := joinTokenData(pending)
+			if err := t.Validate(); err != nil {
+				if isJSONCandidate {
+					observer.CandidateRejected(&result, "invalid_event", joinTokenText(pending))
+				}
+				if !flushPending() {
+					return
+				}
+				if !SendToken(ctx, out, Token{Err: err}) {
+					canceled = true
+				}
+				return
+			}
+			// Only unsigned text participates in the text tool protocol. Other
+			// canonical parts and execution metadata pass through intact.
+			t = t.Clone()
+			if t.Part == nil || t.Part.Kind != ContentText || len(t.Part.Extensions) > 0 {
+				if t.Type() == TokenTypeCompletion && isJSONCandidate {
+					pendingPayload := joinTokenText(pending)
 					observer.Pending(&result, pendingPayload)
 					result.eofPending = true
 					observer.CandidateRejected(&result, "end_of_stream", pendingPayload)
-				} else if t.Type == TokenTypeErr && isJSONCandidate {
-					observer.CandidateRejected(&result, "stream_error", joinTokenData(pending))
+				} else if t.Type() == TokenTypeErr && isJSONCandidate {
+					observer.CandidateRejected(&result, "stream_error", joinTokenText(pending))
 				} else if isJSONCandidate {
-					observer.CandidateRejected(&result, "interrupted", joinTokenData(pending))
+					observer.CandidateRejected(&result, "interrupted", joinTokenText(pending))
 				}
 				pending = append(pending, t)
 				if !flushPending() {
@@ -270,9 +291,14 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 				continue
 			}
 
-			remaining := t.Data
+			remaining := []byte(t.Part.Text)
+			remainingUsage := t.TokenUsage
+			if len(remaining) == 0 {
+				pending = append(pending, t)
+			}
 			for len(remaining) > 0 {
-				pending = append(pending, Token{Type: TokenTypeText, Data: remaining})
+				pending = append(pending, Token{Part: &ContentPart{Kind: ContentText, Text: string(remaining)}, TokenUsage: remainingUsage})
+				remainingUsage = 0
 
 				var tokenStr strings.Builder
 				handledCandidate := false
@@ -296,10 +322,11 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 							newLines++
 						}
 						if newLines >= 2 && b == '{' {
-							if !flushBeforeCandidate(remaining, idx) {
+							candidateUsage, ok := flushBeforeCandidate(remaining, idx)
+							if !ok {
 								return
 							}
-							pending = append(pending, Token{Type: TokenTypeText, Data: remaining[idx:]})
+							pending = append(pending, Token{Part: &ContentPart{Kind: ContentText, Text: string(remaining[idx:])}, TokenUsage: candidateUsage})
 							tokenStr.Reset()
 							tokenStr.WriteByte(b)
 							isJSONCandidate = true
@@ -367,7 +394,7 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 		// End of stream: an unresolved JSON candidate is rejected, then all
 		// buffered tokens are replayed unchanged.
 		if len(pending) > 0 {
-			pendingPayload := joinTokenData(pending)
+			pendingPayload := joinTokenText(pending)
 			observer.Pending(&result, pendingPayload)
 			if isJSONCandidate {
 				result.eofPending = true
@@ -382,14 +409,22 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 	return out
 }
 
-func joinTokenData(tokens []Token) []byte {
+func joinTokenText(tokens []Token) []byte {
 	var b bytes.Buffer
 	for _, t := range tokens {
-		b.Write(t.Data)
+		b.WriteString(t.Text())
 	}
 	return b.Bytes()
 }
 
 func isWS(b byte) bool {
 	return b == ' ' || b == '\n' || b == '\r' || b == '\t'
+}
+
+func sumTokenUsage(tokens []Token) int {
+	total := 0
+	for _, token := range tokens {
+		total += token.TokenUsage
+	}
+	return total
 }

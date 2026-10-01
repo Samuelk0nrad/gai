@@ -156,7 +156,7 @@ func run(ctx context.Context) error {
 	userPrompt := promptFromArgs(os.Args[1:])
 	workflow, err := supportAgent.NewRun(ctx, agent.RunInput{
 		Prompt: gaictx.PromptInput{
-			User: gaictx.NewTextContent(userPrompt),
+			User: ai.TextParts(userPrompt),
 		},
 	})
 	if err != nil {

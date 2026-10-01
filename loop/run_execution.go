@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 )
 
 type runExecution struct {
@@ -19,7 +18,7 @@ type runExecution struct {
 	state                     *loopRunState
 	executionTools            []Tool
 	toolDefinitions           []ai.ToolDefinition
-	userMessage               *gaictx.Message
+	userMessage               *ai.Message
 	requiredToolCallSatisfied bool
 }
 
@@ -155,7 +154,11 @@ func (r *runExecution) runIteration(iterationCount int) iterationOutcome {
 }
 
 func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferTokens bool) (*attemptExecution, attemptOutcome) {
-	attemptIteration := Iteration{Count: iterationCount, UserMessage: r.userMessage}
+	attemptIteration := Iteration{Count: iterationCount}
+	if r.userMessage != nil {
+		attemptIteration.Conversation = []ai.Message{r.userMessage.Clone()}
+		attemptIteration.inputMessages = 1
+	}
 	attemptCtx, state := r.state.startIteration(r.ctx, iterationCount, attemptID)
 	attemptCtx, baseCancel := context.WithCancel(attemptCtx)
 	attempt := &attemptExecution{
@@ -216,6 +219,11 @@ func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferToken
 func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request ai.AIRequest, deferTokens bool) (bool, attemptOutcome, error) {
 	tokens := a.run.owner.Model.GenerateStream(modelCtx, request)
 	for token := range tokens {
+		token = token.Clone()
+		if err := token.Validate(); err != nil {
+			return false, a.terminateError(err), nil
+		}
+
 		if token.Err != nil {
 			retryErr := token.Err
 			attemptTimedOut := a.timedOut()
@@ -248,16 +256,16 @@ func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request 
 			return false, a.terminateError(terminalErr), nil
 		}
 
-		if token.Type == ai.TokenTypeToolCall && a.run.owner.ToolChoice.Mode == ai.ToolChoiceNone {
+		if token.Type() == ai.TokenTypeToolCall && a.run.owner.ToolChoice.Mode == ai.ToolChoiceNone {
 			// A provider can still emit a tool-call token after tools are disabled.
 			// Do not expose or retain a disabled call.
 			continue
 		}
-		if token.Type == ai.TokenTypeToolCall && token.ToolCall != nil {
+		if call := token.ToolCall(); call != nil {
 			a.iteration.AppendToken(token)
 			a.toolCalls = append(a.toolCalls, pendingToolCall{
 				partIndex: len(a.iteration.Parts) - 1,
-				call:      *token.ToolCall,
+				call:      *call,
 			})
 		} else {
 			a.iteration.AppendToken(token)

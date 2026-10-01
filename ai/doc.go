@@ -8,6 +8,31 @@
 // Provider-specific implementations live in subpackages such as anthropic,
 // gemini, mistral, and openai.
 //
+// # Canonical conversations
+//
+// Message is the conversation value shared by requests, provider responses, and
+// persisted history. Its ordered ContentPart values retain text, reasoning,
+// tool calls/results, JSON, media, and provider extensions. Message.Role uses
+// RoleSystem, RoleUser, RoleAssistant, or RoleTool. Storage metadata such as
+// session IDs and token caches belongs to storage envelopes outside Message.
+//
+// AIRequest requires canonical Messages. Copy and Clone snapshot mutable
+// payloads, including nested results, media bytes, raw JSON, schemas, and opaque
+// provider state.
+//
+// Message.Validate checks tagged payloads and role constraints. Request
+// validation matches tool results to preceding calls by ID and name. IDs must
+// be unique among outstanding calls and may be reused after completion. Media and
+// unknown namespaced extensions can be persisted even when a selected adapter
+// cannot replay them. RenderMessages preserves supported roles, part order,
+// and tool identity, and returns an UnsupportedContentError for media or opaque
+// continuity state that has no faithful text representation.
+//
+// AIResponse.Message owns output; Text(), Reasoning(), and ToolCalls() derive
+// views directly from it. Token carries exactly one canonical Part, error, or
+// completion payload. Type(), Text(), and ToolCall() derive stream views. Errors
+// and completion accounting remain execution metadata outside messages.
+//
 // # Portable and native capabilities
 //
 // The shared request supports portable messages, function tools, response formats,
@@ -18,9 +43,10 @@
 // through GAI preflight, normalization, observations, or loop retry policies.
 //
 // ModelDescriptor describes portable adapter capabilities, not a native feature
-// catalog. Unknown facts do not reject requests. NativeTools covers definitions
-// and tool history. Token counting fidelity belongs to TokenCounter. Catalog
-// caches, descriptor merging, and discovery locks are internal implementation
+// catalog. Unknown facts do not reject requests. NativeTools controls explicit
+// native tool definitions; canonical history can also be rendered as text.
+// Token counting fidelity belongs to TokenCounter. Catalog caches, descriptor
+// merging, and discovery locks are internal implementation
 // details; ModelRepository remains an optional public application utility.
 //
 // # Local text counting
@@ -40,6 +66,13 @@
 // They are never consulted for automatic budgeting.
 //
 // # Pre-v1 migration
+//
+// Replace RequestMessage with Message and its Text/ToolCalls/ToolResult fields
+// with ordered ContentPart values. TextMessage and TextParts construct text
+// payloads. Use ToolCall directly for calls; ToolResult carries the call ID,
+// tool name, ordered result parts, and IsError. Replace RequestMessageRole values
+// with Role values. Preserve provider extensions on their original message,
+// part, or call instead of converting opaque data to prompt text.
 //
 // Model implementations need only GenerateStream. Code that calls Generate or
 // Name through an ai.Model uses ModelGenerator or ModelNamer respectively;

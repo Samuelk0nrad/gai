@@ -135,16 +135,14 @@ func TestAgentMiddlewareStreamsToolStartBeforeNestedStageCompletes(t *testing.T)
 	nested := agent.New(agent.Definition{
 		Name: "memory",
 		Model: &scriptedWorkflowModel{scripts: [][]ai.Token{
-			{{
-				Type: ai.TokenTypeToolCall,
-				ToolCall: &ai.ToolCall{
-					ID:   "call_1",
-					Type: "function",
-					Name: "echo",
-					Args: []byte(`{"text":"remembered"}`),
-				},
+			{{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{
+				ID:   "call_1",
+				Type: "function",
+				Name: "echo",
+				Args: []byte(`{"text":"remembered"}`),
 			}},
-			{{Type: ai.TokenTypeText, Text: "saved"}},
+			}},
+			{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "saved"}}},
 		}},
 		Tools: []loop.Tool{gatedWorkflowTool{Tool: loop.NewEchoTool(), release: release}},
 		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
@@ -203,8 +201,8 @@ func TestAgentMiddlewareStreamsToolStartBeforeNestedStageCompletes(t *testing.T)
 
 func TestAgentMiddlewareReplaceOutputRestoresOnlyAcceptedUpstreamAttempts(t *testing.T) {
 	model := &scriptedWorkflowModel{scripts: [][]ai.Token{
-		{{Type: ai.TokenTypeText, Text: "partial"}, {Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("retry")}}},
-		{{Type: ai.TokenTypeText, Text: "final"}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "partial"}}, {Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("retry")}}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "final"}}},
 	}}
 	main := agent.New(agent.Definition{
 		Name:        "main",
@@ -307,11 +305,11 @@ func TestWorkflowAbandonedDeliveryRetainsCompletedTransformations(t *testing.T) 
 		replacement := agent.New(agent.Definition{
 			Name: "replacement",
 			Model: &scriptedWorkflowModel{scripts: [][]ai.Token{{
-				{Type: ai.TokenTypeText, Text: "SAFE"},
-				{Type: ai.TokenTypeText, Text: " "},
-				{Type: ai.TokenTypeText, Text: "RE"},
-				{Type: ai.TokenTypeText, Text: "PLACE"},
-				{Type: ai.TokenTypeText, Text: "MENT"},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "SAFE"}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: " "}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "RE"}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "PLACE"}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "MENT"}},
 			}}},
 			Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
 				return &testPromptBuilder{}, nil
@@ -394,14 +392,12 @@ func TestWorkflowCanceledNestedFailurePersistsUnderDownstreamBackpressure(t *tes
 	toolRelease := make(chan struct{})
 	nested := agent.New(agent.Definition{
 		Name: "nested",
-		Model: &scriptedWorkflowModel{scripts: [][]ai.Token{{{
-			Type: ai.TokenTypeToolCall,
-			ToolCall: &ai.ToolCall{
-				ID:   "call_1",
-				Type: "function",
-				Name: "echo",
-				Args: []byte(`{"text":"blocked"}`),
-			},
+		Model: &scriptedWorkflowModel{scripts: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{
+			ID:   "call_1",
+			Type: "function",
+			Name: "echo",
+			Args: []byte(`{"text":"blocked"}`),
+		}},
 		}}}},
 		Tools: []loop.Tool{gatedWorkflowTool{Tool: loop.NewEchoTool(), release: toolRelease}},
 		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
@@ -748,7 +744,7 @@ func TestMiddlewareCanEmitStructuredOutputWithUpstreamIdentity(t *testing.T) {
 		}()
 		return out
 	})
-	workflow, err := workflowAgent("main", "product-123", transform).NewRun(context.Background(), agent.RunInput{Prompt: gaictx.PromptInput{User: gaictx.NewTextContent("question")}})
+	workflow, err := workflowAgent("main", "product-123", transform).NewRun(context.Background(), agent.RunInput{Prompt: gaictx.PromptInput{User: ai.TextParts("question")}})
 	if err != nil {
 		t.Fatalf("NewRun failed: %v", err)
 	}
@@ -778,8 +774,8 @@ func TestMiddlewareCanEmitStructuredOutputWithUpstreamIdentity(t *testing.T) {
 
 func TestStructuredOutputFromRetriedAttemptIsExcluded(t *testing.T) {
 	model := &scriptedWorkflowModel{scripts: [][]ai.Token{
-		{{Type: ai.TokenTypeText, Text: "discarded"}, {Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("retry")}}},
-		{{Type: ai.TokenTypeText, Text: "accepted"}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "discarded"}}, {Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("retry")}}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "accepted"}}},
 	}}
 	transform := agent.MiddlewareFunc(func(ctx context.Context, run *agent.MiddlewareContext, upstream <-chan agent.Event) <-chan agent.Event {
 		out := make(chan agent.Event)
@@ -828,7 +824,7 @@ func TestPropagatedMiddlewareFailureSkipsFollowingDefaultStage(t *testing.T) {
 	secondCalled := false
 	second := agent.New(agent.Definition{
 		Name:  "second",
-		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Text: "unexpected"}}}},
+		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "unexpected"}}}}}}},
 		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
 			secondCalled = true
 			return &testPromptBuilder{}, nil
@@ -972,13 +968,13 @@ func TestStructuredOutputMarkerAcrossTokenBoundariesAndMalformedFallback(t *test
 	}{
 		{
 			name:       "split marker",
-			tokens:     []ai.Token{{Type: ai.TokenTypeText, Text: "Some ```pro"}, {Type: ai.TokenTypeText, Text: "duct\nproduct-123"}, {Type: ai.TokenTypeText, Text: "\n``` after"}},
+			tokens:     []ai.Token{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "Some ```pro"}}, {Part: &ai.ContentPart{Kind: ai.ContentText, Text: "duct\nproduct-123"}}, {Part: &ai.ContentPart{Kind: ai.ContentText, Text: "\n``` after"}}},
 			wantText:   "Some  after",
 			wantDataID: `{"id":"product-123"}`,
 		},
 		{
 			name:     "malformed fallback",
-			tokens:   []ai.Token{{Type: ai.TokenTypeText, Text: "before ```product\n"}, {Type: ai.TokenTypeText, Text: "unfinished"}},
+			tokens:   []ai.Token{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "before ```product\n"}}, {Part: &ai.ContentPart{Kind: ai.ContentText, Text: "unfinished"}}},
 			wantText: "before ```product\nunfinished",
 		},
 	} {

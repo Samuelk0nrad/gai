@@ -37,27 +37,28 @@ func (m *MockModel) Generate(ctx context.Context, req ai.AIRequest) (*ai.AIRespo
 
 func (m *MockModel) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.Token {
 	out := make(chan ai.Token, 1)
-
 	go func() {
 		defer close(out)
-
 		res, err := m.Generate(ctx, req)
 		if err != nil {
-			out <- ai.Token{Type: ai.TokenTypeErr, Err: err}
+			ai.SendToken(ctx, out, ai.Token{Err: err})
 			return
 		}
-		if res == nil || (res.Text == "" && res.Reasoning == "") {
+		if res == nil {
 			return
 		}
-
-		if res.Reasoning != "" {
-			out <- ai.Token{Type: ai.TokenTypeThought, Text: res.Reasoning, Data: []byte(res.Reasoning), TokenUsage: res.ReasoningTokens}
-		}
-		if res.Text != "" {
-			out <- ai.Token{Type: ai.TokenTypeText, Data: []byte(res.Text)}
+		reasoningUsage := res.ReasoningTokens
+		for _, part := range ai.CloneParts(res.Message.Parts) {
+			token := ai.Token{Part: &part}
+			if part.Kind == ai.ContentReasoning {
+				token.TokenUsage = reasoningUsage
+				reasoningUsage = 0
+			}
+			if !ai.SendToken(ctx, out, token) {
+				return
+			}
 		}
 	}()
-
 	return out
 }
 

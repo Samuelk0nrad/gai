@@ -40,9 +40,7 @@ func TestModelGenerateMapsCapabilitiesAndResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Model returned error: %v", err)
 	}
-	res, err := any(m).(ai.ModelGenerator).Generate(context.Background(), ai.AIRequest{
-		Prompt:         "hello",
-		MaxTokens:      42,
+	res, err := any(m).(ai.ModelGenerator).Generate(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, MaxTokens: 42,
 		Tools:          []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`)}},
 		ToolChoice:     ai.ToolChoice{Mode: ai.ToolChoiceRequired, Names: []string{"search"}},
 		ResponseFormat: ai.ResponseFormat{Type: ai.ResponseFormatJSONSchema, Name: "answer", Schema: json.RawMessage(`{"type":"object","properties":{"answer":{"type":"string"}}}`)},
@@ -60,11 +58,11 @@ func TestModelGenerateMapsCapabilitiesAndResponse(t *testing.T) {
 	if got["response_format"].(map[string]any)["type"] != "json_schema" {
 		t.Fatalf("unexpected response format: %#v", got)
 	}
-	if res.Text != "ok" || res.InputTokens != 11 || res.OutputTokens != 7 || res.ReasoningTokens != 3 {
+	if res.Text() != "ok" || res.InputTokens != 11 || res.OutputTokens != 7 || res.ReasoningTokens != 3 {
 		t.Fatalf("unexpected response: %#v", res)
 	}
-	if len(res.ToolCalls) != 1 || res.ToolCalls[0].ID != "call_1" || res.ToolCalls[0].Name != "search" || string(res.ToolCalls[0].Args) != `{"query":"go"}` {
-		t.Fatalf("unexpected tool calls: %#v", res.ToolCalls)
+	if len(res.ToolCalls()) != 1 || res.ToolCalls()[0].ID != "call_1" || res.ToolCalls()[0].Name != "search" || string(res.ToolCalls()[0].Args) != `{"query":"go"}` {
+		t.Fatalf("unexpected tool calls: %#v", res.ToolCalls())
 	}
 	attrs := obstest.Attributes(obstest.RequireGenerationSpans(t, recorder, 1)[0])
 	if attrs["gen_ai.provider.name"].AsString() != "openai" || attrs["gai.gen_ai.response.tool_call_count"].AsInt64() != 1 {
@@ -93,10 +91,10 @@ func TestModelGenerateWithResponsesTransportMapsToolContinuationAndNoneEffort(t 
 		t.Fatal(err)
 	}
 	res, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{
-		Messages: []ai.RequestMessage{
-			{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{ID: "call_1", Name: "search", Arguments: json.RawMessage(`{"q":"first"}`)}}},
-			{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: "call_1", Name: "search", Content: "first result"}},
-			{Role: ai.RequestMessageRoleUser, Text: "continue"},
+		Messages: []ai.Message{
+			{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{Type: "function", ID: "call_1", Name: "search", Args: json.RawMessage(`{"q":"first"}`)}}}},
+			{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call_1", Name: "search", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "first result"}}}}}},
+			{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "continue"}}},
 		},
 		Tools:      []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}},
 		ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceRequired, Names: []string{"search"}},
@@ -112,7 +110,7 @@ func TestModelGenerateWithResponsesTransportMapsToolContinuationAndNoneEffort(t 
 	if len(input) != 3 || input[0].(map[string]any)["type"] != "function_call" || input[1].(map[string]any)["type"] != "function_call_output" {
 		t.Fatalf("native tool continuation = %#v", input)
 	}
-	if res.Text != "done" || len(res.ToolCalls) != 1 || res.ToolCalls[0].ID != "call_2" || res.InputTokens != 11 || res.OutputTokens != 7 || res.ReasoningTokens != 3 {
+	if res.Text() != "done" || len(res.ToolCalls()) != 1 || res.ToolCalls()[0].ID != "call_2" || res.InputTokens != 11 || res.OutputTokens != 7 || res.ReasoningTokens != 3 {
 		t.Fatalf("response = %#v", res)
 	}
 }
@@ -144,11 +142,11 @@ func TestModelResponsesTransportDisablesResponseStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "sync"}); err != nil {
+	if _, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "sync")}}); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "stream"}) {
-		if token.Type == ai.TokenTypeErr {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "stream")}}) {
+		if token.Type() == ai.TokenTypeErr {
 			t.Fatalf("GenerateStream token error: %v", token.Err)
 		}
 	}
@@ -198,16 +196,16 @@ func TestModelGenerateWithResponsesTransportPreservesReasoningItemsAcrossToolCon
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "find go", Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}}})
+	first, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "find go")}, Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}}})
 	if err != nil {
 		t.Fatalf("first Generate: %v", err)
 	}
-	if len(first.ToolCalls) != 1 || string(first.ToolCalls[0].ThoughtSignature) == "" {
-		t.Fatalf("first tool calls = %#v, want reasoning signature", first.ToolCalls)
+	if len(first.ToolCalls()) != 1 || len(first.Message.Parts) != 2 || first.Message.Parts[0].Kind != ai.ContentExtension {
+		t.Fatalf("first tool calls = %#v, want reasoning signature", first.ToolCalls())
 	}
-	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.RequestMessage{
-		{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{ID: first.ToolCalls[0].ID, Name: first.ToolCalls[0].Name, Arguments: first.ToolCalls[0].Args, ThoughtSignature: first.ToolCalls[0].ThoughtSignature}}},
-		{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: first.ToolCalls[0].ID, Name: first.ToolCalls[0].Name, Content: "result"}},
+	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{
+		first.Message,
+		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: first.ToolCalls()[0].ID, Name: first.ToolCalls()[0].Name, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "result"}}}}}},
 	}})
 	if err != nil {
 		t.Fatalf("continuation Generate: %v", err)
@@ -247,17 +245,19 @@ func TestModelGenerateStreamWithResponsesTransportPreservesReasoningItemsAcrossT
 		t.Fatal(err)
 	}
 	var call *ai.ToolCall
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "find go", Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}}}) {
-		if token.Type == ai.TokenTypeToolCall {
-			call = token.ToolCall
+	semantic := ai.Message{Role: ai.RoleAssistant}
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "find go")}, Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}}}) {
+		semantic.AppendToken(token)
+		if token.Type() == ai.TokenTypeToolCall {
+			call = token.ToolCall()
 		}
 	}
-	if call == nil || len(call.ThoughtSignature) == 0 {
+	if call == nil || len(semantic.Parts) != 2 || semantic.Parts[0].Kind != ai.ContentExtension {
 		t.Fatalf("streamed tool call = %#v, want reasoning signature", call)
 	}
-	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.RequestMessage{
-		{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{ID: call.ID, Name: call.Name, Arguments: call.Args, ThoughtSignature: call.ThoughtSignature}}},
-		{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: call.ID, Name: call.Name, Content: "result"}},
+	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{
+		semantic,
+		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: call.ID, Name: call.Name, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "result"}}}}}},
 	}})
 	if err != nil {
 		t.Fatalf("continuation Generate: %v", err)
@@ -284,7 +284,7 @@ func TestModelGenerateWithResponsesTransportRejectsInvalidToolCallArguments(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
+	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
 	if err == nil || err.Error() != `invalid JSON arguments for tool "search"` {
 		t.Fatalf("Generate error = %v, want invalid tool arguments error", err)
 	}
@@ -306,7 +306,7 @@ func TestModelGenerateWithResponsesTransportRejectsFailedResponseWithoutErrorMes
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
+	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
 	if err == nil || err.Error() != "OpenAI Responses API: response failed" {
 		t.Fatalf("Generate error = %v, want failed response error", err)
 	}
@@ -328,40 +328,36 @@ func TestModelGenerateWithResponsesTransportReturnsRefusalText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
+	res, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if res.Text != "I can't help with that." {
-		t.Fatalf("response text = %q, want refusal text", res.Text)
+	if res.Text() != "I can't help with that." {
+		t.Fatalf("response text = %q, want refusal text", res.Text())
 	}
 }
 
-func TestBuildResponsesParamsWrapsUnsupportedToolChoiceMode(t *testing.T) {
-	_, err := buildResponsesParams("gpt-5.6-terra", ai.AIRequest{
-		Prompt: "hello",
-		Tools: []ai.ToolDefinition{{
-			Type:        "function",
-			Name:        "search",
-			Description: "Search",
-			Parameters:  json.RawMessage(`{"type":"object"}`),
-		}},
+func TestBuildResponsesParamsValidatesUnsupportedToolChoiceMode(t *testing.T) {
+	_, err := buildResponsesParams("gpt-5.6-terra", ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, Tools: []ai.ToolDefinition{{
+		Type:        "function",
+		Name:        "search",
+		Description: "Search",
+		Parameters:  json.RawMessage(`{"type":"object"}`),
+	}},
 		ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceMode("unsupported")},
 	})
-	if !errors.Is(err, ai.ErrUnsupportedCapability) {
-		t.Fatalf("buildResponsesParams error = %v, want ErrUnsupportedCapability", err)
+	if err == nil || !strings.Contains(err.Error(), "unsupported tool choice mode") {
+		t.Fatalf("buildResponsesParams error = %v, want validation error", err)
 	}
 }
 
 func TestBuildResponsesParamsRejectsUndefinedRequiredTool(t *testing.T) {
-	_, err := buildResponsesParams("gpt-5.6-terra", ai.AIRequest{
-		Prompt: "hello",
-		Tools: []ai.ToolDefinition{{
-			Type:        "function",
-			Name:        "search",
-			Description: "Search",
-			Parameters:  json.RawMessage(`{"type":"object"}`),
-		}},
+	_, err := buildResponsesParams("gpt-5.6-terra", ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, Tools: []ai.ToolDefinition{{
+		Type:        "function",
+		Name:        "search",
+		Description: "Search",
+		Parameters:  json.RawMessage(`{"type":"object"}`),
+	}},
 		ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceRequired, Names: []string{"missing"}},
 	})
 	if err == nil || err.Error() != `required tool "missing" is not defined` {
@@ -388,16 +384,16 @@ func TestModelGenerateStreamWithResponsesTransportMapsTextToolCallsAndTerminalEr
 		t.Fatal(err)
 	}
 	var tokens []ai.Token
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello", Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}}}) {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}}}) {
 		tokens = append(tokens, token)
 	}
-	if len(tokens) != 3 || tokens[0].Type != ai.TokenTypeText || tokens[0].Text != "hello " {
+	if len(tokens) != 3 || tokens[0].Type() != ai.TokenTypeText || tokens[0].Text() != "hello " {
 		t.Fatalf("tokens = %#v", tokens)
 	}
-	if call := tokens[1].ToolCall; tokens[1].Type != ai.TokenTypeToolCall || call == nil || call.ID != "call_1" || call.Name != "search" || string(call.Args) != `{"q":"go"}` {
+	if call := tokens[1].ToolCall(); tokens[1].Type() != ai.TokenTypeToolCall || call == nil || call.ID != "call_1" || call.Name != "search" || string(call.Args) != `{"q":"go"}` {
 		t.Fatalf("tool token = %#v", tokens[1])
 	}
-	if tokens[2].Type != ai.TokenTypeErr || tokens[2].Err == nil || tokens[2].Err.Error() != "OpenAI Responses API: provider failed" {
+	if tokens[2].Type() != ai.TokenTypeErr || tokens[2].Err == nil || tokens[2].Err.Error() != "OpenAI Responses API: provider failed" {
 		t.Fatalf("error token = %#v", tokens[2])
 	}
 }
@@ -419,10 +415,10 @@ func TestModelGenerateStreamWithResponsesTransportFallsBackForEmptyFailedRespons
 		t.Fatal(err)
 	}
 	var tokens []ai.Token
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 		tokens = append(tokens, token)
 	}
-	if len(tokens) != 1 || tokens[0].Type != ai.TokenTypeErr || tokens[0].Err == nil || tokens[0].Err.Error() != "OpenAI Responses API: response failed" {
+	if len(tokens) != 1 || tokens[0].Type() != ai.TokenTypeErr || tokens[0].Err == nil || tokens[0].Err.Error() != "OpenAI Responses API: response failed" {
 		t.Fatalf("tokens = %#v", tokens)
 	}
 }
@@ -453,8 +449,8 @@ func TestModelGenerateStreamWithResponsesTransportClassifiesFailedResponse(t *te
 			if err != nil {
 				t.Fatal(err)
 			}
-			for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
-				if token.Type != ai.TokenTypeErr {
+			for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+				if token.Type() != ai.TokenTypeErr {
 					continue
 				}
 				var providerErr *ai.ProviderError
@@ -485,16 +481,16 @@ func TestModelGenerateStreamWithResponsesTransportReturnsRefusalText(t *testing.
 		t.Fatal(err)
 	}
 	var tokens []ai.Token
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 		tokens = append(tokens, token)
 	}
-	if len(tokens) != 1 || tokens[0].Type != ai.TokenTypeText || tokens[0].Text != "I can't help with that." {
+	if len(tokens) != 1 || tokens[0].Type() != ai.TokenTypeText || tokens[0].Text() != "I can't help with that." {
 		t.Fatalf("tokens = %#v, want refusal text token", tokens)
 	}
 }
 
 func TestNativeMessagesMapUserPayload(t *testing.T) {
-	messages, err := mapNativeMessages([]ai.RequestMessage{{Role: ai.RequestMessageRoleUser, Text: "initial request"}})
+	messages, err := mapNativeMessages([]ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "initial request"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,14 +508,11 @@ func TestNativeMessagesMapUserPayload(t *testing.T) {
 }
 
 func TestNativeMessagesMapToolErrorPayload(t *testing.T) {
-	messages, err := mapNativeMessages([]ai.RequestMessage{{
-		Role: ai.RequestMessageRoleTool,
-		ToolResult: &ai.RequestToolResult{
+	messages, err := mapNativeMessages([]ai.Message{{
+		Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{
 			ToolCallID: "call_1",
-			Name:       "search",
-			Content:    "upstream unavailable",
-			IsError:    true,
-		},
+			Name:       "search", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "upstream unavailable"}}, IsError: true,
+		}}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -555,13 +548,13 @@ func TestModelGenerateStreamMapsTextAndToolCalls(t *testing.T) {
 		t.Fatalf("Model returned error: %v", err)
 	}
 	var tokens []ai.Token
-	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Prompt: "hello"}) {
+	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 		tokens = append(tokens, token)
 	}
-	if len(tokens) != 2 || tokens[0].Type != ai.TokenTypeText || tokens[0].Text != "hello " {
+	if len(tokens) != 2 || tokens[0].Type() != ai.TokenTypeText || tokens[0].Text() != "hello " {
 		t.Fatalf("unexpected stream tokens: %#v", tokens)
 	}
-	if call := tokens[1].ToolCall; tokens[1].Type != ai.TokenTypeToolCall || call == nil || call.ID != "call_1" || call.Name != "search" || string(call.Args) != `{"q":"go"}` {
+	if call := tokens[1].ToolCall(); tokens[1].Type() != ai.TokenTypeToolCall || call == nil || call.ID != "call_1" || call.Name != "search" || string(call.Args) != `{"q":"go"}` {
 		t.Fatalf("unexpected tool token: %#v", tokens[1])
 	}
 	attrs := obstest.Attributes(obstest.RequireGenerationSpans(t, recorder, 1)[0])
@@ -592,8 +585,8 @@ func TestModelGenerateStreamUsesMetadataAfterUsageChunk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
-		if token.Type == ai.TokenTypeErr {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		if token.Type() == ai.TokenTypeErr {
 			t.Fatalf("stream error: %v", token.Err)
 		}
 	}
@@ -623,10 +616,10 @@ func TestModelGenerateStreamPreservesUsageOnlyTerminalChunk(t *testing.T) {
 		t.Fatal(err)
 	}
 	var tokens []ai.Token
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 		tokens = append(tokens, token)
 	}
-	if len(tokens) != 2 || tokens[1].Type != ai.TokenTypeCompletion {
+	if len(tokens) != 2 || tokens[1].Type() != ai.TokenTypeCompletion {
 		t.Fatalf("tokens = %#v", tokens)
 	}
 	completion := tokens[1].Completion
@@ -654,10 +647,10 @@ func TestModelGenerateStreamPreservesMetadataFromSoleUsageOnlyChunk(t *testing.T
 		t.Fatal(err)
 	}
 	var tokens []ai.Token
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 		tokens = append(tokens, token)
 	}
-	if len(tokens) != 1 || tokens[0].Type != ai.TokenTypeCompletion {
+	if len(tokens) != 1 || tokens[0].Type() != ai.TokenTypeCompletion {
 		t.Fatalf("tokens = %#v", tokens)
 	}
 	completion := tokens[0].Completion
@@ -682,10 +675,10 @@ func TestModelGenerateStreamSnapshotsUsageOnlyCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	var tokens []ai.Token
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 		tokens = append(tokens, token)
 	}
-	if len(tokens) != 2 || tokens[0].Type != ai.TokenTypeCompletion {
+	if len(tokens) != 2 || tokens[0].Type() != ai.TokenTypeCompletion {
 		t.Fatalf("tokens = %#v", tokens)
 	}
 	completion := tokens[0].Completion
@@ -710,8 +703,8 @@ func TestModelGenerateStreamSnapshotsRawForEachUsageOnlyCompletion(t *testing.T)
 		t.Fatal(err)
 	}
 	var completions []*ai.Completion
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
-		if token.Type == ai.TokenTypeCompletion {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		if token.Type() == ai.TokenTypeCompletion {
 			completions = append(completions, token.Completion)
 		}
 	}
@@ -738,9 +731,9 @@ func TestModelGenerateStreamEmitsToolCallsByIndex(t *testing.T) {
 		t.Fatalf("Model returned error: %v", err)
 	}
 	var calls []*ai.ToolCall
-	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Prompt: "hello"}) {
-		if token.Type == ai.TokenTypeToolCall {
-			calls = append(calls, token.ToolCall)
+	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		if token.Type() == ai.TokenTypeToolCall {
+			calls = append(calls, token.ToolCall())
 		}
 	}
 	if len(calls) != 2 || calls[0].ID != "call_1" || calls[1].ID != "call_2" {
@@ -750,25 +743,22 @@ func TestModelGenerateStreamEmitsToolCallsByIndex(t *testing.T) {
 
 func TestBuildChatCompletionParamsRejectsReasoningEffortForNonReasoningModels(t *testing.T) {
 	for _, model := range []string{GPT41, GPT41Mini, GPT41Nano, GPT4o, GPT4oMini} {
-		err := openAIDescriptor(model).ValidateRequest(ai.AIRequest{Prompt: "hello", Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}})
+		err := openAIDescriptor(model).ValidateRequest(ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}})
 		if !errors.Is(err, ai.ErrUnsupportedCapability) {
 			t.Fatalf("expected unsupported capability error for %q, got %v", model, err)
 		}
 	}
-	if err := openAIDescriptor(O3).ValidateRequest(ai.AIRequest{Prompt: "hello", Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}}); err != nil {
+	if err := openAIDescriptor(O3).ValidateRequest(ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}}); err != nil {
 		t.Fatalf("expected reasoning model to accept effort: %v", err)
 	}
-	if _, err := buildChatCompletionParams(GPT41Mini, ai.AIRequest{Prompt: "hello"}, false); err != nil {
+	if _, err := buildChatCompletionParams(GPT41Mini, ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}, false); err != nil {
 		t.Fatalf("expected non-reasoning model to accept empty effort: %v", err)
 	}
 }
 
-func TestBuildChatCompletionParamsAssumesPrevalidatedRequest(t *testing.T) {
-	if _, err := buildChatCompletionParams(GPT41Mini, ai.AIRequest{
-		Prompt:     "hello",
-		ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceAuto},
-	}, false); err != nil {
-		t.Fatalf("buildChatCompletionParams returned error: %v", err)
+func TestBuildChatCompletionParamsValidatesCanonicalRequest(t *testing.T) {
+	if _, err := buildChatCompletionParams(GPT41Mini, ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceAuto}}, false); err == nil {
+		t.Fatal("expected invalid tool choice to fail validation")
 	}
 }
 
@@ -785,7 +775,7 @@ func TestOpenAIMapsExtendedReasoningEfforts(t *testing.T) {
 		t.Run(tt.model+"/"+string(tt.effort), func(t *testing.T) {
 			effort := tt.effort
 			model := tt.model
-			req := ai.AIRequest{Prompt: "hello", Reasoning: ai.ReasoningConfig{Effort: effort}}
+			req := ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, Reasoning: ai.ReasoningConfig{Effort: effort}}
 			if _, err := buildChatCompletionParams(model, req, false); err != nil {
 				t.Fatalf("buildChatCompletionParams(%q): %v", effort, err)
 			}
@@ -809,11 +799,11 @@ func TestModelPreflightRejectsUnsupportedBeforeTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}})
+	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "")}, Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}})
 	if !errors.Is(err, ai.ErrUnsupportedCapability) || requests != 0 {
 		t.Fatalf("Generate error = %v, requests = %d; want local unsupported error and no request", err, requests)
 	}
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}}) {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "")}, Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}}) {
 		if !errors.Is(token.Err, ai.ErrUnsupportedCapability) {
 			t.Fatalf("stream error = %v, want unsupported capability", token.Err)
 		}
@@ -833,8 +823,7 @@ func TestModelPreflightRejectsReasoningToolsOnChatCompletionsBeforeTransport(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := ai.AIRequest{
-		Tools:     []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}},
+	req := ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "")}, Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}},
 		Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh},
 	}
 	if _, err := any(m).(ai.ModelGenerator).Generate(t.Context(), req); !errors.Is(err, ai.ErrUnsupportedCapability) || requests != 0 {
@@ -860,8 +849,7 @@ func TestModelPreflightRejectsNoneReasoningToolsOnChatCompletionsBeforeTransport
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := ai.AIRequest{
-		Tools:     []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}},
+	req := ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "")}, Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}},
 		Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortNone},
 	}
 	if _, err := any(m).(ai.ModelGenerator).Generate(t.Context(), req); !errors.Is(err, ai.ErrUnsupportedCapability) || requests != 0 {
@@ -893,7 +881,7 @@ func TestModelAllowsUnknownDynamicReasoningEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}}); err != nil {
+	if _, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "")}, Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffortHigh}}); err != nil {
 		t.Fatalf("dynamic model rejected locally: %v", err)
 	}
 	if got["reasoning_effort"] != "high" {
@@ -947,8 +935,7 @@ func TestApplyToolsRestrictsRequiredToolNames(t *testing.T) {
 		{Type: "function", Name: "second", Description: "Second", Parameters: json.RawMessage(`{"type":"object"}`)},
 		{Type: "function", Name: "excluded", Description: "Excluded", Parameters: json.RawMessage(`{"type":"object"}`)},
 	}
-	params, err := buildChatCompletionParams(GPT41Mini, ai.AIRequest{
-		Prompt: "hello", Tools: definitions,
+	params, err := buildChatCompletionParams(GPT41Mini, ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, Tools: definitions,
 		ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceRequired, Names: []string{"second", "first"}},
 	}, false)
 	if err != nil {
@@ -958,8 +945,7 @@ func TestApplyToolsRestrictsRequiredToolNames(t *testing.T) {
 		t.Fatalf("unexpected restricted tools: %#v", params.Tools)
 	}
 
-	if _, err := buildChatCompletionParams(GPT41Mini, ai.AIRequest{
-		Prompt: "hello", Tools: definitions,
+	if _, err := buildChatCompletionParams(GPT41Mini, ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, Tools: definitions,
 		ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceRequired, Names: []string{"missing"}},
 	}, false); err == nil {
 		t.Fatal("expected an undefined required tool to be rejected")
@@ -989,7 +975,7 @@ func TestModelGenerateValidatesToolCallArguments(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Model returned error: %v", err)
 			}
-			res, err := any(m).(ai.ModelGenerator).Generate(context.Background(), ai.AIRequest{Prompt: "hello"})
+			res, err := any(m).(ai.ModelGenerator).Generate(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected Generate to reject invalid tool-call arguments")
@@ -999,8 +985,8 @@ func TestModelGenerateValidatesToolCallArguments(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Generate returned error: %v", err)
 			}
-			if len(res.ToolCalls) != 1 || string(res.ToolCalls[0].Args) != tt.wantArgs {
-				t.Fatalf("unexpected tool calls: %#v", res.ToolCalls)
+			if len(res.ToolCalls()) != 1 || string(res.ToolCalls()[0].Args) != tt.wantArgs {
+				t.Fatalf("unexpected tool calls: %#v", res.ToolCalls())
 			}
 		})
 	}
@@ -1030,8 +1016,8 @@ func TestModelGenerateStreamClassifiesProviderRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
-		if token.Type != ai.TokenTypeErr {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		if token.Type() != ai.TokenTypeErr {
 			continue
 		}
 		var providerErr *ai.ProviderError

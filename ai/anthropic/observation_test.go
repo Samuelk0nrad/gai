@@ -37,7 +37,7 @@ func TestGenerateEmitsRequestObservationWithoutContentCapture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := any(model).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "secret prompt"}); err != nil {
+	if _, err := any(model).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "secret prompt")}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -85,7 +85,7 @@ func TestGenerateEmitsRequestAndContentToOTelWithoutSink(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{Prompt: gai.CaptureEnabled})
-	if _, err := any(model).(ai.ModelGenerator).Generate(ctx, ai.AIRequest{Prompt: "allowed prompt"}); err != nil {
+	if _, err := any(model).(ai.ModelGenerator).Generate(ctx, ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "allowed prompt")}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -126,10 +126,11 @@ func TestGenerateOmitsMixedProviderEnvelopesFromCapturedObservations(t *testing.
 		Completion: gai.CaptureEnabled,
 	})
 	if _, err := any(model).(ai.ModelGenerator).Generate(ctx, ai.AIRequest{
-		Prompt: "prompt secret",
-		Messages: []ai.RequestMessage{
-			{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{ID: "call_1", Name: "search", Arguments: []byte(`{"query":"prior tool-input secret"}`)}}},
-			{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: "call_1", Name: "search", Content: "prior tool-output secret"}},
+
+		Messages: []ai.Message{
+			ai.TextMessage(ai.RoleUser, "prompt secret"),
+			{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{Type: "function", ID: "call_1", Name: "search", Args: []byte(`{"query":"prior tool-input secret"}`)}}}},
+			{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call_1", Name: "search", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "prior tool-output secret"}}}}}},
 		},
 	}); err != nil {
 		t.Fatal(err)

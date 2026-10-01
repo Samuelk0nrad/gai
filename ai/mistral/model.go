@@ -32,8 +32,6 @@ func (m *Model) Name() string {
 	return m.name
 }
 
-func (m *Model) NativeTools() bool { return true }
-
 // TokenCounter uses a local estimate for automatic budgeting. Tokenizer is
 // still available explicitly, but may perform network I/O.
 func (m *Model) TokenCounter() ai.TokenCounter { return ai.TextTokenEstimator{} }
@@ -136,28 +134,26 @@ type chatCompletionResponse struct {
 }
 
 func buildChatCompletionRequest(req ai.AIRequest, modelName string, stream bool) (chatCompletionRequest, error) {
-	if err := req.ValidateMessages(); err != nil {
+	req = req.Copy()
+	err := req.Validate()
+	if err != nil {
 		return chatCompletionRequest{}, err
 	}
 	if err := req.ResponseFormat.Validate(); err != nil {
 		return chatCompletionRequest{}, err
 	}
 	payload := chatCompletionRequest{
-		Model: modelName,
-		Messages: []chatMessageRequest{
-			{
-				Role:    "user",
-				Content: req.Prompt,
-			},
-		},
+		Model:  modelName,
 		Stream: stream,
 	}
 	if stream {
 		payload.StreamOptions = &chatStreamOptions{IncludeUsage: true}
 	}
-	if len(req.Messages) > 0 {
-		payload.Messages = mapNativeMessages(req.Messages)
+	messages, err := mapNativeMessages(req.Messages)
+	if err != nil {
+		return chatCompletionRequest{}, err
 	}
+	payload.Messages = messages
 	if req.MaxTokens > 0 {
 		payload.MaxTokens = &req.MaxTokens
 	}
@@ -180,29 +176,52 @@ func buildChatCompletionRequest(req ai.AIRequest, modelName string, stream bool)
 	payload.ResponseFormat = responseFormat
 	return payload, nil
 }
-func mapNativeMessages(messages []ai.RequestMessage) []chatMessageRequest {
+func mapNativeMessages(messages []ai.Message) ([]chatMessageRequest, error) {
 	out := make([]chatMessageRequest, 0, len(messages))
 	for _, m := range messages {
-		if m.Role == ai.RequestMessageRoleUser {
-			out = append(out, chatMessageRequest{Role: "user", Content: m.Text})
-			continue
+		if err := m.Validate(); err != nil {
+			return nil, err
 		}
-		if m.Role == ai.RequestMessageRoleTool {
-			content := m.ToolResult.Content
-			if m.ToolResult.IsError {
-				encoded, _ := json.Marshal(map[string]string{"error": content})
-				content = string(encoded)
+		if err := rejectRequiredExtensions(m.Extensions); err != nil {
+			return nil, err
+		}
+		message := chatMessageRequest{Role: string(m.Role)}
+		for _, part := range m.Parts {
+			if err := rejectRequiredExtensions(part.Extensions); err != nil {
+				return nil, err
 			}
-			out = append(out, chatMessageRequest{Role: "tool", Content: content, ToolCallID: m.ToolResult.ToolCallID})
-			continue
+			switch part.Kind {
+			case ai.ContentText, ai.ContentJSON:
+				if len(message.ToolCalls) > 0 {
+					return nil, fmt.Errorf("%w: Mistral text after tool calls", ai.ErrUnsupportedCapability)
+				}
+				if part.Kind == ai.ContentText {
+					message.Content += part.Text
+				} else {
+					message.Content += string(part.JSON)
+				}
+			case ai.ContentToolCall:
+				c := part.ToolCall
+				if err := rejectRequiredExtensions(c.Extensions); err != nil {
+					return nil, err
+				}
+				message.ToolCalls = append(message.ToolCalls, chatMessageToolCall{ID: c.ID, Type: "function", Function: chatToolCallFunction{Name: c.Name, Arguments: string(c.Args)}})
+			case ai.ContentToolResult:
+				content, err := canonicalResultText(part.ToolResult)
+				if err != nil {
+					return nil, err
+				}
+				out = append(out, chatMessageRequest{Role: "tool", Content: content, ToolCallID: part.ToolResult.ToolCallID})
+			case ai.ContentExtension:
+			default:
+				return nil, fmt.Errorf("%w: Mistral content %q", ai.ErrUnsupportedCapability, part.Kind)
+			}
 		}
-		x := chatMessageRequest{Role: "assistant", Content: m.Text}
-		for _, c := range m.ToolCalls {
-			x.ToolCalls = append(x.ToolCalls, chatMessageToolCall{ID: c.ID, Type: "function", Function: chatToolCallFunction{Name: c.Name, Arguments: string(c.Arguments)}})
+		if m.Role != ai.RoleTool {
+			out = append(out, message)
 		}
-		out = append(out, x)
 	}
-	return out
+	return out, nil
 }
 
 func mapChatTools(definitions []ai.ToolDefinition) ([]chatToolRequest, error) {
@@ -526,16 +545,17 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			}
 			return false
 		}
+		req = req.Copy()
 		if err := ai.ValidateModelRequest(m, req); err != nil {
 			streamErr = err
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			emit(ai.Token{Err: err})
 			return
 		}
 
 		payload, err := m.chatCompletionRequest(req, true)
 		if err != nil {
 			streamErr = err
-			if !emit(ai.Token{Err: err, Type: ai.TokenTypeErr}) {
+			if !emit(ai.Token{Err: err}) {
 				return
 			}
 			return
@@ -556,7 +576,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					Err:    err,
 				})
 			}
-			if !emit(ai.Token{Err: err, Type: ai.TokenTypeErr}) {
+			if !emit(ai.Token{Err: err}) {
 				return
 			}
 			return
@@ -580,7 +600,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					Err: err,
 				})
 			}
-			if !emit(ai.Token{Err: err, Type: ai.TokenTypeErr}) {
+			if !emit(ai.Token{Err: err}) {
 				return
 			}
 			return
@@ -593,7 +613,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		ctx = generationCtx
 		if gai.ObservationEnabled(ctx, m.debug) {
 			fields := map[string]any{"max_tokens": req.MaxTokens}
-			gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, req.Prompt)
+			gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, observationPrompt(req))
 			gai.EmitObservation(ctx, m.debug, gai.Observation{
 				Name:   "mistral_stream_request",
 				Source: "ai:mistral.Model.GenerateStream",
@@ -615,7 +635,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					Err: err,
 				})
 			}
-			if !emit(ai.Token{Err: err, Type: ai.TokenTypeErr}) {
+			if !emit(ai.Token{Err: err}) {
 				return
 			}
 			return
@@ -640,8 +660,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				}
 				streamErr = fmt.Errorf("mistral chat stream failed (status %d): %w", res.StatusCode, readErr)
 				if !emit(ai.Token{
-					Err:  streamErr,
-					Type: ai.TokenTypeErr,
+					Err: streamErr,
 				}) {
 					return
 				}
@@ -660,8 +679,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			}
 			streamErr = ai.ClassifyProviderError(newHTTPError("chat stream", res.StatusCode, resBody), res.StatusCode, mistralErrorCode(resBody), res.Header.Get("x-request-id"), res.Header)
 			if !emit(ai.Token{
-				Err:  streamErr,
-				Type: ai.TokenTypeErr,
+				Err: streamErr,
 			}) {
 				return
 			}
@@ -679,7 +697,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			}
 			snapshot := completion
 			snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
-			if !emit(ai.Token{Type: ai.TokenTypeCompletion, Completion: &snapshot}) {
+			if !emit(ai.Token{Completion: &snapshot}) {
 				return ctx.Err()
 			}
 			hasCompletion = false
@@ -705,10 +723,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			if event == "[DONE]" {
 				for _, tc := range toolCallAccumulator.ready(true) {
 					tcCopy := tc
-					if !emit(ai.Token{
-						Type:     ai.TokenTypeToolCall,
-						ToolCall: &tcCopy,
-					}) {
+					if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &tcCopy}}) {
 						return ctx.Err()
 					}
 				}
@@ -754,7 +769,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				return err
 			}
 			if text != "" {
-				if !emit(ai.Token{Type: ai.TokenTypeText, Text: text, Data: []byte(text)}) {
+				if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: text}}) {
 					return ctx.Err()
 				}
 			}
@@ -790,11 +805,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				}
 				for _, tc := range calls {
 					tcCopy := tc
-					if !emit(ai.Token{
-						Type:     ai.TokenTypeToolCall,
-						Data:     append([]byte(nil), tc.Args...),
-						ToolCall: &tcCopy,
-					}) {
+					if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &tcCopy}}) {
 						return ctx.Err()
 					}
 				}
@@ -817,7 +828,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					})
 				}
 				streamErr = fmt.Errorf("read stream: %w", err)
-				if !emit(ai.Token{Err: streamErr, Type: ai.TokenTypeErr}) {
+				if !emit(ai.Token{Err: streamErr}) {
 					return
 				}
 				return
@@ -847,7 +858,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 						})
 					}
 					streamErr = flushErr
-					if !emit(ai.Token{Err: flushErr, Type: ai.TokenTypeErr}) {
+					if !emit(ai.Token{Err: flushErr}) {
 						return
 					}
 					return
@@ -879,7 +890,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 						})
 					}
 					streamErr = flushErr
-					if !emit(ai.Token{Err: flushErr, Type: ai.TokenTypeErr}) {
+					if !emit(ai.Token{Err: flushErr}) {
 						return
 					}
 				}
@@ -926,6 +937,7 @@ func intPtr(v int) *int {
 }
 
 func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AIResponse, err error) {
+	req = req.Copy()
 	if err := ai.ValidateModelRequest(m, req); err != nil {
 		return nil, err
 	}
@@ -953,7 +965,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	ctx, observation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "mistral", Model: m.name, Sink: m.debug})
 	if gai.ObservationEnabled(ctx, m.debug) {
 		fields := map[string]any{"max_tokens": req.MaxTokens}
-		gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, req.Prompt)
+		gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, observationPrompt(req))
 		gai.EmitObservation(ctx, m.debug, gai.Observation{
 			Name:   "mistral_generate_request",
 			Source: "ai:mistral.Model.Generate",
@@ -1018,14 +1030,19 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		})
 	}
 
-	return &ai.AIResponse{
-		Text:         parsed.Choices[0].Message.Content,
-		ToolCalls:    toolCalls,
+	result := &ai.AIResponse{
 		Raw:          append([]byte(nil), resBody...),
 		FinishReason: parsed.Choices[0].FinishReason,
 		InputTokens:  usage.InputTokens,
 		OutputTokens: usage.OutputTokens,
-	}, nil
+	}
+	semantic := ai.TextMessage(ai.RoleAssistant, parsed.Choices[0].Message.Content)
+	for _, call := range toolCalls {
+		c := call
+		semantic.Parts = append(semantic.Parts, ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &c})
+	}
+	result.SetMessage(semantic)
+	return result, nil
 }
 
 func mapChatResponseToolCalls(raw json.RawMessage) ([]ai.ToolCall, error) {
@@ -1067,4 +1084,16 @@ func mapChatResponseToolCalls(raw json.RawMessage) ([]ai.ToolCall, error) {
 		})
 	}
 	return result, nil
+}
+
+// observationPrompt respects the prompt capture category without mixing in
+// tool inputs/results, reasoning, or opaque provider state.
+func observationPrompt(req ai.AIRequest) string {
+	var parts []string
+	for _, message := range req.Messages {
+		if message.Role == ai.RoleSystem || message.Role == ai.RoleUser {
+			parts = append(parts, message.Text())
+		}
+	}
+	return strings.Join(parts, "\n")
 }

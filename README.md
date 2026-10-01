@@ -84,6 +84,7 @@ import (
   "os"
 
   "github.com/lace-ai/gai/agent"
+  "github.com/lace-ai/gai/ai"
   "github.com/lace-ai/gai/ai/openai"
   gaictx "github.com/lace-ai/gai/context"
 )
@@ -123,7 +124,7 @@ func run(ctx context.Context) error {
 
   workflow, err := assistant.NewRun(ctx, agent.RunInput{
     Prompt: gaictx.PromptInput{
-      User: gaictx.NewTextContent("What is the capital of France?"),
+      User: ai.TextParts("What is the capital of France?"),
     },
   })
   if err != nil {
@@ -190,7 +191,7 @@ type Tool interface {
 }
 ```
 
-Tool parameters are converted to JSON Schema for provider-native function calling. Models that do not support native tools can use GAI's text-protocol compatibility path.
+Tool parameters are converted to JSON Schema for provider-native function calling. Models that do not support native tools can use GAI's text tool protocol.
 
 ```go
 func (t *LookupOrderTool) Params() ai.ToolParameters {
@@ -330,13 +331,61 @@ builder := gaictx.New(gaictx.Definition{
 })
 ```
 
-`BuildContext` allocates budget to context sources. `BuildPrompt` then renders the current user input and accumulated conversation for each loop iteration.
+`BuildContext` allocates budget to context sources. `BuildRequest` assembles system instructions, selected history, user input, and accepted conversation as one `ai.AIRequest`. Provider adapters consume those messages directly. Custom renderers lower application context parts; they do not replace conversation semantics.
 
 ## History and summarization
 
 `context/history` provides a `ContextSource` backed by a `HistoryStore`. It loads persisted state, selects recent turns that fit the available budget, and reuses cached per-turn token counts.
 
 Use `history.NewHistory(sessionID, store)` for budgeted history selection. Use `history.New(sessionID, store, summarizerDefinition)` when older turns should be summarized under token pressure. The built-in `agent/summary` package can supply the summarizer agent.
+
+Built-in summarization uses a text projection. If the selected turns contain media,
+signed reasoning, or other opaque provider state, it returns
+`ai.ErrUnsupportedCapability` instead of dropping that content. Such content can
+still be preserved in storage and replayed by a compatible native adapter.
+
+## Canonical messages
+
+`ai.Message` is the shared semantic value for generation, accepted runtime output,
+and stored history. Its `Role` and ordered `Parts` preserve text, reasoning, tool
+call IDs and results, structured JSON, media, and namespaced provider extensions.
+`ai.Token` remains a streaming event; `loop.Iteration` retains execution diagnostics
+and canonical snapshots. `context.StoredMessage` adds storage IDs and token caches.
+
+```go
+request := ai.AIRequest{Messages: []ai.Message{
+  ai.TextMessage(ai.RoleSystem, "Answer concisely."),
+  ai.TextMessage(ai.RoleUser, "What is the capital of France?"),
+}}
+```
+
+This is a breaking pre-v1 API migration:
+
+- Replace `ai.RequestMessage` with `ai.Message` and ordered `ai.ContentPart` values.
+  Reuse `ai.ToolCall`; results use `ai.ToolResult` with matching `ToolCallID`.
+- Replace `context.PromptInput.User` content objects with `ai.TextParts(text)` or
+  structured parts. `Conversation.Messages` and `AgentResult.Messages` return
+  `[]ai.Message`. Custom builders implement `BuildRequest` and return canonical messages.
+- Construct message context with `context.NewMessagePart(ai.Message{...})`.
+  `history.Part.Messages` replaces `Contents`; `history.Summary.Content` is now a
+  text `ai.ContentPart`. `NativeConversation` and `NativeMessageBuilder` are removed;
+  use the canonical `Conversation` and `PromptBuilder` contracts.
+- Replace persisted `context.Message` with `context.StoredMessage{Message: ...}`.
+  Stored history requires an explicit schema version and canonical parts; older
+  unversioned or text-content records are rejected.
+- Requests require `AIRequest.Messages`. Stream events carry one canonical `Part`,
+  error, or completion payload; `Type()`, `Text()`, and `ToolCall()` derive views.
+  `AIResponse.Message` owns output; `Text()`, `Reasoning()`, and `ToolCalls()` derive
+  views directly from it.
+- Preserve extensions on their original message, part, or call. Built-in adapters
+  replay supported provider continuity state and reject required unsupported content.
+  Text fallback cannot encode media or opaque continuity state and returns
+  `ai.ErrUnsupportedCapability` rather than discarding it. Storing media does not
+  imply that every provider adapter supports media input.
+
+History selection and tool-result previews happen before transport selection.
+Local `TokenCounter` estimates remain separate from future full-request provider
+preflight; both preflight and generation can now consume the same request value.
 
 ## Structured output and direct model calls
 
@@ -348,7 +397,9 @@ if !ok {
   return fmt.Errorf("%w: model does not support synchronous generation", ai.ErrUnsupportedCapability)
 }
 response, err := generator.Generate(ctx, ai.AIRequest{
-  Prompt:    "Return one JSON object describing Paris.",
+  Messages: []ai.Message{
+    ai.TextMessage(ai.RoleUser, "Return one JSON object describing Paris."),
+  },
   MaxTokens: 200,
   ResponseFormat: ai.ResponseFormat{
     Type: ai.ResponseFormatJSONObject,
@@ -361,10 +412,10 @@ response, err := generator.Generate(ctx, ai.AIRequest{
 if err != nil {
   return err
 }
-fmt.Println(response.Text)
+fmt.Println(response.Text())
 ```
 
-`AIRequest.Messages` can carry provider-neutral native user, assistant, and tool-result history. When it is empty, `Prompt` remains the rendered compatibility fallback.
+`AIRequest.Messages` carries the canonical system, user, assistant, and tool-result history. Requests must contain canonical messages.
 
 ## Workflow middleware
 
@@ -536,7 +587,7 @@ go test ./loop/...
 go test ./examples/order-support
 ```
 
-GitHub Actions runs build, vet, tests, race detection, static analysis, coverage artifact generation, and dependency vulnerability scanning on pull requests and pushes to main. Pull requests also run public API compatibility checks. The workflow runs weekly on Mondays at 03:17 UTC and can also be started manually from the Actions tab.
+GitHub Actions runs build, vet, tests, race detection, static analysis, coverage artifact generation, and dependency vulnerability scanning on pull requests and pushes to main. Public API compatibility checks are commented out until the v1 API is stable. The workflow runs weekly on Mondays at 03:17 UTC and can also be started manually from the Actions tab.
 
 ## Contributing
 

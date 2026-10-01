@@ -38,7 +38,7 @@ type RenderField struct {
 	Value string
 }
 
-// RenderNode is the renderer-neutral tree emitted by Part and Content values.
+// RenderNode is the renderer-neutral tree emitted by context parts.
 type RenderNode struct {
 	Type     string
 	Fields   []RenderField
@@ -273,13 +273,13 @@ func renderSimpleInstruction(ctx context.Context, part Part) (string, RenderNode
 
 func renderSimpleNode(node RenderNode) string {
 	switch node.Type {
-	case ContentTypeText:
+	case string(ai.ContentText):
 		return node.Value
 	case "history":
 		return renderSimpleHistory(node)
 	case "tools":
 		return renderSimpleTools(node)
-	case string(RoleUser), string(RoleAssistant), string(RoleTool), string(RoleSystem), "summary", "message":
+	case string(ai.RoleUser), string(ai.RoleAssistant), string(ai.RoleTool), string(ai.RoleSystem), "summary", "message":
 		return renderSimpleMessageNode(node)
 	default:
 		return renderSimpleGenericNode(node)
@@ -393,7 +393,7 @@ func renderSimpleMessageNode(node RenderNode) string {
 
 func simpleMessageLabel(nodeType string) string {
 	switch nodeType {
-	case string(RoleTool):
+	case string(ai.RoleTool):
 		return "tool res"
 	default:
 		return nodeType
@@ -412,14 +412,25 @@ func formatSimpleLine(label, body string) string {
 
 func renderSimpleNodeBody(node RenderNode) string {
 	switch node.Type {
-	case ContentTypeText:
+	case string(ai.ContentText):
 		return node.Value
-	case ContentTypeToolCall:
+	case string(ai.ContentToolCall):
 		return renderSimpleToolCall(node)
-	case ContentTypeToolResult:
-		return simpleNodeChildValue(node, "result")
-	case ContentTypeToolResultErr:
-		return simpleNodeChildValue(node, "error")
+	case string(ai.ContentToolResult):
+		results := make([]string, 0, len(node.Children))
+		for _, child := range node.Children {
+			if child.Type == "result" {
+				results = append(results, child.Value)
+			}
+		}
+		result := node.Value
+		if len(results) > 0 {
+			result = strings.Join(results, "\n")
+		}
+		if simpleNodeFieldValue(node, "is_error") == "true" {
+			return "error: " + result
+		}
+		return result
 	}
 
 	parts := make([]string, 0, len(node.Children)+1)

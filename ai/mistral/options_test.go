@@ -53,21 +53,21 @@ func TestWithBaseURLTrailingSlashes(t *testing.T) {
 					}
 					switch operation {
 					case "generate":
-						response, err := model.Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
+						response, err := model.Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
 						if err != nil {
 							t.Fatal(err)
 						}
-						if response.Text != "ok" {
-							t.Fatalf("unexpected response: %q", response.Text)
+						if response.Text() != "ok" {
+							t.Fatalf("unexpected response: %q", response.Text())
 						}
 					case "stream":
 						var text string
-						for token := range model.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
+						for token := range model.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 							if token.Err != nil {
 								t.Error(token.Err)
 							}
-							if token.Type == ai.TokenTypeText {
-								text += token.String()
+							if token.Type() == ai.TokenTypeText {
+								text += token.Text()
 							}
 						}
 						if text != "ok" {

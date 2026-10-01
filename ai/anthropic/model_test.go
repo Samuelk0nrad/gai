@@ -73,15 +73,15 @@ func TestGenerateSendsAnthropicRequestAndMapsBlocksAndUsage(t *testing.T) {
 		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"answer"},{"type":"thinking","thinking":"reason"},{"type":"tool_use","id":"toolu_1","name":"search","input":{"q":"x"}}],"usage":{"input_tokens":10,"cache_creation_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":4,"output_tokens_details":{"thinking_tokens":2}}}`))
 	})
 
-	got, err := m.Generate(context.Background(), ai.AIRequest{Prompt: "hello"})
+	got, err := m.Generate(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Text != "answer" || got.Reasoning != "reason" || got.InputTokens != 15 || got.OutputTokens != 4 || got.ReasoningTokens != 2 || len(got.ToolCalls) != 1 {
+	if got.Text() != "answer" || got.Reasoning() != "reason" || got.InputTokens != 15 || got.OutputTokens != 4 || got.ReasoningTokens != 2 || len(got.ToolCalls()) != 1 {
 		t.Fatalf("unexpected response: %#v", got)
 	}
-	if got.ToolCalls[0].ID != "toolu_1" || got.ToolCalls[0].Type != "function" || got.ToolCalls[0].Name != "search" || string(got.ToolCalls[0].Args) != `{"q":"x"}` {
-		t.Fatalf("unexpected tool call: %#v", got.ToolCalls[0])
+	if got.ToolCalls()[0].ID != "toolu_1" || got.ToolCalls()[0].Type != "function" || got.ToolCalls()[0].Name != "search" || string(got.ToolCalls()[0].Args) != `{"q":"x"}` {
+		t.Fatalf("unexpected tool call: %#v", got.ToolCalls()[0])
 	}
 	attrs := obstest.Attributes(obstest.RequireGenerationSpans(t, recorder, 1)[0])
 	if attrs["gen_ai.provider.name"].AsString() != "anthropic" || attrs["gen_ai.usage.input_tokens"].AsInt64() != 15 || attrs["gai.gen_ai.response.tool_call_count"].AsInt64() != 1 {
@@ -90,7 +90,7 @@ func TestGenerateSendsAnthropicRequestAndMapsBlocksAndUsage(t *testing.T) {
 }
 
 func TestNativeMessagesMapUserPayload(t *testing.T) {
-	messages, err := mapNativeMessages([]ai.RequestMessage{{Role: ai.RequestMessageRoleUser, Text: "initial request"}})
+	messages, err := mapNativeMessages([]ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "initial request"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,9 +108,9 @@ func TestNativeMessagesMapUserPayload(t *testing.T) {
 }
 
 func TestNativeMessagesGroupAdjacentToolResults(t *testing.T) {
-	messages, err := mapNativeMessages([]ai.RequestMessage{
-		{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: "call_1", Name: "search", Content: "first"}},
-		{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: "call_2", Name: "lookup", Content: "second", IsError: true}},
+	messages, err := mapNativeMessages([]ai.Message{
+		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call_1", Name: "search", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "first"}}}}}},
+		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call_2", Name: "lookup", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "second"}}, IsError: true}}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -142,8 +142,7 @@ func TestGenerateMapsCapabilitiesAndRejectsUnsupportedResponseFormat(t *testing.
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"content":[],"usage":{}}`))
 	})
-	_, err := m.Generate(context.Background(), ai.AIRequest{
-		Prompt: "hello", MaxTokens: 2048,
+	_, err := m.Generate(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, MaxTokens: 2048,
 		Tools:          []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}},
 		ToolChoice:     ai.ToolChoice{Mode: ai.ToolChoiceAuto},
 		ResponseFormat: ai.ResponseFormat{Type: ai.ResponseFormatJSONSchema, Name: "answer", Schema: json.RawMessage(`{"type":"object"}`)},
@@ -160,11 +159,11 @@ func TestGenerateMapsCapabilitiesAndRejectsUnsupportedResponseFormat(t *testing.
 	if got["max_tokens"] != float64(2048) || len(tools) != 1 || tool["input_schema"] == nil || object(t, got["tool_choice"])["type"] != "auto" || format["type"] != "json_schema" || thinking["budget_tokens"] != float64(1024) {
 		t.Fatalf("unexpected capability mapping: %#v", got)
 	}
-	_, err = m.Generate(context.Background(), ai.AIRequest{Prompt: "x", ResponseFormat: ai.ResponseFormat{Type: ai.ResponseFormatJSONObject}})
+	_, err = m.Generate(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "x")}, ResponseFormat: ai.ResponseFormat{Type: ai.ResponseFormatJSONObject}})
 	if !errors.Is(err, ai.ErrUnsupportedCapability) {
 		t.Fatalf("JSON object error = %v, want unsupported capability", err)
 	}
-	_, err = m.Generate(context.Background(), ai.AIRequest{Prompt: "x", MaxTokens: 1024, Reasoning: ai.ReasoningConfig{Enabled: true, BudgetTokens: 1024}})
+	_, err = m.Generate(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "x")}, MaxTokens: 1024, Reasoning: ai.ReasoningConfig{Enabled: true, BudgetTokens: 1024}})
 	if !errors.Is(err, ai.ErrUnsupportedCapability) {
 		t.Fatalf("invalid thinking budget error = %v", err)
 	}
@@ -179,9 +178,7 @@ func TestGenerateMapsBudgetThinkingForKnownBudgetOnlyModel(t *testing.T) {
 	})
 	m.name = ClaudeFable5
 
-	_, err := m.Generate(context.Background(), ai.AIRequest{
-		Prompt:    "hello",
-		MaxTokens: 4096,
+	_, err := m.Generate(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, MaxTokens: 4096,
 		Reasoning: ai.ReasoningConfig{Enabled: true, BudgetTokens: 2000},
 	})
 	if err != nil {
@@ -202,7 +199,7 @@ func TestGenerateMapsAdaptiveThinkingForCatalogModel(t *testing.T) {
 	m.name = "claude-dynamic"
 	m.client.catalog.Replace([]ai.ModelDescriptor{{Model: m.name, Reasoning: ai.FeatureSupportSupported, ReasoningEffort: ai.FeatureSupportSupported, ReasoningEfforts: []ai.ReasoningEffort{ai.ReasoningEffortLow, ai.ReasoningEffortMedium, ai.ReasoningEffortHigh}}})
 
-	_, err := m.Generate(context.Background(), ai.AIRequest{Prompt: "hello", Reasoning: ai.ReasoningConfig{Enabled: true, Effort: ai.ReasoningEffortHigh}})
+	_, err := m.Generate(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, Reasoning: ai.ReasoningConfig{Enabled: true, Effort: ai.ReasoningEffortHigh}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +234,7 @@ func TestGenerateMapsAdaptiveReasoningAndToolChoice(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"content":[],"usage":{}}`))
 			})
-			_, err := m.Generate(context.Background(), ai.AIRequest{Prompt: "hello", Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}}, ToolChoice: tt.choice, Reasoning: ai.ReasoningConfig{Enabled: true, Effort: ai.ReasoningEffortHigh}})
+			_, err := m.Generate(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}}, ToolChoice: tt.choice, Reasoning: ai.ReasoningConfig{Enabled: true, Effort: ai.ReasoningEffortHigh}})
 			if tt.wantErr {
 				if !errors.Is(err, ai.ErrUnsupportedCapability) {
 					t.Fatalf("Generate error = %v, want unsupported capability", err)
@@ -250,7 +247,7 @@ func TestGenerateMapsAdaptiveReasoningAndToolChoice(t *testing.T) {
 		})
 	}
 	m := testModel(t, func(http.ResponseWriter, *http.Request) { t.Fatal("unexpected request") })
-	if _, err := m.Generate(context.Background(), ai.AIRequest{Prompt: "hello", Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}}, ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceAuto, Names: []string{"search"}}}); err == nil {
+	if _, err := m.Generate(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, Tools: []ai.ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: json.RawMessage(`{"type":"object"}`)}}, ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceAuto, Names: []string{"search"}}}); err == nil {
 		t.Fatal("restricted auto error = nil, want error")
 	}
 }
@@ -266,7 +263,7 @@ func TestGenerateReturnsProviderError(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"bad input"}}`))
 	})
-	_, err := m.Generate(context.Background(), ai.AIRequest{Prompt: "hello"})
+	_, err := m.Generate(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
 	var providerErr *Error
 	if !errors.As(err, &providerErr) || providerErr.StatusCode != http.StatusBadRequest || providerErr.Type != "invalid_request_error" || providerErr.Message != "bad input" {
 		t.Fatalf("unexpected error: %#v", err)
@@ -283,10 +280,10 @@ func TestGenerateStreamMapsInterleavedBlocksAndToolJSON(t *testing.T) {
 		_, _ = w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"search\"}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"thinking\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\\\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"why\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"x\\\"}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
 	})
 	var tokens []ai.Token
-	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Prompt: "hello"}) {
+	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 		tokens = append(tokens, token)
 	}
-	if len(tokens) != 3 || tokens[0].Type != ai.TokenTypeText || string(tokens[0].Data) != "hi" || tokens[1].Type != ai.TokenTypeThought || tokens[1].Text != "why" || tokens[2].Type != ai.TokenTypeToolCall || tokens[2].ToolCall == nil || string(tokens[2].ToolCall.Args) != `{"q":"x"}` {
+	if len(tokens) != 3 || tokens[0].Type() != ai.TokenTypeText || tokens[0].Text() != "hi" || tokens[1].Type() != ai.TokenTypeThought || tokens[1].Text() != "why" || tokens[2].Type() != ai.TokenTypeToolCall || tokens[2].ToolCall() == nil || string(tokens[2].ToolCall().Args) != `{"q":"x"}` {
 		t.Fatalf("unexpected tokens: %#v", tokens)
 	}
 }
@@ -299,8 +296,8 @@ func TestGenerateStreamEmitsTerminalCompletionSnapshot(t *testing.T) {
 	})
 
 	var completion *ai.Completion
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
-		if token.Type == ai.TokenTypeCompletion {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		if token.Type() == ai.TokenTypeCompletion {
 			completion = token.Completion
 		}
 	}
@@ -323,10 +320,10 @@ func TestGenerateStreamErrorAndCancellation(t *testing.T) {
 		_, _ = w.Write([]byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}\n\n"))
 	})
 	var tokens []ai.Token
-	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Prompt: "hello"}) {
+	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 		tokens = append(tokens, token)
 	}
-	if len(tokens) != 1 || tokens[0].Type != ai.TokenTypeErr || tokens[0].Err == nil || !strings.Contains(tokens[0].Err.Error(), "busy") {
+	if len(tokens) != 1 || tokens[0].Type() != ai.TokenTypeErr || tokens[0].Err == nil || !strings.Contains(tokens[0].Err.Error(), "busy") {
 		t.Fatalf("unexpected stream error: %#v", tokens)
 	}
 
@@ -343,7 +340,7 @@ func TestGenerateStreamErrorAndCancellation(t *testing.T) {
 		}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	ch := m.GenerateStream(ctx, ai.AIRequest{Prompt: "hello"})
+	ch := m.GenerateStream(ctx, ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
 	<-started
 	cancel()
 	defer close(release)
@@ -371,10 +368,10 @@ func TestGenerateStreamDetectsTextFallbackToolCall(t *testing.T) {
 	})
 
 	var tokens []ai.Token
-	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Prompt: "hello"}) {
+	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 		tokens = append(tokens, token)
 	}
-	if len(tokens) != 1 || tokens[0].Type != ai.TokenTypeToolCall || tokens[0].ToolCall == nil || tokens[0].ToolCall.Name != "search" {
+	if len(tokens) != 1 || tokens[0].Type() != ai.TokenTypeToolCall || tokens[0].ToolCall() == nil || tokens[0].ToolCall().Name != "search" {
 		t.Fatalf("unexpected tokens: %#v", tokens)
 	}
 }
@@ -385,10 +382,10 @@ func TestGenerateStreamRejectsTruncatedToolBlock(t *testing.T) {
 		_, _ = w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"search\"}}\n\n"))
 	})
 	var tokens []ai.Token
-	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Prompt: "hello"}) {
+	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 		tokens = append(tokens, token)
 	}
-	if len(tokens) != 1 || tokens[0].Type != ai.TokenTypeErr || tokens[0].Err == nil || !strings.Contains(tokens[0].Err.Error(), "open content") {
+	if len(tokens) != 1 || tokens[0].Type() != ai.TokenTypeErr || tokens[0].Err == nil || !strings.Contains(tokens[0].Err.Error(), "open content") {
 		t.Fatalf("unexpected tokens: %#v", tokens)
 	}
 }
@@ -399,10 +396,10 @@ func TestGenerateStreamPrefersStreamErrorOverOpenBlock(t *testing.T) {
 		_, _ = w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"search\"}}\n\nevent: content_block_delta\ndata: not-json\n\n"))
 	})
 	var tokens []ai.Token
-	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Prompt: "hello"}) {
+	for token := range m.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 		tokens = append(tokens, token)
 	}
-	if len(tokens) != 1 || tokens[0].Type != ai.TokenTypeErr || tokens[0].Err == nil || strings.Contains(tokens[0].Err.Error(), "open content") {
+	if len(tokens) != 1 || tokens[0].Type() != ai.TokenTypeErr || tokens[0].Err == nil || strings.Contains(tokens[0].Err.Error(), "open content") {
 		t.Fatalf("unexpected tokens: %#v", tokens)
 	}
 }
@@ -442,8 +439,8 @@ func TestGenerateStreamClassifiesProviderRateLimit(t *testing.T) {
 		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`))
 	})
 	sawError := false
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
-		if token.Type != ai.TokenTypeErr {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		if token.Type() != ai.TokenTypeErr {
 			continue
 		}
 		var providerErr *ai.ProviderError

@@ -9,11 +9,7 @@ import (
 	"github.com/lace-ai/gai/ai"
 )
 
-const (
-	contextTracerName       = "github.com/lace-ai/gai/context"
-	promptDebugFullLimit    = 4000
-	promptDebugPreviewLimit = 160
-)
+const contextTracerName = "github.com/lace-ai/gai/context"
 
 // ContextSource produces one prompt part using the remaining context budget.
 // Sources are evaluated in declaration order by Builder.BuildContext.
@@ -33,22 +29,8 @@ type TokenCounterSetter interface {
 // that configure a custom builder may require additional capabilities.
 type PromptBuilder interface {
 	BuildContext(ctx context.Context) ([]Part, error)
-	BuildPrompt(ctx context.Context, conv Conversation) (string, error)
+	BuildRequest(ctx context.Context, conv Conversation) (ai.AIRequest, error)
 	Input() PromptInput
-}
-
-// NativeMessageBuilder optionally constructs both representations of a model
-// request. PromptBuilder implementations that do not provide it continue to
-// use the rendered prompt as their request input.
-type NativeMessageBuilder interface {
-	BuildRequest(ctx context.Context, conv Conversation) (string, []ai.RequestMessage, error)
-}
-
-// NativeConversation exposes provider-neutral conversation history alongside
-// the rendered conversation used to construct a compatibility prompt.
-type NativeConversation interface {
-	Conversation
-	NativeMessages() []ai.RequestMessage
 }
 
 // TokenBudget exposes prompt-window configuration and remaining capacity.
@@ -61,8 +43,8 @@ type TokenBudget interface {
 
 // Definition configures a Builder.
 type Definition struct {
-	// Renderer converts the final ordered parts into a model prompt. XMLRenderer
-	// is used when Renderer is nil.
+	// Renderer lowers arbitrary system/context parts to canonical text.
+	// Structured conversation parts bypass it. Nil selects XMLRenderer.
 	Renderer Renderer
 	// SystemInstructions are placed before context, user, and conversation parts.
 	SystemInstructions []Part
@@ -82,7 +64,7 @@ type Definition struct {
 }
 
 // Builder assembles system instructions, dynamic context, user input, and loop
-// iterations into a rendered model prompt.
+// messages into one canonical model request.
 type Builder struct {
 	SystemInstructions []Part
 	ContextSources     []ContextSource
@@ -347,79 +329,52 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 	return contextParts, nil
 }
 
-func (b *Builder) BuildPrompt(ctx context.Context, conv Conversation) (prompt string, err error) {
-	ctx, obs := newPromptBuilderRenderObserver(ctx, b)
-	stats := promptRenderStats{
-		SystemPartCount:  len(b.SystemInstructions),
-		ContextPartCount: len(b.ContextParts),
-		HasUserInput:     b.input.User != nil,
+// BuildRequest assembles a single canonical conversation. Renderers lower only
+// arbitrary context parts; structured history and user content retain their
+// roles, ordered parts, call identifiers, and opaque provider metadata.
+func (b *Builder) BuildRequest(ctx context.Context, conv Conversation) (ai.AIRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return ai.AIRequest{}, err
 	}
-	defer func() {
-		stats.PromptChars = len(prompt)
-		obs.FinishRender(err, stats)
-	}()
-	if err = ctx.Err(); err != nil {
-		return "", err
+	var messages []ai.Message
+	if len(b.SystemInstructions) > 0 {
+		text, err := b.Renderer.Render(ctx, []Part{NewSystemPart(b.SystemInstructions)})
+		if err != nil {
+			return ai.AIRequest{}, err
+		}
+		messages = append(messages, ai.TextMessage(ai.RoleSystem, text))
 	}
-
-	var parts []Part
-	parts = append(parts, NewSystemPart(b.SystemInstructions))
-	parts = append(parts, b.ContextParts...)
-	if b.input.User != nil {
-		parts = append(parts, NewMessagePart(RoleUser, b.input.User))
+	for _, part := range b.ContextParts {
+		if err := ctx.Err(); err != nil {
+			return ai.AIRequest{}, err
+		}
+		if part == nil {
+			continue
+		}
+		if canonical, ok := part.(ConversationPart); ok {
+			messages = append(messages, ai.CloneMessages(canonical.ConversationMessages())...)
+			continue
+		}
+		text, err := b.Renderer.Render(ctx, []Part{part})
+		if err != nil {
+			return ai.AIRequest{}, err
+		}
+		messages = append(messages, ai.TextMessage(ai.RoleUser, text))
+	}
+	if len(b.input.User) > 0 {
+		messages = append(messages, ai.Message{Role: ai.RoleUser, Parts: ai.CloneParts(b.input.User)})
 	}
 	if conv != nil {
-		messages := conv.Messages()
-		stats.ConversationMessageCount = len(messages)
-		for _, message := range messages {
-			if message.Role != RoleUser {
-				parts = append(parts, NewMessagePart(message.Role, message.Content))
-			}
-		}
+		messages = append(messages, ai.CloneMessages(conv.Messages())...)
 	}
-	stats.PartCount = len(parts)
-	renderCtx, finishRendererRender := obs.StartRendererRender(ctx, stats.PartCount)
-	prompt, err = b.Renderer.Render(renderCtx, parts)
-	if err == nil {
-		err = ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return ai.AIRequest{}, err
 	}
-	stats.PromptChars = len(prompt)
-	finishRendererRender(err, stats.PromptChars)
-	if err != nil {
-		obs.RenderFailed(ctx, stats, err)
-		return "", err
+	request := ai.AIRequest{Messages: messages}
+	if err := request.Validate(); err != nil {
+		return ai.AIRequest{}, err
 	}
-	obs.RenderFinished(ctx, stats, prompt)
-	return prompt, nil
-}
-
-type basePromptConversation struct{}
-
-func (basePromptConversation) Messages() []Message { return nil }
-
-// BuildRequest builds both the compatibility prompt and provider-neutral
-// messages for conv. With no native history, the native user message reuses the
-// compatibility prompt so render callbacks fire only once. Once native history
-// exists, the native user message remains the history-free base prompt.
-func (b *Builder) BuildRequest(ctx context.Context, conv Conversation) (string, []ai.RequestMessage, error) {
-	prompt, err := b.BuildPrompt(ctx, conv)
-	if err != nil {
-		return "", nil, err
-	}
-	var nativeMessages []ai.RequestMessage
-	if native, ok := conv.(NativeConversation); ok {
-		nativeMessages = native.NativeMessages()
-	}
-	if len(nativeMessages) == 0 {
-		return prompt, []ai.RequestMessage{{Role: ai.RequestMessageRoleUser, Text: prompt}}, nil
-	}
-	basePrompt, err := b.BuildPrompt(ctx, basePromptConversation{})
-	if err != nil {
-		return "", nil, err
-	}
-	messages := []ai.RequestMessage{{Role: ai.RequestMessageRoleUser, Text: basePrompt}}
-	messages = append(messages, nativeMessages...)
-	return prompt, messages, nil
+	return request, nil
 }
 
 func (b *Builder) Input() PromptInput {

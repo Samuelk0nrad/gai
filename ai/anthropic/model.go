@@ -33,9 +33,8 @@ type Model struct {
 var _ ai.Model = (*Model)(nil)
 var _ ai.ModelDescriber = (*Model)(nil)
 
-func (m *Model) Name() string      { return m.name }
-func (m *Model) NativeTools() bool { return true }
-func (m *Model) Close() error      { return nil }
+func (m *Model) Name() string { return m.name }
+func (m *Model) Close() error { return nil }
 
 // TokenCounter uses a local estimate for automatic budgeting. Tokenizer is
 // still available explicitly, but may perform network I/O.
@@ -104,7 +103,9 @@ func (p *Provider) sdkClient() antropic.Client {
 }
 
 func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor) (antropic.MessageNewParams, error) {
-	if err := req.ValidateMessages(); err != nil {
+	req = req.Copy()
+	err := req.Validate()
+	if err != nil {
 		return antropic.MessageNewParams{}, err
 	}
 	if err := req.ResponseFormat.Validate(); err != nil {
@@ -117,15 +118,37 @@ func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor) (antr
 	p := antropic.MessageNewParams{
 		Model:     antropic.Model(descriptor.Model),
 		MaxTokens: int64(maxTokens),
-		Messages:  []antropic.MessageParam{antropic.NewUserMessage(antropic.NewTextBlock(req.Prompt))},
 	}
-	if len(req.Messages) > 0 {
-		msgs, err := mapNativeMessages(req.Messages)
-		if err != nil {
+	conversationStarted := false
+	for _, message := range req.Messages {
+		if message.Role != ai.RoleSystem {
+			conversationStarted = true
+			continue
+		}
+		if conversationStarted {
+			return antropic.MessageNewParams{}, fmt.Errorf("%w: Anthropic only supports leading system messages", ai.ErrUnsupportedCapability)
+		}
+		if err := unsupportedExtensions(message.Extensions); err != nil {
 			return antropic.MessageNewParams{}, err
 		}
-		p.Messages = msgs
+		for _, part := range message.Parts {
+			if err := unsupportedExtensions(part.Extensions); err != nil {
+				return antropic.MessageNewParams{}, err
+			}
+			text := part.Text
+			if part.Kind == ai.ContentJSON {
+				text = string(part.JSON)
+			} else if part.Kind != ai.ContentText {
+				return antropic.MessageNewParams{}, fmt.Errorf("%w: Anthropic system content %q", ai.ErrUnsupportedCapability, part.Kind)
+			}
+			p.System = append(p.System, antropic.TextBlockParam{Text: text})
+		}
 	}
+	msgs, err := mapNativeMessages(req.Messages)
+	if err != nil {
+		return antropic.MessageNewParams{}, err
+	}
+	p.Messages = msgs
 	if len(req.Tools) > 0 {
 		tools, err := mapTools(req.Tools)
 		if err != nil {
@@ -188,41 +211,138 @@ func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor) (antr
 	return p, nil
 }
 
-func mapNativeMessages(messages []ai.RequestMessage) ([]antropic.MessageParam, error) {
+func mapNativeMessages(messages []ai.Message) ([]antropic.MessageParam, error) {
 	out := make([]antropic.MessageParam, 0, len(messages))
 	toolResults := []antropic.ContentBlockParamUnion{}
 	flushToolResults := func() {
-		if len(toolResults) == 0 {
-			return
+		if len(toolResults) > 0 {
+			out = append(out, antropic.NewUserMessage(toolResults...))
+			toolResults = nil
 		}
-		out = append(out, antropic.NewUserMessage(toolResults...))
-		toolResults = nil
 	}
 	for _, m := range messages {
-		if m.Role == ai.RequestMessageRoleTool {
-			toolResults = append(toolResults, antropic.NewToolResultBlock(m.ToolResult.ToolCallID, m.ToolResult.Content, m.ToolResult.IsError))
-			continue
+		if err := m.Validate(); err != nil {
+			return nil, err
 		}
-		flushToolResults()
-		if m.Role == ai.RequestMessageRoleUser {
-			out = append(out, antropic.NewUserMessage(antropic.NewTextBlock(m.Text)))
+		if err := unsupportedExtensions(m.Extensions); err != nil {
+			return nil, err
+		}
+		if m.Role == ai.RoleSystem {
 			continue
 		}
 		blocks := []antropic.ContentBlockParamUnion{}
-		if m.Text != "" {
-			blocks = append(blocks, antropic.NewTextBlock(m.Text))
-		}
-		for _, c := range m.ToolCalls {
-			var input any
-			if err := json.Unmarshal(c.Arguments, &input); err != nil {
-				return nil, err
+		for _, part := range m.Parts {
+			switch part.Kind {
+			case ai.ContentText, ai.ContentJSON:
+				if err := unsupportedExtensions(part.Extensions); err != nil {
+					return nil, err
+				}
+				text := part.Text
+				if part.Kind == ai.ContentJSON {
+					text = string(part.JSON)
+				}
+				blocks = append(blocks, antropic.NewTextBlock(text))
+			case ai.ContentReasoning:
+				signature, err := anthropicExtension(part.Extensions, "thinking_signature")
+				if err != nil {
+					return nil, err
+				}
+				if signature == "" {
+					return nil, fmt.Errorf("%w: Anthropic reasoning requires its signature", ai.ErrUnsupportedCapability)
+				}
+				blocks = append(blocks, antropic.NewThinkingBlock(signature, part.Text))
+			case ai.ContentToolCall:
+				if err := unsupportedExtensions(part.Extensions); err != nil {
+					return nil, err
+				}
+				c := part.ToolCall
+				if err := unsupportedExtensions(c.Extensions); err != nil {
+					return nil, err
+				}
+				var input any
+				if err := json.Unmarshal(c.Args, &input); err != nil {
+					return nil, err
+				}
+				blocks = append(blocks, antropic.NewToolUseBlock(c.ID, input, c.Name))
+			case ai.ContentToolResult:
+				if err := unsupportedExtensions(part.Extensions); err != nil {
+					return nil, err
+				}
+				r := part.ToolResult
+				var content strings.Builder
+				for _, resultPart := range r.Parts {
+					if err := unsupportedExtensions(resultPart.Extensions); err != nil {
+						return nil, err
+					}
+					switch resultPart.Kind {
+					case ai.ContentText:
+						content.WriteString(resultPart.Text)
+					case ai.ContentJSON:
+						content.Write(resultPart.JSON)
+					default:
+						return nil, fmt.Errorf("%w: Anthropic tool result %q", ai.ErrUnsupportedCapability, resultPart.Kind)
+					}
+				}
+				blocks = append(blocks, antropic.NewToolResultBlock(r.ToolCallID, content.String(), r.IsError))
+			case ai.ContentExtension:
+				data, err := anthropicExtension(part.Extensions, "redacted_thinking")
+				if err != nil {
+					return nil, err
+				}
+				if data != "" {
+					blocks = append(blocks, antropic.NewRedactedThinkingBlock(data))
+				}
+			default:
+				return nil, fmt.Errorf("%w: Anthropic content %q", ai.ErrUnsupportedCapability, part.Kind)
 			}
-			blocks = append(blocks, antropic.NewToolUseBlock(c.ID, input, c.Name))
 		}
-		out = append(out, antropic.NewAssistantMessage(blocks...))
+		if m.Role == ai.RoleTool {
+			toolResults = append(toolResults, blocks...)
+			continue
+		}
+		flushToolResults()
+		if len(blocks) == 0 {
+			continue
+		}
+		if m.Role == ai.RoleUser {
+			out = append(out, antropic.NewUserMessage(blocks...))
+		} else {
+			out = append(out, antropic.NewAssistantMessage(blocks...))
+		}
 	}
 	flushToolResults()
 	return out, nil
+}
+
+func unsupportedExtensions(extensions []ai.Extension) error {
+	for _, ext := range extensions {
+		if ext.Required {
+			return fmt.Errorf("%w: Anthropic extension %s/%s", ai.ErrUnsupportedCapability, ext.Namespace, ext.Type)
+		}
+	}
+	return nil
+}
+
+func anthropicExtension(extensions []ai.Extension, kind string) (string, error) {
+	var value string
+	for _, ext := range extensions {
+		if ext.Namespace == "anthropic" && ext.Type == kind {
+			if err := json.Unmarshal(ext.Data, &value); err != nil {
+				return "", fmt.Errorf("decode Anthropic %s: %w", kind, err)
+			}
+		} else if ext.Required {
+			return "", fmt.Errorf("%w: Anthropic extension %s/%s", ai.ErrUnsupportedCapability, ext.Namespace, ext.Type)
+		}
+	}
+	return value, nil
+}
+
+func anthropicExtensions(kind, value string) []ai.Extension {
+	if value == "" {
+		return nil
+	}
+	data, _ := json.Marshal(value)
+	return []ai.Extension{{Namespace: "anthropic", Type: kind, Data: data, Required: true}}
 }
 
 func mapTools(defs []ai.ToolDefinition) ([]antropic.ToolUnionParam, error) {
@@ -289,6 +409,7 @@ func mapResponseFormat(format ai.ResponseFormat) (*antropic.OutputConfigParam, e
 }
 
 func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AIResponse, err error) {
+	req = req.Copy()
 	if err := ai.ValidateModelRequest(m, req); err != nil {
 		return nil, err
 	}
@@ -300,7 +421,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	ctx, observation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "anthropic", Model: m.name, Sink: m.debug})
 	if gai.ObservationEnabled(ctx, m.debug) {
 		fields := map[string]any{}
-		gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, req.Prompt)
+		gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, observationPrompt(req))
 		gai.EmitObservation(ctx, m.debug, gai.Observation{Name: "anthropic_generate_request", Source: "ai:anthropic.Model.Generate", Fields: fields})
 	}
 	generationResult := ai.GenerationResult{}
@@ -313,7 +434,8 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	if err != nil {
 		return nil, localError(err)
 	}
-	text, thinking, calls, err := mapMessageContent(message.Content)
+	semantic, err := mapCanonicalMessageContent(message.Content)
+	text, thinking, calls := semantic.Text(), semantic.Reasoning(), semantic.ToolCalls()
 	if err != nil {
 		return nil, err
 	}
@@ -337,38 +459,46 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		gai.AddObservationContent(ctx, m.debug, fields, "reasoning", gai.ContentKindReasoning, thinking)
 		gai.EmitObservation(ctx, m.debug, gai.Observation{Name: "anthropic_generate_success", Source: "ai:anthropic.Model.Generate", Fields: fields})
 	}
-	return &ai.AIResponse{Text: text, Reasoning: thinking, ToolCalls: calls, Raw: json.RawMessage(message.RawJSON()), FinishReason: string(message.StopReason), InputTokens: input, OutputTokens: output, ReasoningTokens: usage.ReasoningTokens}, nil
+	response = &ai.AIResponse{Raw: json.RawMessage(message.RawJSON()), FinishReason: string(message.StopReason), InputTokens: input, OutputTokens: output, ReasoningTokens: usage.ReasoningTokens}
+	response.SetMessage(semantic)
+	return response, nil
 }
 
-func mapMessageContent(blocks []antropic.ContentBlockUnion) (string, string, []ai.ToolCall, error) {
-	var text, thinking strings.Builder
-	calls := make([]ai.ToolCall, 0)
+func mapCanonicalMessageContent(blocks []antropic.ContentBlockUnion) (ai.Message, error) {
+	message := ai.Message{Role: ai.RoleAssistant}
 	for i, block := range blocks {
 		switch block.Type {
 		case "text":
-			text.WriteString(block.Text)
+			message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentText, Text: block.Text})
 		case "thinking":
-			thinking.WriteString(block.Thinking)
+			message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentReasoning, Text: block.Thinking, Extensions: anthropicExtensions("thinking_signature", block.Signature)})
+		case "redacted_thinking":
+			message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentExtension, Extensions: anthropicExtensions("redacted_thinking", block.Data)})
 		case "tool_use":
 			name := strings.TrimSpace(block.Name)
 			if name == "" {
-				return "", "", nil, fmt.Errorf("content[%d]: tool use name empty", i)
+				return ai.Message{}, fmt.Errorf("content[%d]: tool use name empty", i)
 			}
 			args := block.Input
 			if len(args) == 0 || string(args) == "null" {
 				args = json.RawMessage("{}")
 			}
 			if !json.Valid(args) {
-				return "", "", nil, fmt.Errorf("content[%d]: tool use input is invalid JSON", i)
+				return ai.Message{}, fmt.Errorf("content[%d]: tool use input is invalid JSON", i)
 			}
 			id := strings.TrimSpace(block.ID)
 			if id == "" {
 				id = ai.GenerateToolCallID(name)
 			}
-			calls = append(calls, ai.ToolCall{ID: id, Type: "function", Name: name, Args: append(json.RawMessage(nil), args...)})
+			message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: id, Type: "function", Name: name, Args: append(json.RawMessage(nil), args...)}})
+		default:
+			return ai.Message{}, fmt.Errorf("%w: Anthropic output %q", ai.ErrUnsupportedCapability, block.Type)
 		}
 	}
-	return text.String(), thinking.String(), calls, nil
+	if len(message.Parts) == 0 {
+		message.Parts = ai.TextParts("")
+	}
+	return message, nil
 }
 
 func localError(err error) error {
@@ -417,15 +547,16 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			streamErr = ctx.Err()
 			return false
 		}
+		req = req.Copy()
 		if err := ai.ValidateModelRequest(m, req); err != nil {
 			streamErr = err
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			emit(ai.Token{Err: err})
 			return
 		}
 		payload, err := m.messageParams(req)
 		if err != nil {
 			streamErr = err
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			emit(ai.Token{Err: err})
 			return
 		}
 		client := m.client.sdkClient()
@@ -465,11 +596,31 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				completion.Raw = append(completion.Raw[:0], []byte(event.RawJSON())...)
 				snapshot := completion
 				snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
-				if !emit(ai.Token{Type: ai.TokenTypeCompletion, Completion: &snapshot}) {
+				if !emit(ai.Token{Completion: &snapshot}) {
 					return
 				}
 			case "content_block_start":
 				blocks[event.Index] = &streamBlock{typ: event.ContentBlock.Type, id: event.ContentBlock.ID, name: event.ContentBlock.Name}
+				block := blocks[event.Index]
+				block.signature.WriteString(event.ContentBlock.Signature)
+				switch event.ContentBlock.Type {
+				case "text":
+					if event.ContentBlock.Text != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.ContentBlock.Text}}) {
+						return
+					}
+				case "thinking":
+					if event.ContentBlock.Thinking != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: event.ContentBlock.Thinking}}) {
+						return
+					}
+				case "redacted_thinking":
+					part := ai.ContentPart{Kind: ai.ContentExtension, Extensions: anthropicExtensions("redacted_thinking", event.ContentBlock.Data)}
+					if !emit(ai.Token{Part: &part}) {
+						return
+					}
+				case "tool_use":
+				default:
+					streamErr = fmt.Errorf("%w: Anthropic stream content %q", ai.ErrUnsupportedCapability, event.ContentBlock.Type)
+				}
 			case "content_block_delta":
 				block := blocks[event.Index]
 				if block == nil {
@@ -478,13 +629,15 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				}
 				switch event.Delta.Type {
 				case "text_delta":
-					if event.Delta.Text != "" && !emit(ai.Token{Type: ai.TokenTypeText, Text: event.Delta.Text, Data: []byte(event.Delta.Text)}) {
+					if event.Delta.Text != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.Delta.Text}}) {
 						return
 					}
 				case "thinking_delta":
-					if event.Delta.Thinking != "" && !emit(ai.Token{Type: ai.TokenTypeThought, Text: event.Delta.Thinking, Data: []byte(event.Delta.Thinking)}) {
+					if event.Delta.Thinking != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: event.Delta.Thinking}}) {
 						return
 					}
+				case "signature_delta":
+					block.signature.WriteString(event.Delta.Signature)
 				case "input_json_delta":
 					block.input.WriteString(event.Delta.PartialJSON)
 				}
@@ -495,13 +648,19 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					break
 				}
 				delete(blocks, event.Index)
+				if block.typ == "thinking" && block.signature.Len() > 0 {
+					part := ai.ContentPart{Kind: ai.ContentReasoning, Extensions: anthropicExtensions("thinking_signature", block.signature.String())}
+					if !emit(ai.Token{Part: &part}) {
+						return
+					}
+				}
 				if block.typ == "tool_use" {
 					call, callErr := streamToolCall(block)
 					if callErr != nil {
 						streamErr = callErr
 						break
 					}
-					if !emit(ai.Token{Type: ai.TokenTypeToolCall, Data: append([]byte(nil), call.Args...), ToolCall: call}) {
+					if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: call}}) {
 						return
 					}
 				}
@@ -517,7 +676,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			streamErr = fmt.Errorf("anthropic stream ended with %d open content block(s)", len(blocks))
 		}
 		if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: streamErr, Text: streamErr.Error()})
+			emit(ai.Token{Err: streamErr})
 		}
 	}()
 	return ai.DetectToolCallsInStream(ctx, out, m.debug)
@@ -526,6 +685,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 type streamBlock struct {
 	typ, id, name string
 	input         strings.Builder
+	signature     strings.Builder
 }
 
 func streamToolCall(block *streamBlock) (*ai.ToolCall, error) {
@@ -581,4 +741,16 @@ func (t *Tokenizer) CountTokens(ctx context.Context, text string) (tokens int, e
 		return 0, localError(err)
 	}
 	return int(count.InputTokens), nil
+}
+
+// observationPrompt respects the prompt capture category without mixing in
+// tool inputs/results, reasoning, or opaque provider state.
+func observationPrompt(req ai.AIRequest) string {
+	var parts []string
+	for _, message := range req.Messages {
+		if message.Role == ai.RoleSystem || message.Role == ai.RoleUser {
+			parts = append(parts, message.Text())
+		}
+	}
+	return strings.Join(parts, "\n")
 }

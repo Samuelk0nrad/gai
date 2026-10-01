@@ -24,7 +24,7 @@ type streamOnlyModel struct{ request ai.AIRequest }
 func (m *streamOnlyModel) GenerateStream(_ context.Context, req ai.AIRequest) <-chan ai.Token {
 	m.request = req
 	out := make(chan ai.Token, 1)
-	out <- ai.Token{Type: ai.TokenTypeText, Text: "answer"}
+	out <- ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "answer"}}
 	close(out)
 	return out
 }
@@ -38,7 +38,7 @@ func TestStreamOnlyModelRunsWithGenericLocalCounter(t *testing.T) {
 		builder = gaictx.New(gaictx.Definition{TokenBudget: 100, SystemInstructions: []gaictx.Part{gaictx.NewTextPart("instructions")}})
 		return builder, nil
 	}})
-	workflow, err := a.NewRun(t.Context(), agent.RunInput{Prompt: gaictx.PromptInput{User: gaictx.NewTextContent("question")}})
+	workflow, err := a.NewRun(t.Context(), agent.RunInput{Prompt: gaictx.PromptInput{User: ai.TextParts("question")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestStreamOnlyModelRunsWithGenericLocalCounter(t *testing.T) {
 	if err != nil || result.Text != "answer" {
 		t.Fatalf("run = %+v, %v", result, err)
 	}
-	if !strings.Contains(model.request.Prompt, "question") || ai.ModelName(model) != "" {
+	if !strings.Contains(requestText(model.request), "question") || ai.ModelName(model) != "" {
 		t.Fatalf("request/name = %+v / %q", model.request, ai.ModelName(model))
 	}
 	if _, ok := builder.TokenCounter().(ai.TextTokenEstimator); !ok {
@@ -131,7 +131,7 @@ func TestAutomaticProviderCountersBuildPromptsWithoutNetwork(t *testing.T) {
 			if _, err := builder.BuildContext(t.Context()); err != nil {
 				t.Fatal(err)
 			}
-			if prompt, err := builder.BuildPrompt(t.Context(), nil); err != nil || !strings.Contains(prompt, "earlier question") {
+			if prompt, err := renderBuilderRequest(t.Context(), builder, nil); err != nil || !strings.Contains(prompt, "earlier question") {
 				t.Fatalf("history prompt = %q, %v", prompt, err)
 			}
 			counter := builder.TokenCounter()
@@ -165,7 +165,7 @@ func TestAutomaticCounterDoesNotConsultLegacyTokenizer(t *testing.T) {
 type localCountHistoryStore struct{}
 
 func (localCountHistoryStore) GetLastHistoryState(context.Context, string) (*history.HistoryState, error) {
-	return &history.HistoryState{Turns: []gaictx.Turn{{ID: "turn", Count: 1, UserMessage: &gaictx.Message{Role: gaictx.RoleUser, Content: gaictx.NewTextContent("earlier question")}}}}, nil
+	return &history.HistoryState{Turns: []gaictx.Turn{{ID: "turn", Count: 1, UserMessage: &gaictx.StoredMessage{Message: ai.TextMessage(ai.RoleUser, "earlier question")}}}}, nil
 }
 func (localCountHistoryStore) SaveHistoryState(context.Context, string, *history.HistoryState) error {
 	return nil

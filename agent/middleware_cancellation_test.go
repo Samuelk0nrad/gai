@@ -28,7 +28,7 @@ func TestAgentMiddlewareRunStagePreservesCanonicalOutputAfterCanceledForwarding(
 			nested := New(Definition{
 				Name: "nested",
 				Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{
-					Res: ai.AIResponse{Text: "SAFE REPLACEMENT"},
+					Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "SAFE REPLACEMENT"}}}},
 				}}},
 				Prompt: func(context.Context, RunInput) (gaictx.PromptBuilder, error) {
 					return gaictx.New(gaictx.Definition{Renderer: &gaictx.SimpleRenderer{}}), nil
@@ -60,7 +60,7 @@ func TestAgentMiddlewareRunStagePreservesCanonicalOutputAfterCanceledForwarding(
 			}
 			outcomeCh := make(chan outcome, 1)
 			go func() {
-				result, output, err := middleware.runStage(ctx, RunInput{ID: "nested-test"}, EventSource{Kind: SourceMiddleware, Index: 1, Name: "nested"}, func(event Event) {
+				result, output, err := middleware.runStage(ctx, RunInput{ID: "nested-test", Prompt: gaictx.PromptInput{User: ai.TextParts("")}}, EventSource{Kind: SourceMiddleware, Index: 1, Name: "nested"}, func(event Event) {
 					if event.Type == EventAttemptStart {
 						close(forwardBlocked)
 						<-releaseForward

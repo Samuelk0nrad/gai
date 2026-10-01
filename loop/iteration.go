@@ -2,10 +2,9 @@ package loop
 
 import (
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 )
 
-// IterationType identifies the semantic kind of one iteration part.
+// IterationType identifies an execution diagnostic record.
 type IterationType string
 
 const (
@@ -21,10 +20,13 @@ const (
 type Iteration struct {
 	// Count is the one-based iteration number.
 	Count int
-	// Parts contains generated responses, tool calls, and tool errors in order.
+	// Parts retains execution diagnostics for tools and generation accounting.
+	// It is not a conversation representation; use Messages for semantic output.
 	Parts []IterationPart
-	// UserMessage is the structured user input retained by the first iteration.
-	UserMessage *gaictx.Message
+	// Conversation is the canonical snapshot accumulated during this attempt.
+	// Parts below remain execution records and are never used to rebuild it.
+	Conversation  []ai.Message
+	inputMessages int
 	// Usage is the provider-reported usage for the accepted generation attempt.
 	Usage ai.Usage
 }
@@ -41,64 +43,69 @@ type IterationPart struct {
 	ToolResp *ToolResponse
 }
 
-// Messages converts the iteration into ordered conversation messages.
-// UserMessage is included when present on an accepted iteration.
-func (i Iteration) Messages() []gaictx.Message {
-	var msgs []gaictx.Message
+// Messages returns snapshots of the input and canonical output of this iteration.
+func (i Iteration) Messages() []ai.Message { return ai.CloneMessages(i.Conversation) }
 
-	if i.UserMessage != nil {
-		msgs = append(msgs, *i.UserMessage)
+// InputMessage returns the original input snapshot on the first accepted attempt.
+func (i Iteration) InputMessage() *ai.Message {
+	if i.inputMessages == 0 || len(i.Conversation) == 0 {
+		return nil
 	}
-
-	return append(msgs, i.partMessages()...)
+	m := i.Conversation[0].Clone()
+	return &m
 }
 
-// DeltaMessages converts only the iteration parts into conversation messages,
-// excluding the original user request.
-func (i *Iteration) DeltaMessages() []gaictx.Message {
+// DeltaMessages returns canonical output without the original user input.
+func (i *Iteration) DeltaMessages() []ai.Message {
 	if i == nil {
 		return nil
 	}
-	return i.partMessages()
+	return ai.CloneMessages(i.Conversation[i.inputMessages:])
 }
 
-func (i *Iteration) partMessages() []gaictx.Message {
-	var msgs []gaictx.Message
-	for _, part := range i.Parts {
-		switch part.Type {
-		case IterationTypeToolCall, IterationTypeToolError:
-			if part.ToolReq != nil {
-				msgs = append(msgs, gaictx.Message{
-					Role:    gaictx.RoleAssistant,
-					Content: gaictx.NewToolCallContent(part.ToolReq.Name, string(part.ToolReq.Args)),
-				})
-				if part.ToolResp != nil {
-					if err := part.ToolResp.ErrorValue(); err != nil {
-						msgs = append(msgs, gaictx.Message{
-							Role:    gaictx.RoleTool,
-							Content: gaictx.NewToolResultErrContent(part.ToolReq.Name, err.Error()),
-						})
-					} else {
-						msgs = append(msgs, gaictx.Message{
-							Role:    gaictx.RoleTool,
-							Content: gaictx.NewToolResultContent(part.ToolReq.Name, part.ToolResp.TextValue(), false, ""),
-						})
-					}
-				}
+// Clone snapshots both execution diagnostics and semantic conversation data.
+func (i Iteration) Clone() Iteration {
+	i.Conversation = ai.CloneMessages(i.Conversation)
+	i.Parts = append([]IterationPart(nil), i.Parts...)
+	for n := range i.Parts {
+		p := &i.Parts[n]
+		if p.Response != nil {
+			r := *p.Response
+			r.Message = r.Message.Clone()
+			r.Raw = append([]byte(nil), r.Raw...)
+			p.Response = &r
+		}
+		if p.ToolReq != nil {
+			c := p.ToolReq.Clone()
+			p.ToolReq = &c
+		}
+		if p.ToolResp != nil {
+			r := *p.ToolResp
+			if r.Text != nil {
+				v := *r.Text
+				r.Text = &v
 			}
-		case IterationTypeResponse:
-			if part.Response != nil {
-				if part.Response.Text == "" {
-					continue
-				}
-				msgs = append(msgs, gaictx.Message{
-					Role:    gaictx.RoleAssistant,
-					Content: gaictx.NewTextContent(part.Response.Text),
-				})
+			if r.Err != nil {
+				v := *r.Err
+				r.Err = &v
 			}
+			p.ToolResp = &r
 		}
 	}
-	return msgs
+	return i
+}
+
+func (i *Iteration) appendConversationToken(t ai.Token) {
+	// Accumulate before tools execute; assistant part order comes from the stream.
+	if t.Part == nil {
+		return
+	}
+	n := len(i.Conversation)
+	if n == 0 || i.Conversation[n-1].Role != ai.RoleAssistant {
+		i.Conversation = append(i.Conversation, ai.Message{Role: ai.RoleAssistant})
+		n++
+	}
+	i.Conversation[n-1].AppendToken(t)
 }
 
 // CurrentPart returns the most recently appended part, or nil when empty.
@@ -111,17 +118,14 @@ func (i *Iteration) CurrentPart() *IterationPart {
 
 // AppendToken adds a streamed model token to the appropriate iteration part.
 func (i *Iteration) AppendToken(t ai.Token) {
-	text := t.Text
-	if text == "" && len(t.Data) > 0 {
-		text = string(t.Data)
-	}
+	i.appendConversationToken(t)
 
 	var last *IterationPart
 	if len(i.Parts) > 0 {
 		last = &i.Parts[len(i.Parts)-1]
 	}
 
-	switch t.Type {
+	switch t.Type() {
 	case ai.TokenTypeCompletion:
 		if t.Completion == nil {
 			return
@@ -134,13 +138,13 @@ func (i *Iteration) AppendToken(t ai.Token) {
 			response.AppendToken(t)
 			i.Parts = append(i.Parts, IterationPart{Type: IterationTypeResponse, Response: response})
 		}
-	case ai.TokenTypeText:
+	case ai.TokenTypeText, ai.TokenTypePart:
 		if last != nil && last.Type == IterationTypeResponse {
 			last.Response.AppendToken(t)
 		} else {
 			i.Parts = append(i.Parts, IterationPart{
 				Type:     IterationTypeResponse,
-				Response: &ai.AIResponse{Text: text, OutputTokens: t.TokenUsage},
+				Response: responseFromToken(t),
 			})
 		}
 	case ai.TokenTypeErr:
@@ -154,13 +158,15 @@ func (i *Iteration) AppendToken(t ai.Token) {
 		} else {
 			i.Parts = append(i.Parts, IterationPart{
 				Type:     IterationTypeResponse,
-				Response: &ai.AIResponse{Reasoning: text, OutputTokens: t.TokenUsage, ReasoningTokens: t.TokenUsage},
+				Response: responseFromToken(t),
 			})
 		}
 	case ai.TokenTypeToolCall:
 		i.Parts = append(i.Parts, IterationPart{
 			Type:    IterationTypeToolCall,
-			ToolReq: t.ToolCall,
+			ToolReq: t.ToolCall(),
 		})
 	}
 }
+
+func responseFromToken(t ai.Token) *ai.AIResponse { r := &ai.AIResponse{}; r.AppendToken(t); return r }

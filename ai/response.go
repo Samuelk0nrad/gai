@@ -3,16 +3,13 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 )
 
 // AIResponse is the accumulated result of a non-streaming generation request.
 type AIResponse struct {
-	// Text contains the generated response text.
-	Text string
-	// Reasoning contains model reasoning/thinking text when exposed separately.
-	Reasoning string
-	// ToolCalls contains structured tool calls produced by the model.
-	ToolCalls []ToolCall
+	// Message contains the canonical semantic output.
+	Message Message
 	// Raw contains the provider response payload when retained by an implementation.
 	Raw json.RawMessage
 	// FinishReason identifies why the provider stopped generation when exposed.
@@ -72,34 +69,82 @@ var (
 	TokenTypeErr TokenType = "error"
 	// TokenTypeCompletion identifies terminal provider metadata for a completed stream.
 	TokenTypeCompletion TokenType = "completion"
+	TokenTypePart       TokenType = "part"
 )
 
-// Token is one event emitted by Model.GenerateStream.
-//
-// Data contains the raw provider payload for text-like tokens. Text contains
-// normalized text when the provider exposes it separately. ToolCall and Err are
-// populated for their corresponding token types.
+// Token is one event emitted by Model.GenerateStream. Exactly one of Part, Err,
+// and Completion is populated; accounting never becomes conversation content.
 type Token struct {
-	// Type identifies how the token should be interpreted.
-	Type TokenType
-	// Data contains the token's raw byte representation.
-	Data []byte
-	// TokenUsage is the output-token usage attributed to this event.
+	Part *ContentPart
+	// TokenUsage is the output-token estimate attributed to this event.
 	TokenUsage int
-
-	// ToolCall contains the structured call for TokenTypeToolCall.
-	ToolCall *ToolCall
-	// Text contains normalized text when available.
-	Text string
-	// Err contains the stream error for TokenTypeErr.
-	Err error
-	// Completion contains terminal provider metadata for TokenTypeCompletion.
+	Err        error
 	Completion *Completion
 }
 
-// String returns the token's raw Data as a string.
-func (t Token) String() string {
-	return string(t.Data)
+// Validate checks that the event has one valid payload.
+func (t Token) Validate() error {
+	payloads := 0
+	if t.Part != nil {
+		payloads++
+	}
+	if t.Err != nil {
+		payloads++
+	}
+	if t.Completion != nil {
+		payloads++
+	}
+	if payloads != 1 {
+		return fmt.Errorf("stream event requires exactly one payload")
+	}
+	if t.Part != nil {
+		return (Message{Role: RoleAssistant, Parts: []ContentPart{*t.Part}}).Validate()
+	}
+	return nil
+}
+
+// Type derives the event kind from its payload.
+func (t Token) Type() TokenType {
+	if t.Err != nil {
+		return TokenTypeErr
+	}
+	if t.Completion != nil {
+		return TokenTypeCompletion
+	}
+	if t.Part != nil {
+		switch t.Part.Kind {
+		case ContentText, ContentJSON:
+			return TokenTypeText
+		case ContentReasoning:
+			return TokenTypeThought
+		case ContentToolCall:
+			return TokenTypeToolCall
+		}
+	}
+	return TokenTypePart
+}
+
+// Text returns text, reasoning, or structured JSON without exposing opaque state.
+func (t Token) Text() string {
+	if t.Part == nil {
+		return ""
+	}
+	switch t.Part.Kind {
+	case ContentText, ContentReasoning:
+		return t.Part.Text
+	case ContentJSON:
+		return string(t.Part.JSON)
+	}
+	return ""
+}
+
+// ToolCall returns a detached view of the canonical call, or nil.
+func (t Token) ToolCall() *ToolCall {
+	if t.Part == nil || t.Part.Kind != ContentToolCall || t.Part.ToolCall == nil {
+		return nil
+	}
+	call := t.Part.ToolCall.Clone()
+	return &call
 }
 
 // SendToken forwards token unless ctx is canceled. It returns false when the
@@ -113,48 +158,71 @@ func SendToken(ctx context.Context, out chan<- Token, token Token) bool {
 	}
 }
 
-// AppendToken incorporates a streamed token into the response text and output
-// token count.
+// Text returns user-visible response text.
+func (r AIResponse) Text() string { return r.Message.Text() }
+
+// Reasoning returns exposed reasoning text.
+func (r AIResponse) Reasoning() string { return r.Message.Reasoning() }
+
+// ToolCalls returns detached calls in their original order.
+func (r AIResponse) ToolCalls() []ToolCall { return r.Message.ToolCalls() }
+
+// SetMessage snapshots canonical output.
+func (r *AIResponse) SetMessage(m Message) { r.Message = m.Clone() }
+
+// AppendToken incorporates a streamed semantic delta and generation accounting.
 func (r *AIResponse) AppendToken(t Token) {
-	switch t.Type {
-	case TokenTypeText:
-		if len(t.Text) > 0 {
-			r.Text += t.Text
-		} else {
-			r.Text += string(t.Data)
-		}
-	case TokenTypeThought:
-		if len(t.Text) > 0 {
-			r.Reasoning += t.Text
-		} else {
-			r.Reasoning += string(t.Data)
-		}
+	r.Message.AppendToken(t)
+	if t.Part != nil && t.Part.Kind == ContentReasoning {
 		r.ReasoningTokens += t.TokenUsage
-	case TokenTypeErr:
-		if t.Err != nil {
-			r.Text += string(t.Err.Error())
-		} else {
-			r.Text += string(t.Data)
+	}
+	if t.Completion != nil {
+		if t.Completion.UsageReported {
+			r.InputTokens = t.Completion.Usage.InputTokens
+			r.OutputTokens = t.Completion.Usage.OutputTokens
+			r.ReasoningTokens = t.Completion.Usage.ReasoningTokens
 		}
-	case TokenTypeToolCall:
-		if t.ToolCall != nil {
-			tc := *t.ToolCall
-			tc.Args = append([]byte(nil), t.ToolCall.Args...)
-			tc.ThoughtSignature = append([]byte(nil), t.ToolCall.ThoughtSignature...)
-			r.ToolCalls = append(r.ToolCalls, tc)
-		}
-	case TokenTypeCompletion:
-		if t.Completion != nil {
-			if t.Completion.UsageReported {
-				r.InputTokens = t.Completion.Usage.InputTokens
-				r.OutputTokens = t.Completion.Usage.OutputTokens
-				r.ReasoningTokens = t.Completion.Usage.ReasoningTokens
-			}
-			r.FinishReason = t.Completion.FinishReason
-			r.Raw = append(r.Raw[:0], t.Completion.Raw...)
-		}
+		r.FinishReason = t.Completion.FinishReason
+		r.Raw = append(r.Raw[:0], t.Completion.Raw...)
 		return
 	}
-
 	r.OutputTokens += t.TokenUsage
+}
+
+// AppendToken appends ordered semantic deltas. Stream errors and completion
+// accounting are execution metadata and never become conversation text.
+func (m *Message) AppendToken(t Token) {
+	if t.Part == nil {
+		return
+	}
+	p := CloneParts([]ContentPart{*t.Part})[0]
+	if m.Role == "" {
+		m.Role = RoleAssistant
+	}
+	if n := len(m.Parts); n > 0 && (p.Kind == ContentText || p.Kind == ContentReasoning) && m.Parts[n-1].Kind == p.Kind {
+		last := &m.Parts[n-1]
+		if p.Text == "" && len(p.Extensions) > 0 && len(last.Extensions) == 0 {
+			last.Extensions = append(last.Extensions, p.Extensions...)
+			return
+		}
+		if len(last.Extensions) == 0 && len(p.Extensions) == 0 {
+			last.Text += p.Text
+			return
+		}
+	}
+	m.Parts = append(m.Parts, p)
+}
+
+// Clone detaches every mutable payload in a stream event.
+func (t Token) Clone() Token {
+	if t.Part != nil {
+		p := CloneParts([]ContentPart{*t.Part})[0]
+		t.Part = &p
+	}
+	if t.Completion != nil {
+		c := *t.Completion
+		c.Raw = append(json.RawMessage(nil), c.Raw...)
+		t.Completion = &c
+	}
+	return t
 }

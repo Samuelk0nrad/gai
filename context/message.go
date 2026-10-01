@@ -2,45 +2,67 @@ package context
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
 )
 
-// Role identifies the participant represented by a message.
-type Role string
-
-const (
-	// RoleSystem identifies system instructions.
-	RoleSystem Role = "system"
-	// RoleUser identifies user input.
-	RoleUser Role = "user"
-	// RoleAssistant identifies model output and tool requests.
-	RoleAssistant Role = "assistant"
-	// RoleTool identifies tool results returned to the model.
-	RoleTool Role = "tool"
-)
+// MessageSchemaVersion is the current serialized storage envelope version.
+const MessageSchemaVersion = 1
 
 // Turn groups one user message with the assistant and tool messages it caused.
 type Turn struct {
 	ID          string
 	Count       int
-	UserMessage *Message
-	Messages    []Message
+	UserMessage *StoredMessage
+	Messages    []StoredMessage
 	TokenCount  map[string]int
 	debugSink   gai.ObservationSink
 }
 
-// Message is one role-labelled conversation entry.
-type Message struct {
-	ID        string
-	SessionID string
-	TurnID    string
-	Role      Role
-	Content   Content
-	// TokenCount key: counter.ID, value: token count for content
-	TokenCount map[string]int
+// StoredMessage wraps canonical content with persistence-only metadata. Message
+// order is the enclosing Turn's slice order; Count orders the turns themselves.
+type StoredMessage struct {
+	SchemaVersion int        `json:"schema_version"`
+	ID            string     `json:"id,omitempty"`
+	SessionID     string     `json:"session_id,omitempty"`
+	TurnID        string     `json:"turn_id,omitempty"`
+	Message       ai.Message `json:"message"`
+	// TokenCount keys identify the counter and its version.
+	TokenCount map[string]int `json:"token_count,omitempty"`
+}
+
+// MarshalJSON always emits the current schema version.
+func (m StoredMessage) MarshalJSON() ([]byte, error) {
+	type stored StoredMessage
+	if m.SchemaVersion != 0 && m.SchemaVersion != MessageSchemaVersion {
+		return nil, fmt.Errorf("unsupported message schema version: %d", m.SchemaVersion)
+	}
+	m.SchemaVersion = MessageSchemaVersion
+	if err := m.Message.Validate(); err != nil {
+		return nil, fmt.Errorf("stored message: %w", err)
+	}
+	return json.Marshal(stored(m))
+}
+
+// UnmarshalJSON requires the current schema and canonical message content.
+func (m *StoredMessage) UnmarshalJSON(data []byte) error {
+	type stored StoredMessage
+	var decoded stored
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if decoded.SchemaVersion != MessageSchemaVersion {
+		return fmt.Errorf("unsupported message schema version: %d", decoded.SchemaVersion)
+	}
+	if err := decoded.Message.Validate(); err != nil {
+		return fmt.Errorf("stored message: %w", err)
+	}
+	*m = StoredMessage(decoded)
+	return nil
 }
 
 // TurnTokenStore persists calculated token counts for a turn.
@@ -69,7 +91,11 @@ func (t *Turn) Tokenize(ctx context.Context, counter ai.TokenCounter, store Turn
 		return t.saveTokens(ctx, store, counterID, count)
 	}
 
-	count, err := counter.CountTokens(ctx, combinedMessageContent(messages))
+	content, err := combinedMessageContent(messages)
+	if err != nil {
+		return 0, err
+	}
+	count, err := counter.CountTokens(ctx, content)
 	if err != nil {
 		return 0, err
 	}
@@ -111,11 +137,11 @@ func (t *Turn) saveTokens(ctx context.Context, store TurnTokenStore, counterID s
 	return count, nil
 }
 
-func (t *Turn) messages() []Message {
+func (t *Turn) messages() []StoredMessage {
 	if t == nil {
 		return nil
 	}
-	messages := make([]Message, 0, len(t.Messages)+1)
+	messages := make([]StoredMessage, 0, len(t.Messages)+1)
 	if t.UserMessage != nil {
 		messages = append(messages, *t.UserMessage)
 	}
@@ -123,7 +149,7 @@ func (t *Turn) messages() []Message {
 	return messages
 }
 
-func messagesTokenCount(messages []Message, counterID string) (int, bool) {
+func messagesTokenCount(messages []StoredMessage, counterID string) (int, bool) {
 	total := 0
 	for _, message := range messages {
 		count, ok := message.TokenCount[counterID]
@@ -135,23 +161,25 @@ func messagesTokenCount(messages []Message, counterID string) (int, bool) {
 	return total, true
 }
 
-func combinedMessageContent(messages []Message) string {
+func combinedMessageContent(messages []StoredMessage) (string, error) {
 	var builder strings.Builder
 	for i, message := range messages {
 		if i > 0 {
 			builder.WriteString("\n")
 		}
-		if message.Content != nil {
-			builder.WriteString(message.Content.String())
+		text, err := messageTokenText(message.Message)
+		if err != nil {
+			return "", err
 		}
+		builder.WriteString(text)
 	}
-	return builder.String()
+	return builder.String(), nil
 }
 
 // IsValidRole reports whether role is one of the built-in roles.
-func IsValidRole(role Role) bool {
+func IsValidRole(role ai.Role) bool {
 	switch role {
-	case RoleSystem, RoleUser, RoleAssistant, RoleTool:
+	case ai.RoleSystem, ai.RoleUser, ai.RoleAssistant, ai.RoleTool:
 		return true
 	default:
 		return false
@@ -159,7 +187,7 @@ func IsValidRole(role Role) bool {
 }
 
 // Tokens returns the message token count for counter, caching the result.
-func (m Message) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
+func (m StoredMessage) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
 	if counter == nil {
 		return 0, ErrTokenCounterNotFound
 	}
@@ -169,9 +197,9 @@ func (m Message) Tokens(ctx context.Context, counter ai.TokenCounter) (int, erro
 	} else if ok {
 		delete(m.TokenCount, counterID)
 	}
-	content := ""
-	if m.Content != nil {
-		content = m.Content.String()
+	content, err := messageTokenText(m.Message)
+	if err != nil {
+		return 0, err
 	}
 	count, err := counter.CountTokens(ctx, content)
 	if err != nil {
@@ -182,4 +210,17 @@ func (m Message) Tokens(ctx context.Context, counter ai.TokenCounter) (int, erro
 	}
 	m.TokenCount[counterID] = count
 	return count, nil
+}
+
+// messageTokenText is a local estimate input, never a transport projection.
+// It includes opaque bytes so token budgeting does not require a lossy renderer.
+func messageTokenText(message ai.Message) (string, error) {
+	if len(message.Parts) == 0 && len(message.Extensions) == 0 {
+		return "", nil
+	}
+	if len(message.Extensions) == 0 && len(message.Parts) == 1 && message.Parts[0].Kind == ai.ContentText && len(message.Parts[0].Extensions) == 0 {
+		return message.Parts[0].Text, nil
+	}
+	encoded, err := json.Marshal(message)
+	return string(encoded), err
 }

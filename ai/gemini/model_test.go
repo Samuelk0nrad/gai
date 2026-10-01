@@ -25,7 +25,7 @@ func TestModelDescriptorRejectsUnknownReasoningEffortBeforeTransport(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffort("maximum")}})
+	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "")}, Reasoning: ai.ReasoningConfig{Effort: ai.ReasoningEffort("maximum")}})
 	if !errors.Is(err, ai.ErrUnsupportedCapability) || requests != 0 {
 		t.Fatalf("Generate error = %v, requests = %d; want local unsupported error and no request", err, requests)
 	}
@@ -52,11 +52,11 @@ func TestModelGenerateStreamEmitsCompletionForIdentityMetadata(t *testing.T) {
 	}
 
 	var completion *ai.Completion
-	for token := range model.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
+	for token := range model.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 		if token.Err != nil {
 			t.Fatalf("unexpected stream error: %v", token.Err)
 		}
-		if token.Type == ai.TokenTypeCompletion {
+		if token.Type() == ai.TokenTypeCompletion {
 			completion = token.Completion
 		}
 	}
@@ -97,11 +97,11 @@ func TestModelGenerateStreamPreservesCompletionBeforeError(t *testing.T) {
 
 	var completionCount int
 	var streamError error
-	for token := range model.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
-		if token.Type == ai.TokenTypeCompletion {
+	for token := range model.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		if token.Type() == ai.TokenTypeCompletion {
 			completionCount++
 		}
-		if token.Type == ai.TokenTypeErr {
+		if token.Type() == ai.TokenTypeErr {
 			streamError = token.Err
 		}
 	}
@@ -127,8 +127,8 @@ func TestMapFunctionCall(t *testing.T) {
 		t.Fatalf("mapFunctionCall error: %v", err)
 	}
 
-	if !strings.HasPrefix(got.ID, "call_echo_tool_") {
-		t.Fatalf("expected generated tool id for echo_tool, got %q", got.ID)
+	if got.ID != "call_1" {
+		t.Fatalf("expected provider tool id, got %q", got.ID)
 	}
 	if got.Type != "function" {
 		t.Fatalf("expected tool call type=function, got %q", got.Type)
@@ -147,7 +147,7 @@ func TestMapFunctionCall(t *testing.T) {
 }
 
 func TestNativeContentsMapUserPayload(t *testing.T) {
-	contents, err := nativeContents(ai.AIRequest{Messages: []ai.RequestMessage{{Role: ai.RequestMessageRoleUser, Text: "initial request"}}})
+	contents, err := nativeContents(ai.AIRequest{Messages: []ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "initial request"}}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,10 +157,10 @@ func TestNativeContentsMapUserPayload(t *testing.T) {
 }
 
 func TestNativeContentsAllowsFunctionNameAfterResult(t *testing.T) {
-	contents, err := nativeContents(ai.AIRequest{Messages: []ai.RequestMessage{
-		{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{ID: "call_1", Name: "echo", Arguments: json.RawMessage(`{"message":"first"}`)}}},
-		{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: "call_1", Name: "echo", Content: "first"}},
-		{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{ID: "call_2", Name: "echo", Arguments: json.RawMessage(`{"message":"second"}`)}}},
+	contents, err := nativeContents(ai.AIRequest{Messages: []ai.Message{
+		{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{Type: "function", ID: "call_1", Name: "echo", Args: json.RawMessage(`{"message":"first"}`)}}}},
+		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call_1", Name: "echo", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "first"}}}}}},
+		{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{Type: "function", ID: "call_2", Name: "echo", Args: json.RawMessage(`{"message":"second"}`)}}}},
 	}})
 	if err != nil {
 		t.Fatalf("nativeContents error: %v", err)
@@ -172,14 +172,12 @@ func TestNativeContentsAllowsFunctionNameAfterResult(t *testing.T) {
 
 func TestNativeContentsPreservesThoughtSignatureOnFunctionCall(t *testing.T) {
 	signature := []byte("opaque-thought-signature")
-	contents, err := nativeContents(ai.AIRequest{Messages: []ai.RequestMessage{
-		{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{
-			ID:               "call_1",
-			Name:             "echo",
-			Arguments:        json.RawMessage(`{"message":"hello"}`),
-			ThoughtSignature: signature,
-		}}},
-		{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: "call_1", Name: "echo", Content: "hello"}},
+	contents, err := nativeContents(ai.AIRequest{Messages: []ai.Message{
+		{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{Type: "function",
+			ID:   "call_1",
+			Name: "echo", Args: json.RawMessage(`{"message":"hello"}`), Extensions: thoughtExtensions(signature),
+		}}}},
+		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call_1", Name: "echo", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "hello"}}}}}},
 	}})
 	if err != nil {
 		t.Fatalf("nativeContents error: %v", err)
@@ -207,7 +205,7 @@ func TestGenerateEmitsObservationOnGenerationFailure(t *testing.T) {
 		t.Fatalf("Model error: %v", err)
 	}
 
-	_, err = any(model).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
+	_, err = any(model).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
 	if err == nil {
 		t.Fatal("Generate error = nil, want API error")
 	}
@@ -246,8 +244,8 @@ func TestModelGenerateStreamRecordsAPIErrorStatus(t *testing.T) {
 	}
 
 	var streamErr error
-	for token := range model.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
-		if token.Type == ai.TokenTypeErr {
+	for token := range model.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		if token.Type() == ai.TokenTypeErr {
 			streamErr = token.Err
 		}
 	}
@@ -283,30 +281,29 @@ func TestMarshalArgsNilDefaultsToObject(t *testing.T) {
 
 func TestBuildTextToken(t *testing.T) {
 	tok := buildTextToken(&genai.Part{Text: "hello"})
-	if tok.Type != ai.TokenTypeText {
-		t.Fatalf("expected text token, got %s", tok.Type)
+	if tok.Type() != ai.TokenTypeText {
+		t.Fatalf("expected text token, got %s", tok.Type())
 	}
-	if string(tok.Data) != "hello" {
-		t.Fatalf("expected token data to be plain text, got %q", string(tok.Data))
+	if err := tok.Validate(); err != nil {
+		t.Fatal(err)
 	}
-	if tok.Text != "hello" {
-		t.Fatalf("expected token text to be set, got %q", tok.Text)
+	if tok.Text() != "hello" {
+		t.Fatalf("expected canonical text, got %q", tok.Text())
 	}
 }
 
 func TestBuildThoughtToken(t *testing.T) {
 	tok := buildTextToken(&genai.Part{Text: "thinking", Thought: true})
-	if tok.Type != ai.TokenTypeThought {
-		t.Fatalf("expected thought token, got %s", tok.Type)
+	if tok.Type() != ai.TokenTypeThought {
+		t.Fatalf("expected thought token, got %s", tok.Type())
 	}
-	if string(tok.Data) != "thinking" {
-		t.Fatalf("expected token data to be plain text, got %q", string(tok.Data))
+	if tok.Text() != "thinking" {
+		t.Fatalf("expected canonical reasoning, got %q", tok.Text())
 	}
 }
 
 func TestBuildGenerateContentConfigMapsCapabilities(t *testing.T) {
-	cfg, err := buildGenerateContentConfig(ai.AIRequest{
-		MaxTokens: 64,
+	cfg, err := buildGenerateContentConfig(ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "")}, MaxTokens: 64,
 		Tools: []ai.ToolDefinition{
 			{
 				Type:        "function",
@@ -386,7 +383,7 @@ func TestBuildGenerateContentConfigRejectsUnsupportedToolChoices(t *testing.T) {
 				Mode:  ai.ToolChoiceAuto,
 				Names: []string{"search"},
 			},
-			wantErr: "Gemini SDK cannot enforce allowed tool names in auto mode",
+			wantErr: "tool choice names require mode",
 		},
 		{
 			name: "none names invalid",
@@ -394,21 +391,20 @@ func TestBuildGenerateContentConfigRejectsUnsupportedToolChoices(t *testing.T) {
 				Mode:  ai.ToolChoiceNone,
 				Names: []string{"search"},
 			},
-			wantErr: "no tools may be called",
+			wantErr: "tool choice names require mode",
 		},
 		{
 			name: "unknown mode",
 			choice: ai.ToolChoice{
 				Mode: "sometimes",
 			},
-			wantErr: `unsupported gemini tool choice mode "sometimes"`,
+			wantErr: `unsupported tool choice mode "sometimes"`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := buildGenerateContentConfig(ai.AIRequest{
-				Tools:      []ai.ToolDefinition{tool},
+			_, err := buildGenerateContentConfig(ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "")}, Tools: []ai.ToolDefinition{tool},
 				ToolChoice: tt.choice,
 			})
 			if err == nil {
@@ -421,8 +417,8 @@ func TestBuildGenerateContentConfigRejectsUnsupportedToolChoices(t *testing.T) {
 	}
 }
 
-func TestMapGenerateContentResponseSeparatesTextReasoningAndToolCalls(t *testing.T) {
-	text, reasoning, toolCalls, err := mapGenerateContentResponse(&genai.GenerateContentResponse{
+func TestCanonicalResponseProjectsTextReasoningAndToolCalls(t *testing.T) {
+	message, err := mapCanonicalResponse(&genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{
 			{
 				Content: &genai.Content{
@@ -436,7 +432,11 @@ func TestMapGenerateContentResponseSeparatesTextReasoningAndToolCalls(t *testing
 		},
 	})
 	if err != nil {
-		t.Fatalf("mapGenerateContentResponse error: %v", err)
+		t.Fatalf("mapCanonicalResponse error: %v", err)
+	}
+	text, reasoning, toolCalls := message.Text(), message.Reasoning(), message.ToolCalls()
+	if len(message.Parts) != 3 {
+		t.Fatalf("message parts = %#v", message.Parts)
 	}
 	if text != "visible" {
 		t.Fatalf("unexpected text: %q", text)

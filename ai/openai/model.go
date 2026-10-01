@@ -42,8 +42,6 @@ var _ ai.ModelDescriber = (*Model)(nil)
 
 func (m *Model) Name() string { return m.name }
 
-func (m *Model) NativeTools() bool { return true }
-
 func (m *Model) Close() error { return nil }
 
 // Tokenizer returns a local tokenizer only when this model has a known encoding.
@@ -64,6 +62,7 @@ func (m *Model) Descriptor() ai.ModelDescriptor {
 }
 
 func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (result *ai.AIResponse, err error) {
+	req = req.Copy()
 	if err := ai.ValidateModelRequest(m, req); err != nil {
 		return nil, err
 	}
@@ -104,11 +103,12 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (result *ai.AIRe
 		generationResult.Usage = &usage
 	}
 	if len(response.Choices) == 0 {
+		result.SetMessage(ai.TextMessage(ai.RoleAssistant, ""))
 		return result, nil
 	}
 	message := response.Choices[0].Message
 	generationResult.FinishReason = response.Choices[0].FinishReason
-	result.Text = message.Content
+	semantic := ai.TextMessage(ai.RoleAssistant, message.Content)
 	for _, call := range message.ToolCalls {
 		args := json.RawMessage(strings.TrimSpace(call.Function.Arguments))
 		if len(args) == 0 {
@@ -117,11 +117,11 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (result *ai.AIRe
 		if !json.Valid(args) {
 			return nil, fmt.Errorf("invalid JSON arguments for tool %q", call.Function.Name)
 		}
-		result.ToolCalls = append(result.ToolCalls, ai.ToolCall{
-			ID: call.ID, Type: "function", Name: call.Function.Name, Args: args,
-		})
+		c := ai.ToolCall{ID: call.ID, Type: "function", Name: call.Function.Name, Args: args, Extensions: chatGoogleExtensions(call.RawJSON())}
+		semantic.Parts = append(semantic.Parts, ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &c})
 	}
-	generationResult.ToolCallCount = len(result.ToolCalls)
+	result.SetMessage(semantic)
+	generationResult.ToolCallCount = len(result.ToolCalls())
 	return result, nil
 }
 
@@ -129,12 +129,13 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 	out := make(chan ai.Token, 1)
 	go func() {
 		defer close(out)
+		req = req.Copy()
 		if err := ai.ValidateModelRequest(m, req); err != nil {
-			ai.SendToken(ctx, out, ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			ai.SendToken(ctx, out, ai.Token{Err: err})
 			return
 		}
 		if err := m.validateTransport(req); err != nil {
-			ai.SendToken(ctx, out, ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			ai.SendToken(ctx, out, ai.Token{Err: err})
 			return
 		}
 		if m.provider.transport == TransportResponses {
@@ -143,7 +144,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		}
 		params, err := m.chatCompletionParams(req, true)
 		if err != nil {
-			ai.SendToken(ctx, out, ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			ai.SendToken(ctx, out, ai.Token{Err: err})
 			return
 		}
 		ctx, observation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "openai", Model: m.name, Streaming: true, Sink: m.provider.debug})
@@ -155,7 +156,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			observation.Finish(generationResult)
 		}()
 		emit := func(token ai.Token) bool {
-			if token.Type == ai.TokenTypeErr && token.Err != nil {
+			if token.Type() == ai.TokenTypeErr && token.Err != nil {
 				streamErr = token.Err
 			}
 			observation.ObserveToken(token)
@@ -198,7 +199,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					completion.Raw = append(completion.Raw[:0], []byte(chunk.RawJSON())...)
 					snapshot := completion
 					snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
-					if !emit(ai.Token{Type: ai.TokenTypeCompletion, Completion: &snapshot}) {
+					if !emit(ai.Token{Completion: &snapshot}) {
 						return
 					}
 				}
@@ -209,7 +210,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				completion.FinishReason = string(choice.FinishReason)
 			}
 			if text := choice.Delta.Content; text != "" {
-				if !emit(ai.Token{Type: ai.TokenTypeText, Data: []byte(text), Text: text}) {
+				if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: text}}) {
 					return
 				}
 			}
@@ -223,6 +224,9 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				call.typ = firstNonEmpty(call.typ, delta.Type)
 				call.name.WriteString(delta.Function.Name)
 				call.arguments.WriteString(delta.Function.Arguments)
+				if extensions := chatGoogleExtensions(delta.RawJSON()); len(extensions) > 0 {
+					call.extensions = extensions
+				}
 			}
 			if choice.FinishReason == "tool_calls" {
 				if !sendStreamToolCalls(emit, calls) {
@@ -232,7 +236,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		}
 		if err := stream.Err(); err != nil {
 			streamErr = classifyProviderError(err)
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: streamErr, Text: streamErr.Error()})
+			emit(ai.Token{Err: streamErr})
 			return
 		}
 		sendStreamToolCalls(emit, calls)
@@ -265,6 +269,7 @@ func openAIHTTPStatus(err error) int {
 }
 
 type streamToolCall struct {
+	extensions          []ai.Extension
 	id, name, arguments strings.Builder
 	typ                 string
 	emitted             bool
@@ -289,11 +294,11 @@ func sendStreamToolCalls(emit func(ai.Token) bool, calls map[int64]*streamToolCa
 		args := call.arguments.String()
 		if !json.Valid([]byte(args)) {
 			err := fmt.Errorf("invalid JSON arguments for tool %q", name)
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			emit(ai.Token{Err: err})
 			return false
 		}
-		toolCall := &ai.ToolCall{ID: call.id.String(), Type: firstNonEmpty(call.typ, "function"), Name: name, Args: json.RawMessage(args)}
-		if !emit(ai.Token{Type: ai.TokenTypeToolCall, Data: []byte(args), ToolCall: toolCall}) {
+		toolCall := &ai.ToolCall{ID: call.id.String(), Type: firstNonEmpty(call.typ, "function"), Name: name, Args: json.RawMessage(args), Extensions: ai.CloneExtensions(call.extensions)}
+		if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: toolCall}}) {
 			return false
 		}
 	}
@@ -301,14 +306,16 @@ func sendStreamToolCalls(emit func(ai.Token) bool, calls map[int64]*streamToolCa
 }
 
 func buildChatCompletionParams(model string, req ai.AIRequest, stream bool) (sdk.ChatCompletionNewParams, error) {
-	params := sdk.ChatCompletionNewParams{Model: shared.ChatModel(model), Messages: []sdk.ChatCompletionMessageParamUnion{sdk.UserMessage(req.Prompt)}}
-	if len(req.Messages) > 0 {
-		messages, err := mapNativeMessages(req.Messages)
-		if err != nil {
-			return sdk.ChatCompletionNewParams{}, err
-		}
-		params.Messages = messages
+	req = req.Copy()
+	err := req.Validate()
+	if err != nil {
+		return sdk.ChatCompletionNewParams{}, err
 	}
+	messages, err := mapNativeMessages(req.Messages)
+	if err != nil {
+		return sdk.ChatCompletionNewParams{}, err
+	}
+	params := sdk.ChatCompletionNewParams{Model: shared.ChatModel(model), Messages: messages}
 	if req.MaxTokens > 0 {
 		params.MaxCompletionTokens = param.NewOpt(int64(req.MaxTokens))
 	}
@@ -331,30 +338,65 @@ func buildChatCompletionParams(model string, req ai.AIRequest, stream bool) (sdk
 	return params, nil
 }
 
-func mapNativeMessages(messages []ai.RequestMessage) ([]sdk.ChatCompletionMessageParamUnion, error) {
+func mapNativeMessages(messages []ai.Message) ([]sdk.ChatCompletionMessageParamUnion, error) {
 	out := make([]sdk.ChatCompletionMessageParamUnion, 0, len(messages))
 	for _, m := range messages {
-		if m.Role == ai.RequestMessageRoleUser {
-			out = append(out, sdk.UserMessage(m.Text))
-			continue
+		if err := m.Validate(); err != nil {
+			return nil, err
 		}
-		if m.Role == ai.RequestMessageRoleTool {
-			content := m.ToolResult.Content
-			if m.ToolResult.IsError {
-				encoded, _ := json.Marshal(map[string]string{"error": content})
-				content = string(encoded)
+		if err := rejectRequiredExtensions(m.Extensions); err != nil {
+			return nil, err
+		}
+		var text strings.Builder
+		var calls []sdk.ChatCompletionMessageToolCallParam
+		for _, part := range m.Parts {
+			if err := rejectRequiredExtensions(part.Extensions); err != nil {
+				return nil, err
 			}
-			out = append(out, sdk.ToolMessage(content, m.ToolResult.ToolCallID))
-			continue
+			switch part.Kind {
+			case ai.ContentText, ai.ContentJSON:
+				if len(calls) > 0 {
+					return nil, fmt.Errorf("%w: OpenAI chat text after tool calls", ai.ErrUnsupportedCapability)
+				}
+				if part.Kind == ai.ContentText {
+					text.WriteString(part.Text)
+				} else {
+					text.Write(part.JSON)
+				}
+			case ai.ContentToolCall:
+				c := part.ToolCall
+				signature, err := chatGoogleSignature(c.Extensions)
+				if err != nil {
+					return nil, err
+				}
+				call := sdk.ChatCompletionMessageToolCallParam{ID: c.ID, Function: sdk.ChatCompletionMessageToolCallFunctionParam{Name: c.Name, Arguments: string(c.Args)}}
+				if len(signature) > 0 {
+					call.SetExtraFields(map[string]any{"extra_content": map[string]any{"google": map[string]any{"thought_signature": signature}}})
+				}
+				calls = append(calls, call)
+			case ai.ContentToolResult:
+				content, err := canonicalResultText(part.ToolResult)
+				if err != nil {
+					return nil, err
+				}
+				out = append(out, sdk.ToolMessage(content, part.ToolResult.ToolCallID))
+			case ai.ContentExtension: // Unsupported required extensions were rejected above.
+			default:
+				return nil, fmt.Errorf("%w: OpenAI chat content %q", ai.ErrUnsupportedCapability, part.Kind)
+			}
 		}
-		a := sdk.ChatCompletionAssistantMessageParam{}
-		if m.Text != "" {
-			a.Content.OfString = param.NewOpt(m.Text)
+		switch m.Role {
+		case ai.RoleSystem:
+			out = append(out, sdk.SystemMessage(text.String()))
+		case ai.RoleUser:
+			out = append(out, sdk.UserMessage(text.String()))
+		case ai.RoleAssistant:
+			a := sdk.ChatCompletionAssistantMessageParam{ToolCalls: calls}
+			if text.Len() > 0 || len(calls) == 0 {
+				a.Content.OfString = param.NewOpt(text.String())
+			}
+			out = append(out, sdk.ChatCompletionMessageParamUnion{OfAssistant: &a})
 		}
-		for _, c := range m.ToolCalls {
-			a.ToolCalls = append(a.ToolCalls, sdk.ChatCompletionMessageToolCallParam{ID: c.ID, Function: sdk.ChatCompletionMessageToolCallFunctionParam{Name: c.Name, Arguments: string(c.Arguments)}})
-		}
-		out = append(out, sdk.ChatCompletionMessageParamUnion{OfAssistant: &a})
 	}
 	return out, nil
 }

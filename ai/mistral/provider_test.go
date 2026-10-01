@@ -87,7 +87,7 @@ func TestProviderCatalogCachesExplicitCapabilitiesForLocalValidation(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := ai.AIRequest{Tools: []ai.ToolDefinition{{
+	req := ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "")}, Tools: []ai.ToolDefinition{{
 		Type: "function", Name: "search", Description: "Search", Parameters: []byte(`{"type":"object"}`),
 	}}}
 	if err := ai.ValidateModelRequest(model, req); !errors.Is(err, ai.ErrUnsupportedCapability) {

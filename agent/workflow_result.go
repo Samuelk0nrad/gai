@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
 )
 
@@ -16,7 +15,7 @@ type AgentResult struct {
 	Reasoning       string
 	AttemptedTokens []ai.Token
 	AttemptedText   string
-	Messages        []gaictx.Message
+	Messages        []ai.Message
 	Iterations      []loop.Iteration
 	Usage           ai.Usage
 	BilledUsage     ai.Usage
@@ -68,11 +67,8 @@ func (w *Workflow) setVisibleOutputLocked(output []OutputPart) {
 func outputPartsFromTokens(tokens []ai.Token) []OutputPart {
 	var output []OutputPart
 	for _, token := range tokens {
-		text := token.Text
-		if text == "" {
-			text = string(token.Data)
-		}
-		switch token.Type {
+		text := token.Text()
+		switch token.Type() {
 		case ai.TokenTypeText:
 			output = append(output, OutputPart{Kind: OutputText, Text: text})
 		case ai.TokenTypeThought:
@@ -87,9 +83,9 @@ func outputPartsToTokens(output []OutputPart) []ai.Token {
 	for _, part := range output {
 		switch part.Kind {
 		case OutputText:
-			tokens = append(tokens, ai.Token{Type: ai.TokenTypeText, Text: part.Text})
+			tokens = append(tokens, ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: part.Text}})
 		case OutputReasoning:
-			tokens = append(tokens, ai.Token{Type: ai.TokenTypeThought, Text: part.Text})
+			tokens = append(tokens, ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: part.Text}})
 		}
 	}
 	return tokens
@@ -126,17 +122,12 @@ func tokenReasoning(tokens []ai.Token) string {
 func iterationTokens(iterations []loop.Iteration) []ai.Token {
 	var tokens []ai.Token
 	for _, iteration := range iterations {
-		for _, part := range iteration.Parts {
-			if part.Response != nil {
-				if part.Response.Reasoning != "" {
-					tokens = append(tokens, ai.Token{Type: ai.TokenTypeThought, Text: part.Response.Reasoning})
-				}
-				if part.Response.Text != "" {
-					tokens = append(tokens, ai.Token{Type: ai.TokenTypeText, Text: part.Response.Text})
-				}
+		for _, message := range iteration.Conversation {
+			if message.Role != ai.RoleAssistant {
+				continue
 			}
-			if part.ToolReq != nil {
-				tokens = append(tokens, ai.Token{Type: ai.TokenTypeToolCall, ToolCall: cloneToolCall(part.ToolReq)})
+			for _, part := range message.Parts {
+				tokens = append(tokens, (ai.Token{Part: &part}).Clone())
 			}
 		}
 	}

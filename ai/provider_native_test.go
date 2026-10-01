@@ -191,15 +191,15 @@ func TestNativeOptionsThroughPortableCalls(t *testing.T) {
 				wg.Add(1)
 				go func(streaming bool) {
 					defer wg.Done()
-					req := ai.AIRequest{Prompt: "hello"}
+					req := ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}
 					if !streaming {
 						result, err := model.(ai.ModelGenerator).Generate(t.Context(), req)
 						if err != nil {
 							t.Error(err)
 							return
 						}
-						if result.Text != "ok" {
-							t.Errorf("text = %q", result.Text)
+						if result.Text() != "ok" {
+							t.Errorf("text = %q", result.Text())
 						}
 						return
 					}
@@ -210,8 +210,8 @@ func TestNativeOptionsThroughPortableCalls(t *testing.T) {
 						}
 						collected.AppendToken(token)
 					}
-					if collected.Text != "ok" {
-						t.Errorf("stream text = %q", collected.Text)
+					if collected.Text() != "ok" {
+						t.Errorf("stream text = %q", collected.Text())
 					}
 				}(i%2 == 0)
 			}
@@ -230,11 +230,11 @@ func TestNativeHookErrorsStopBeforeTransport(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { t.Error("unexpected request"); w.WriteHeader(500) }))
 			defer server.Close()
 			model := configuredNativeModel(t, provider, server.URL, sentinel)
-			if _, err := model.(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "hello"}); !errors.Is(err, sentinel) {
+			if _, err := model.(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}); !errors.Is(err, sentinel) {
 				t.Errorf("error = %v", err)
 			}
 			found := false
-			for token := range model.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
+			for token := range model.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 				if errors.Is(token.Err, sentinel) {
 					found = true
 				}

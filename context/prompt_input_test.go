@@ -2,6 +2,7 @@ package context_test
 
 import (
 	"errors"
+	"github.com/lace-ai/gai/ai"
 	"strings"
 	"testing"
 
@@ -53,14 +54,25 @@ func TestPromptInputCloneOwnsContextSlice(t *testing.T) {
 
 	first, _ := gaictx.NewNamedPart("first", "one")
 	second, _ := gaictx.NewNamedPart("second", "two")
-	input := gaictx.PromptInput{User: gaictx.NewTextContent("hello"), Context: []gaictx.Part{first}}
+	input := gaictx.PromptInput{User: ai.TextParts("hello"), Context: []gaictx.Part{first}}
 	cloned := input.Clone()
 	cloned.Context[0] = second
 
 	if input.Context[0].Name() != "first" {
 		t.Fatalf("clone shared context slice: %+v", input.Context)
 	}
-	if cloned.User.String() != "hello" {
+	if cloned.User[0].Text != "hello" {
 		t.Fatalf("clone lost user content: %+v", cloned)
+	}
+}
+
+func TestPromptInputCloneOwnsCanonicalPayloads(t *testing.T) {
+	t.Parallel()
+	input := gaictx.PromptInput{User: []ai.ContentPart{{Kind: ai.ContentJSON, JSON: []byte(`{"value":1}`)}, {Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: "image/png", Data: []byte{1, 2}}}}}
+	cloned := input.Clone()
+	cloned.User[0].JSON[9] = '2'
+	cloned.User[1].Media.Data[0] = 9
+	if string(input.User[0].JSON) != `{"value":1}` || input.User[1].Media.Data[0] != 1 {
+		t.Fatal("input clone aliases canonical payloads")
 	}
 }

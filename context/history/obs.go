@@ -236,7 +236,7 @@ func (o *historyObserver) SummaryIncluded(ctx context.Context, summary *Summary)
 		"summary_start_count": summary.StartTurnCount,
 		"summary_end_count":   summary.EndTurnCount,
 	}
-	gai.AddObservationContent(ctx, o.debug, fields, "summary_content", gai.ContentKindMemory, summary.Content.String())
+	gai.AddObservationContent(ctx, o.debug, fields, "summary_content", gai.ContentKindMemory, summary.Content.Text)
 	o.emit(ctx, "history_source_summary_included", fields, nil)
 }
 
@@ -252,7 +252,7 @@ func (o *historyObserver) SummaryTokenCountFailed(ctx context.Context, summary *
 		"summary_start_count": summary.StartTurnCount,
 		"summary_end_count":   summary.EndTurnCount,
 	}
-	gai.AddObservationContent(ctx, o.debug, fields, "summary_content", gai.ContentKindMemory, summary.Content.String())
+	gai.AddObservationContent(ctx, o.debug, fields, "summary_content", gai.ContentKindMemory, summary.Content.Text)
 	o.emit(ctx, "history_source_summary_token_count_failed", fields, err)
 }
 
@@ -296,7 +296,7 @@ func (o *historyObserver) BuildFinished(ctx context.Context, part *Part, tokenCo
 	o.includedTurnCount = includedTurnCount
 	o.messageCount = messageCount
 	if part != nil {
-		o.contentCount = len(part.Contents)
+		o.contentCount = len(part.Messages)
 	}
 
 	fields := map[string]any{
@@ -340,7 +340,7 @@ func (o *historyObserver) SummaryGenerated(ctx context.Context, summary *Summary
 		"summary_end_count":      summary.EndTurnCount,
 		"previous_summary_found": previousSummaryFound,
 	}
-	gai.AddObservationContent(ctx, o.debug, fields, "summary_content", gai.ContentKindMemory, summary.Content.String())
+	gai.AddObservationContent(ctx, o.debug, fields, "summary_content", gai.ContentKindMemory, summary.Content.Text)
 	o.emit(ctx, "history_source_summary_generated", fields, nil)
 }
 

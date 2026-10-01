@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/lace-ai/gai"
+	"github.com/lace-ai/gai/ai"
 	"github.com/lace-ai/gai/internal/observe"
 )
 
@@ -154,9 +155,9 @@ func rendererNodeContentKind(nodeType string, inherited gai.ContentKind) gai.Con
 	switch nodeType {
 	case "history":
 		return gai.ContentKindMemory
-	case ContentTypeToolCall:
+	case string(ai.ContentToolCall):
 		return gai.ContentKindToolInput
-	case ContentTypeToolResult, ContentTypeToolResultErr, string(RoleTool):
+	case string(ai.ContentToolResult), string(ai.RoleTool):
 		return gai.ContentKindToolOutput
 	default:
 		return inherited
