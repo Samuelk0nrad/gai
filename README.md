@@ -340,10 +340,6 @@ Use `history.NewHistory(sessionID, store)` for budgeted history selection. Use `
 
 ## Structured output and direct model calls
 
-See [portable and native provider access](docs/provider-boundary.md) for typed model
-options, SDK clients, Mistral native HTTP, and the pre-v1 descriptor migration.
-
-
 Call a model directly when no agent loop is needed or when you want provider-native request controls. Synchronous calls require the optional `ai.ModelGenerator` capability:
 
 ```go
