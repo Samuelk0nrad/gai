@@ -131,22 +131,7 @@ func iterationTokens(iterations []loop.Iteration) []ai.Token {
 				continue
 			}
 			for _, part := range message.Parts {
-				p := ai.CloneParts([]ai.ContentPart{part})[0]
-				token := ai.Token{Part: &p}
-				switch p.Kind {
-				case ai.ContentText:
-					token.Type = ai.TokenTypeText
-					token.Text = p.Text
-				case ai.ContentReasoning:
-					token.Type = ai.TokenTypeThought
-					token.Text = p.Text
-				case ai.ContentToolCall:
-					token.Type = ai.TokenTypeToolCall
-					token.ToolCall = cloneToolCall(p.ToolCall)
-				default:
-					token.Type = ai.TokenTypePart
-				}
-				tokens = append(tokens, token)
+				tokens = append(tokens, (ai.Token{Part: &part}).Normalized())
 			}
 		}
 	}

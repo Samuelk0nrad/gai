@@ -1759,20 +1759,28 @@ func TestLoopAppendsIterationMessagesToIncrementalPrompt(t *testing.T) {
 	if len(requests) != 2 {
 		t.Fatalf("expected 2 model requests, got %d", len(requests))
 	}
-	if !strings.Contains(requests[0].Prompt, "System prompt") {
-		t.Fatalf("expected system prompt in first request: %q", requests[0].Prompt)
+	firstPrompt, err := ai.RenderMessages(t.Context(), requests[0].Messages)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(requests[0].Prompt, "build-1") || !strings.Contains(requests[1].Prompt, "build-1") {
-		t.Fatalf("expected dynamic context to be reused: first=%q second=%q", requests[0].Prompt, requests[1].Prompt)
+	secondPrompt, err := ai.RenderMessages(t.Context(), requests[1].Messages)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(requests[0].Prompt, "Initial prompt") {
-		t.Fatalf("expected user prompt in first request: %q", requests[0].Prompt)
+	if !strings.Contains(firstPrompt, "System prompt") {
+		t.Fatalf("expected system prompt in first request: %q", firstPrompt)
 	}
-	if strings.Contains(requests[0].Prompt, "payload") {
-		t.Fatalf("first request should not contain future tool delta: %q", requests[0].Prompt)
+	if !strings.Contains(firstPrompt, "build-1") || !strings.Contains(secondPrompt, "build-1") {
+		t.Fatalf("expected dynamic context to be reused: first=%q second=%q", firstPrompt, secondPrompt)
 	}
-	if !strings.Contains(requests[1].Prompt, "payload") {
-		t.Fatalf("second request should include appended tool delta: %q", requests[1].Prompt)
+	if !strings.Contains(firstPrompt, "Initial prompt") {
+		t.Fatalf("expected user prompt in first request: %q", firstPrompt)
+	}
+	if strings.Contains(firstPrompt, "payload") {
+		t.Fatalf("first request should not contain future tool delta: %q", firstPrompt)
+	}
+	if !strings.Contains(secondPrompt, "payload") {
+		t.Fatalf("second request should include appended tool delta: %q", secondPrompt)
 	}
 	if len(l.Iterations) != 2 {
 		t.Fatalf("expected 2 stored iterations, got %d", len(l.Iterations))
@@ -1822,12 +1830,10 @@ func TestLoopFallsBackToBuildPromptEveryIteration(t *testing.T) {
 	if len(requests) != 2 {
 		t.Fatalf("expected 2 model requests, got %d", len(requests))
 	}
-	if requests[0].Prompt != "prompt-1" || requests[1].Prompt != "prompt-2" {
-		t.Fatalf("expected rebuilt prompts, got first=%q second=%q", requests[0].Prompt, requests[1].Prompt)
-	}
 	for index, request := range requests {
-		if len(request.Messages) != 1 || request.Messages[0].Text() != request.Prompt {
-			t.Fatalf("request %d canonical input differs from builder text: %#v", index, request)
+		want := fmt.Sprintf("prompt-%d", index+1)
+		if len(request.Messages) != 1 || request.Messages[0].Text() != want || request.Prompt != "" {
+			t.Fatalf("request %d did not retain normalized builder text %q: %#v", index, want, request)
 		}
 		if len(request.Tools) != 1 {
 			t.Fatalf("request %d expected 1 tool definition, got %d", index, len(request.Tools))

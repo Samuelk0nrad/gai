@@ -35,6 +35,7 @@ func (p *Part) ConversationMessages() []ai.Message {
 				continue
 			}
 			remaining := historyToolResultPreviewRunes
+			markerAdded := false
 			for ri := range part.ToolResult.Parts {
 				result := &part.ToolResult.Parts[ri]
 				// Only plain text can safely be truncated. JSON and provider
@@ -42,10 +43,15 @@ func (p *Part) ConversationMessages() []ai.Message {
 				if result.Kind != ai.ContentText || len(result.Extensions) > 0 {
 					continue
 				}
+				if markerAdded {
+					result.Text = ""
+					continue
+				}
 				runes := []rune(result.Text)
 				if len(runes) > remaining {
 					result.Text = string(runes[:remaining]) + "\n[tool result truncated]"
 					remaining = 0
+					markerAdded = true
 				} else {
 					remaining -= len(runes)
 				}

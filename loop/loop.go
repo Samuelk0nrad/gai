@@ -204,6 +204,12 @@ func (l *Loop) buildAttemptRequest(ctx context.Context, toolDefinitions []ai.Too
 	request.ToolChoice = toolChoice
 	request.ResponseFormat = l.ResponseFormat
 	request.Reasoning = l.Reasoning
+	// Apply execution settings before validating and lifting legacy prompt input.
+	// Both transports consume the same authoritative message snapshot.
+	request, err = request.Normalized()
+	if err != nil {
+		return ai.AIRequest{}, err
+	}
 	if l.ToolTransport == ToolTransportText {
 		request.Prompt, err = ai.RenderMessages(ctx, request.Messages)
 		if err != nil {

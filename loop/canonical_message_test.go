@@ -36,7 +36,7 @@ func TestLoopCanonicalJSONPartCannotExecuteStaleLegacyToolCall(t *testing.T) {
 		if event.Type == loop.EventToolStart || event.Type == loop.EventToolResult {
 			t.Fatalf("unexpected tool event: %#v", event)
 		}
-		if event.Token != nil && (event.Token.ToolCall != nil || event.Token.Text != "" || len(event.Token.Data) != 0 || event.Token.Type != ai.TokenTypePart) {
+		if event.Token != nil && (event.Token.ToolCall != nil || event.Token.Text != `{"ok":true}` || len(event.Token.Data) != 0 || event.Token.Type != ai.TokenTypeText) {
 			t.Fatalf("stale compatibility fields escaped: %#v", event.Token)
 		}
 	}

@@ -228,6 +228,9 @@ func (t Token) Normalized() Token {
 	case ContentText:
 		t.Type = TokenTypeText
 		t.Text = t.Part.Text
+	case ContentJSON:
+		t.Type = TokenTypeText
+		t.Text = string(t.Part.JSON)
 	case ContentReasoning:
 		t.Type = TokenTypeThought
 		t.Text = t.Part.Text

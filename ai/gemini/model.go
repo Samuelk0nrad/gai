@@ -489,7 +489,14 @@ func nativeContents(req ai.AIRequest) ([]*genai.Content, error) {
 		}
 		parts := make([]*genai.Part, 0, len(m.Parts))
 		for _, part := range m.Parts {
-			signature, err := geminiSignature(part.Extensions)
+			var signature []byte
+			if part.Kind == ai.ContentToolResult {
+				// Continuity signatures have no representation on function results.
+				// Ignore optional metadata and reject required state in this scope.
+				err = rejectRequiredGeminiExtensions(part.Extensions)
+			} else {
+				signature, err = geminiSignature(part.Extensions)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -518,23 +525,19 @@ func nativeContents(req ai.AIRequest) ([]*genai.Content, error) {
 				}
 				parts = append(parts, &genai.Part{FunctionCall: &genai.FunctionCall{ID: c.ID, Name: c.Name, Args: args}, ThoughtSignature: callSignature})
 			case ai.ContentToolResult:
-				if len(signature) > 0 {
-					return nil, fmt.Errorf("%w: Gemini tool-result signature", ai.ErrUnsupportedCapability)
-				}
 				r := part.ToolResult
 				var text strings.Builder
 				for _, resultPart := range r.Parts {
-					if _, err := geminiSignature(resultPart.Extensions); err != nil {
+					if err := rejectRequiredGeminiExtensions(resultPart.Extensions); err != nil {
 						return nil, err
-					}
-					if len(resultPart.Extensions) != 0 {
-						return nil, fmt.Errorf("%w: Gemini result signatures", ai.ErrUnsupportedCapability)
 					}
 					switch resultPart.Kind {
 					case ai.ContentText:
 						text.WriteString(resultPart.Text)
 					case ai.ContentJSON:
 						text.Write(resultPart.JSON)
+					case ai.ContentExtension:
+						// Optional metadata has no model-visible content.
 					default:
 						return nil, fmt.Errorf("%w: Gemini result %q", ai.ErrUnsupportedCapability, resultPart.Kind)
 					}
@@ -606,26 +609,30 @@ func buildGenerateContentConfig(req ai.AIRequest) (*genai.GenerateContentConfig,
 		if message.Role != ai.RoleSystem {
 			continue
 		}
-		if len(message.Extensions) != 0 {
-			return nil, fmt.Errorf("%w: Gemini system extensions", ai.ErrUnsupportedCapability)
-		}
-		system := ensureConfig().SystemInstruction
-		if system == nil {
-			system = &genai.Content{}
-			ensureConfig().SystemInstruction = system
+		if err := rejectRequiredGeminiExtensions(message.Extensions); err != nil {
+			return nil, err
 		}
 		for _, part := range message.Parts {
-			if len(part.Extensions) > 0 {
-				return nil, fmt.Errorf("%w: Gemini system part extensions", ai.ErrUnsupportedCapability)
+			if err := rejectRequiredGeminiExtensions(part.Extensions); err != nil {
+				return nil, err
 			}
+			var text string
 			switch part.Kind {
 			case ai.ContentText:
-				system.Parts = append(system.Parts, &genai.Part{Text: part.Text})
+				text = part.Text
 			case ai.ContentJSON:
-				system.Parts = append(system.Parts, &genai.Part{Text: string(part.JSON)})
+				text = string(part.JSON)
+			case ai.ContentExtension:
+				continue
 			default:
 				return nil, fmt.Errorf("%w: Gemini system content %q", ai.ErrUnsupportedCapability, part.Kind)
 			}
+			system := ensureConfig().SystemInstruction
+			if system == nil {
+				system = &genai.Content{}
+				ensureConfig().SystemInstruction = system
+			}
+			system.Parts = append(system.Parts, &genai.Part{Text: text})
 		}
 	}
 	if req.MaxTokens > 0 {
