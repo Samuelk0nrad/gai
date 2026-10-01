@@ -13,6 +13,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
+	"github.com/lace-ai/gai/internal/modelcatalog"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -23,9 +24,10 @@ const (
 )
 
 type Model struct {
-	name   string
-	client *Provider
-	debug  gai.ObservationSink
+	name         string
+	client       *Provider
+	debug        gai.ObservationSink
+	messageHooks []func(*antropic.MessageNewParams) error
 }
 
 var _ ai.Model = (*Model)(nil)
@@ -53,13 +55,11 @@ func (m *Model) Descriptor() ai.ModelDescriptor {
 func anthropicAdapterDescriptor(model string) ai.ModelDescriptor {
 	return ai.ModelDescriptor{Model: model, NativeMessages: ai.FeatureSupportSupported, NativeTools: ai.FeatureSupportSupported,
 		ToolChoiceModes: []ai.ToolChoiceMode{ai.ToolChoiceAuto, ai.ToolChoiceNone, ai.ToolChoiceRequired},
-		Multimodal:      ai.FeatureSupportUnsupported,
 		Usage:           ai.FeatureSupportSupported, FinishReason: ai.FeatureSupportSupported, StreamingUsage: ai.FeatureSupportSupported,
-		ToolCalling: ai.FeatureSupportSupported,
-		JSONOutput:  ai.FeatureSupportUnsupported, JSONSchemaOutput: ai.FeatureSupportSupported,
+		JSONOutput: ai.FeatureSupportUnsupported, JSONSchemaOutput: ai.FeatureSupportSupported,
 		Reasoning: ai.FeatureSupportSupported, ReasoningEffort: ai.FeatureSupportSupported,
 		ReasoningEfforts: []ai.ReasoningEffort{ai.ReasoningEffortLow, ai.ReasoningEffortMedium, ai.ReasoningEffortHigh},
-		Tokenizer:        ai.TokenizerDescriptor{Available: ai.FeatureSupportSupported, Fidelity: ai.TokenizerFidelityEstimated}}
+	}
 }
 
 func anthropicLocalFacts(model string) ai.ModelDescriptor {
@@ -85,9 +85,9 @@ func anthropicProviderDefaults(model string) ai.ModelDescriptor {
 func effectiveAnthropicDescriptor(model string, catalog ai.ModelDescriptor) ai.ModelDescriptor {
 	adapter := anthropicAdapterDescriptor(model)
 	facts := anthropicProviderDefaults(model)
-	facts = ai.OverrideModelDescriptor(facts, anthropicLocalFacts(model))
-	facts = ai.OverrideModelDescriptor(facts, catalog)
-	return ai.IntersectModelDescriptors(adapter, facts)
+	facts = modelcatalog.OverrideModelDescriptor(facts, anthropicLocalFacts(model))
+	facts = modelcatalog.OverrideModelDescriptor(facts, catalog)
+	return modelcatalog.IntersectModelDescriptors(adapter, facts)
 }
 
 // sdkClient is deliberately created from the provider's fields for each call.
@@ -292,7 +292,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	if err := ai.ValidateModelRequest(m, req); err != nil {
 		return nil, err
 	}
-	payload, err := buildMessagesRequest(req, m.Descriptor())
+	payload, err := m.messageParams(req)
 	if err != nil {
 		return nil, err
 	}
@@ -422,7 +422,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
 			return
 		}
-		payload, err := buildMessagesRequest(req, m.Descriptor())
+		payload, err := m.messageParams(req)
 		if err != nil {
 			streamErr = err
 			emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})

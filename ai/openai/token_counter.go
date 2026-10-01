@@ -4,14 +4,14 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/lace-ai/gai/internal/syncutil"
 	tiktoken "github.com/tiktoken-go/tokenizer"
 )
 
 const tokenCountBlockRunes = 10000
 
 type tokenCodecCache struct {
-	mu    ai.ContextMutex
+	mu    syncutil.ContextMutex
 	codec tiktoken.Codec
 }
 

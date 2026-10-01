@@ -8,6 +8,21 @@
 // Provider-specific implementations live in subpackages such as anthropic,
 // gemini, mistral, and openai.
 //
+// # Portable and native capabilities
+//
+// The shared request supports portable messages, function tools, response formats,
+// reasoning, and normalized output/usage. Concrete provider packages expose
+// TypedModel constructors and typed request options; OpenAI, Anthropic, and Gemini
+// also expose configured SDKClient access for full native request/response types.
+// Mistral exposes a NativeClient HTTP escape hatch. Native calls do not pass
+// through GAI preflight, normalization, observations, or loop retry policies.
+//
+// ModelDescriptor describes portable adapter capabilities, not a native feature
+// catalog. Unknown facts do not reject requests. NativeTools covers definitions
+// and tool history. Token counting fidelity belongs to TokenCounter. Catalog
+// caches, descriptor merging, and discovery locks are internal implementation
+// details; ModelRepository remains an optional public application utility.
+//
 // # Local text counting
 //
 // TokenCounter is the runtime's count-only, local capability. Its ID includes an

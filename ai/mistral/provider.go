@@ -10,6 +10,8 @@ import (
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
+	"github.com/lace-ai/gai/internal/modelcatalog"
+	"github.com/lace-ai/gai/internal/syncutil"
 )
 
 const modelDiscoveryTimeout = 10 * time.Second
@@ -19,15 +21,15 @@ type Provider struct {
 	baseURL    string
 	httpClient *http.Client
 	debug      gai.ObservationSink
-	catalog    ai.ModelCatalogCache
-	catalogMu  ai.ContextMutex
+	catalog    modelcatalog.ModelCatalogCache
+	catalogMu  syncutil.ContextMutex
 }
 
 var _ ai.Provider = (*Provider)(nil)
 var _ ai.ModelCatalogProvider = (*Provider)(nil)
 
-func New(apiKey string, debug gai.ObservationSink) *Provider {
-	return &Provider{
+func New(apiKey string, debug gai.ObservationSink, options ...Option) *Provider {
+	p := &Provider{
 		apiKey:  apiKey,
 		baseURL: "https://api.mistral.ai",
 		httpClient: &http.Client{
@@ -35,6 +37,12 @@ func New(apiKey string, debug gai.ObservationSink) *Provider {
 		},
 		debug: debug,
 	}
+	for _, option := range options {
+		if option != nil {
+			option(p)
+		}
+	}
+	return p
 }
 
 func (p *Provider) Validate() error {
@@ -52,6 +60,16 @@ func (p *Provider) Name() string {
 }
 
 func (p *Provider) Model(name string) (ai.Model, error) {
+	model, err := p.TypedModel(name)
+	if err != nil {
+		return nil, err
+	}
+	return model, nil
+}
+
+// TypedModel resolves a concrete model without discovery. Options are applied
+// once at construction; configured models may be shared between runs.
+func (p *Provider) TypedModel(name string, options ...ModelOption) (*Model, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
@@ -60,11 +78,17 @@ func (p *Provider) Model(name string) (ai.Model, error) {
 	if modelName == "" {
 		return nil, ai.ErrModelNotFound
 	}
-	return &Model{
+	model := &Model{
 		name:   modelName,
 		client: p,
 		debug:  p.debug,
-	}, nil
+	}
+	for _, option := range options {
+		if option != nil {
+			option(model)
+		}
+	}
+	return model, nil
 }
 
 func (p *Provider) ListModels() ([]string, error) {
@@ -129,7 +153,6 @@ func (p *Provider) listModelCatalog(ctx context.Context) ([]ai.ModelDescriptor, 
 			Capabilities struct {
 				CompletionChat  *bool `json:"completion_chat"`
 				FunctionCalling *bool `json:"function_calling"`
-				Vision          *bool `json:"vision"`
 			} `json:"capabilities"`
 		} `json:"data"`
 	}
@@ -145,11 +168,7 @@ func (p *Provider) listModelCatalog(ctx context.Context) ([]ai.ModelDescriptor, 
 		}
 		facts := ai.ModelDescriptor{Model: name}
 		if model.Capabilities.FunctionCalling != nil {
-			facts.ToolCalling = featureSupport(*model.Capabilities.FunctionCalling)
-			facts.NativeTools = facts.ToolCalling
-		}
-		if model.Capabilities.Vision != nil {
-			facts.Multimodal = featureSupport(*model.Capabilities.Vision)
+			facts.NativeTools = featureSupport(*model.Capabilities.FunctionCalling)
 		}
 		descriptors = append(descriptors, facts)
 	}
@@ -174,7 +193,7 @@ func (p *Provider) effectiveDescriptors(facts []ai.ModelDescriptor) []ai.ModelDe
 
 func effectiveMistralDescriptor(model string, catalog ai.ModelDescriptor) ai.ModelDescriptor {
 	adapter := mistralAdapterDescriptor(model)
-	return ai.IntersectModelDescriptors(adapter, ai.OverrideModelDescriptor(adapter, catalog))
+	return modelcatalog.IntersectModelDescriptors(adapter, modelcatalog.OverrideModelDescriptor(adapter, catalog))
 }
 
 func featureSupport(supported bool) ai.FeatureSupport {

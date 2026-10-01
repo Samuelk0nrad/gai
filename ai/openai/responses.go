@@ -14,7 +14,7 @@ import (
 )
 
 func (m *Model) generateResponses(ctx context.Context, req ai.AIRequest) (result *ai.AIResponse, err error) {
-	params, err := buildResponsesParams(m.name, req)
+	params, err := m.responsesParams(req)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +57,7 @@ func (m *Model) generateResponses(ctx context.Context, req ai.AIRequest) (result
 }
 
 func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token, req ai.AIRequest) {
-	params, err := buildResponsesParams(m.name, req)
+	params, err := m.responsesParams(req)
 	if err != nil {
 		ai.SendToken(ctx, out, ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
 		return
