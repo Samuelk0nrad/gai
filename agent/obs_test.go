@@ -51,7 +51,7 @@ func TestAgentWorkflowEmitsLifecycleEventsAndSpans(t *testing.T) {
 
 	workflow, err := primary.NewRun(t.Context(), agent.RunInput{
 		ID:     "run-1",
-		Prompt: gaictx.PromptInput{User: gaictx.NewTextContent("question")},
+		Prompt: gaictx.PromptInput{User: ai.TextParts("question")},
 		Meta:   map[string]any{"session_id": "session-1"},
 	})
 	if err != nil {
@@ -116,7 +116,7 @@ func TestAgentRunSpanIsParentOfWorkflow(t *testing.T) {
 			return &testPromptBuilder{}, nil
 		},
 	})
-	workflow, err := a.NewRun(t.Context(), agent.RunInput{ID: "run-42", Prompt: gaictx.PromptInput{User: gaictx.NewTextContent("question")}, Meta: map[string]any{"session_id": "session-1"}})
+	workflow, err := a.NewRun(t.Context(), agent.RunInput{ID: "run-42", Prompt: gaictx.PromptInput{User: ai.TextParts("question")}, Meta: map[string]any{"session_id": "session-1"}})
 	if err != nil {
 		t.Fatalf("NewRun failed: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestAgentContentCapturePolicySeparatesPromptCompletionAndReasoning(t *testi
 			return []byte(strings.ReplaceAll(string(value), "secret", "[redacted]")), nil
 		},
 	})
-	workflow, err := a.NewRun(ctx, agent.RunInput{Prompt: gaictx.PromptInput{User: gaictx.NewTextContent("question-secret")}})
+	workflow, err := a.NewRun(ctx, agent.RunInput{Prompt: gaictx.PromptInput{User: ai.TextParts("question-secret")}})
 	if err != nil {
 		t.Fatalf("NewRun failed: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestTraceContextPropagatesAcrossRetriesToolsAndNestedMiddleware(t *testing.
 	workflow, err := primary.NewRun(t.Context(), agent.RunInput{
 		ID:           "run-1",
 		TraceContext: traceContext,
-		Prompt:       gaictx.PromptInput{User: gaictx.NewTextContent("question")},
+		Prompt:       gaictx.PromptInput{User: ai.TextParts("question")},
 		Meta:         map[string]any{"private": "meta-secret"},
 	})
 	if err != nil {
@@ -421,7 +421,7 @@ func TestTraceContextSurvivesCanceledRunEventsContext(t *testing.T) {
 	})
 	workflow, err := a.NewRun(t.Context(), agent.RunInput{
 		TraceContext: &gai.TraceContext{UserID: "canceled-user"},
-		Prompt:       gaictx.PromptInput{User: gaictx.NewTextContent("question")},
+		Prompt:       gaictx.PromptInput{User: ai.TextParts("question")},
 	})
 	if err != nil {
 		t.Fatalf("NewRun failed: %v", err)

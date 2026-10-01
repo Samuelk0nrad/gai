@@ -47,7 +47,7 @@ func TestRendererEmitsToOTelWithoutSink(t *testing.T) {
 	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{Prompt: gai.CaptureEnabled})
 	ctx, span := provider.Tracer("renderer-test").Start(ctx, "render")
 	_, err := (gaictx.SimpleRenderer{}).Render(ctx, []gaictx.Part{
-		gaictx.NewMessagePart(gaictx.RoleUser, gaictx.NewTextContent("allowed prompt")),
+		gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("allowed prompt")}),
 	})
 	span.End()
 	if err != nil {
@@ -156,16 +156,30 @@ func TestSimpleRendererRendersInstructionsHistoryAndConversation(t *testing.T) {
 			},
 		}),
 		&historyPartAdapter{
-			contents: []gaictx.Message{
-				{Role: gaictx.RoleUser, Content: gaictx.NewTextContent("hi <there> & \"quoted\"")},
-				{Role: gaictx.RoleAssistant, Content: gaictx.NewToolCallContent("search", `{"q":"lace<&>"}`)},
-				{Role: gaictx.RoleTool, Content: gaictx.NewToolResultContent("search", `found <docs> & "notes"`, false, "")},
-				{Role: gaictx.RoleAssistant, Content: gaictx.NewTextContent("done")},
+			contents: []ai.Message{
+				{Role: gaictx.RoleUser, Parts: ai.TextParts("hi <there> & \"quoted\"")},
+				{Role: gaictx.RoleAssistant, Parts: []ai.ContentPart{
+					{Kind: ai.ContentToolCall,
+						ToolCall: &ai.ToolCall{ID: "call_search",
+							Type: "function", Name: "search", Args: []byte(`{"q":"lace<&>"}`)}}},
+				},
+				{Role: gaictx.RoleTool, Parts: []ai.ContentPart{
+					{Kind: ai.ContentToolResult,
+						ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "search", Parts: ai.TextParts(`found <docs> & "notes"`)}}},
+				},
+				{Role: gaictx.RoleAssistant, Parts: ai.TextParts("done")},
 			},
 		},
-		gaictx.NewMessagePart(gaictx.RoleUser, gaictx.NewTextContent("find docs")),
-		gaictx.NewMessagePart(gaictx.RoleAssistant, gaictx.NewToolCallContent("search", `{"q":"lace"}`)),
-		gaictx.NewMessagePart(gaictx.RoleTool, gaictx.NewToolResultContent("search", "found <docs>", false, "")),
+		gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("find docs")}),
+		gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleAssistant, Parts: []ai.ContentPart{
+			{Kind: ai.ContentToolCall,
+				ToolCall: &ai.ToolCall{ID: "call_search",
+					Type: "function", Name: "search", Args: []byte(`{"q":"lace"}`)}}}},
+		),
+		gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleTool, Parts: []ai.ContentPart{
+			{Kind: ai.ContentToolResult,
+				ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "search", Parts: ai.TextParts("found <docs>")}}}},
+		),
 	})
 	if err != nil {
 		t.Fatalf("Render failed: %v", err)
@@ -265,8 +279,8 @@ func TestRenderersEmitDetailedTruncatedObservations(t *testing.T) {
 			sink := &rendererObservationSink{}
 			ctx := gai.WithContentCapturePolicy(context.Background(), gai.ContentCapturePolicy{Prompt: gai.CaptureEnabled, Completion: gai.CaptureEnabled})
 			_, err := tt.renderer(sink).Render(ctx, []gaictx.Part{
-				gaictx.NewMessagePart(gaictx.RoleUser, gaictx.NewTextContent("first long message")),
-				gaictx.NewMessagePart(gaictx.RoleAssistant, gaictx.NewTextContent("second long response")),
+				gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("first long message")}),
+				gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleAssistant, Parts: ai.TextParts("second long response")}),
 			})
 			if err != nil {
 				t.Fatalf("Render failed: %v", err)
@@ -321,7 +335,7 @@ func TestRendererObservationsSnapshotNestedFieldsAcrossEvents(t *testing.T) {
 	sink := &rendererObservationSink{}
 	ctx := gai.WithContentCapturePolicy(context.Background(), gai.ContentCapturePolicy{Prompt: gai.CaptureEnabled})
 	_, err := (&gaictx.SimpleRenderer{ObservationSink: sink}).Render(ctx, []gaictx.Part{
-		gaictx.NewMessagePart(gaictx.RoleUser, gaictx.NewTextContent("first message")),
+		gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("first message")}),
 	})
 	if err != nil {
 		t.Fatalf("Render failed: %v", err)
@@ -369,7 +383,7 @@ func TestRendererDebugStructureOmitsContentForNonSensitiveSink(t *testing.T) {
 
 	sink := &rendererObservationSink{}
 	_, err := (gaictx.SimpleRenderer{ObservationSink: sink}).Render(context.Background(), []gaictx.Part{
-		gaictx.NewMessagePart(gaictx.RoleUser, gaictx.NewTextContent("secret prompt content")),
+		gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("secret prompt content")}),
 	})
 	if err != nil {
 		t.Fatalf("Render failed: %v", err)
@@ -563,7 +577,7 @@ func TestRenderersNotifyRenderResultCallback(t *testing.T) {
 			t.Parallel()
 
 			parts := []gaictx.Part{
-				gaictx.NewMessagePart(gaictx.RoleUser, gaictx.NewTextContent("hello")),
+				gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("hello")}),
 			}
 			returned := false
 			calls := 0
@@ -665,7 +679,7 @@ func (p failingRenderPart) Render(ctx context.Context) (gaictx.RenderNode, error
 }
 
 type historyPartAdapter struct {
-	contents []gaictx.Message
+	contents []ai.Message
 }
 
 func (p *historyPartAdapter) Name() string {
@@ -679,7 +693,7 @@ func (p *historyPartAdapter) Tokens(ctx context.Context, counter ai.TokenCounter
 func (p *historyPartAdapter) Render(ctx context.Context) (gaictx.RenderNode, error) {
 	node := gaictx.RenderNode{Type: "history"}
 	for _, message := range p.contents {
-		part := gaictx.NewMessagePart(message.Role, message.Content)
+		part := gaictx.NewMessagePart(message)
 		child, err := part.Render(ctx)
 		if err != nil {
 			return gaictx.RenderNode{}, err

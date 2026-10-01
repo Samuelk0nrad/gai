@@ -10,111 +10,61 @@ import (
 
 const historyToolResultPreviewRunes = 500
 
-// Content is a minimal persisted history message representation.
-type Content struct {
-	Text  string
-	Role  gaictx.Role
-	Value gaictx.Content `json:"-"`
-}
-
-func (c Content) String() string {
-	if c.Value != nil {
-		return c.Value.String()
-	}
-	return c.Text
-}
-
-func (c Content) Type() string {
-	if c.Value != nil {
-		return c.Value.Type()
-	}
-	return gaictx.ContentTypeText
-}
-
-func (c Content) Marshal() ([]byte, error) {
-	return json.Marshal(c)
-}
-
-func (c Content) Render(ctx context.Context) (gaictx.RenderNode, error) {
-	if c.Value != nil {
-		return c.Value.Render(ctx)
-	}
-	return gaictx.RenderNode{Type: gaictx.ContentTypeText, Value: c.Text}, nil
-}
-
-func MapMessageToContent(msg gaictx.Message) Content {
-	if msg.Content == nil {
-		return Content{Role: msg.Role}
-	}
-	return Content{
-		Text:  msg.Content.String(),
-		Role:  msg.Role,
-		Value: msg.Content,
-	}
-}
-
-// Part is the rendered prompt part emitted by HistorySource.
+// Part is the selected canonical history emitted by HistorySource. The shared
+// projection applies the tool-result preview before either native mapping or
+// fallback rendering, so both transports consume exactly the same content.
 type Part struct {
-	Contents   []Content
+	Messages   []ai.Message
 	TokenCount map[string]int
 }
 
-func (p *Part) Name() string {
-	return "history"
+func (p *Part) Name() string { return "history" }
+
+func (p *Part) ConversationMessages() []ai.Message {
+	if p == nil {
+		return nil
+	}
+	messages := ai.CloneMessages(p.Messages)
+	for mi := range messages {
+		if len(messages[mi].Extensions) > 0 {
+			continue
+		}
+		for pi := range messages[mi].Parts {
+			part := &messages[mi].Parts[pi]
+			if part.ToolResult == nil || part.ToolResult.IsError || len(part.Extensions) > 0 {
+				continue
+			}
+			remaining := historyToolResultPreviewRunes
+			for ri := range part.ToolResult.Parts {
+				result := &part.ToolResult.Parts[ri]
+				// Only plain text can safely be truncated. JSON and provider
+				// data must remain complete and valid.
+				if result.Kind != ai.ContentText || len(result.Extensions) > 0 {
+					continue
+				}
+				runes := []rune(result.Text)
+				if len(runes) > remaining {
+					result.Text = string(runes[:remaining]) + "\n[tool result truncated]"
+					remaining = 0
+				} else {
+					remaining -= len(runes)
+				}
+			}
+		}
+	}
+	return messages
 }
 
 func (p *Part) Render(ctx context.Context) (gaictx.RenderNode, error) {
 	node := gaictx.RenderNode{Type: "history"}
-	if p == nil || len(p.Contents) == 0 {
-		return node, nil
-	}
-
-	for _, content := range p.Contents {
-		child, err := content.Render(ctx)
+	for _, message := range p.ConversationMessages() {
+		child, err := gaictx.NewMessagePart(message).Render(ctx)
 		if err != nil {
 			return gaictx.RenderNode{}, err
 		}
-		if content.Type() == gaictx.ContentTypeToolResult {
-			truncateToolResult(&child)
-		}
-		if content.Role == "summary" {
-			node.Children = append(node.Children, wrapContentNode("summary", child))
-			continue
-		}
-		node.Children = append(node.Children, wrapContentNode(roleRenderType(content.Role), child))
+		node.Children = append(node.Children, child)
 	}
 	return node, nil
-}
-
-func truncateToolResult(node *gaictx.RenderNode) {
-	for index := range node.Children {
-		if node.Children[index].Type != "result" {
-			continue
-		}
-		runes := []rune(node.Children[index].Value)
-		if len(runes) <= historyToolResultPreviewRunes {
-			return
-		}
-		node.Children[index].Value = string(runes[:historyToolResultPreviewRunes]) + "\n[tool result truncated]"
-		return
-	}
-}
-
-func wrapContentNode(nodeType string, child gaictx.RenderNode) gaictx.RenderNode {
-	node := gaictx.RenderNode{Type: nodeType}
-	if child.Type == gaictx.ContentTypeText && len(child.Fields) == 0 && len(child.Children) == 0 {
-		node.Value = child.Value
-		return node
-	}
-	node.Children = []gaictx.RenderNode{child}
-	return node
-}
-
-func roleRenderType(role gaictx.Role) string {
-	if gaictx.IsValidRole(role) {
-		return string(role)
-	}
-	return "message"
 }
 
 func (p *Part) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
@@ -127,10 +77,17 @@ func (p *Part) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error)
 	} else if ok {
 		delete(p.TokenCount, counterID)
 	}
-
 	count := 0
-	for _, content := range p.Contents {
-		tokens, err := counter.CountTokens(ctx, content.String())
+	for _, message := range p.ConversationMessages() {
+		text := message.Text()
+		if len(message.Parts) != 1 || message.Parts[0].Kind != ai.ContentText || len(message.Extensions) > 0 || len(message.Parts[0].Extensions) > 0 {
+			encoded, err := json.Marshal(message)
+			if err != nil {
+				return 0, err
+			}
+			text = string(encoded)
+		}
+		tokens, err := counter.CountTokens(ctx, text)
 		if err != nil {
 			return 0, err
 		}

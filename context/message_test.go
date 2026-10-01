@@ -3,6 +3,7 @@ package context_test
 import (
 	"context"
 	"errors"
+	"github.com/lace-ai/gai/ai"
 	"testing"
 
 	"github.com/lace-ai/gai"
@@ -38,8 +39,8 @@ func TestTurnTokenizeUsesExistingTurnCount(t *testing.T) {
 	turn := gaictx.Turn{
 		ID:         "turn-1",
 		TokenCount: map[string]int{"mock.counter": 7},
-		Messages: []gaictx.Message{
-			{Content: gaictx.NewTextContent("should not be counted")},
+		Messages: []gaictx.StoredMessage{
+			{Message: ai.Message{Parts: ai.TextParts("should not be counted")}},
 		},
 	}
 
@@ -65,18 +66,19 @@ func TestTurnTokenizeSumsExistingMessageCounts(t *testing.T) {
 	store := &turnTokenStore{}
 	turn := gaictx.Turn{
 		ID: "turn-1",
-		UserMessage: &gaictx.Message{
-			Content:    gaictx.NewTextContent("hello"),
-			TokenCount: map[string]int{"mock.counter": 1},
+		UserMessage: &gaictx.StoredMessage{
+			TokenCount: map[string]int{"mock.counter": 1}, Message: ai.Message{Parts: ai.TextParts("hello")},
 		},
-		Messages: []gaictx.Message{
+		Messages: []gaictx.StoredMessage{
 			{
-				Content:    gaictx.NewTextContent("assistant response"),
-				TokenCount: map[string]int{"mock.counter": 2},
+
+				TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Parts: ai.TextParts("assistant response")},
 			},
 			{
-				Content:    gaictx.NewToolResultContent("tool", "result text", false, ""),
-				TokenCount: map[string]int{"mock.counter": 3},
+
+				TokenCount: map[string]int{"mock.counter": 3}, Message: ai.Message{Parts: []ai.ContentPart{
+					{Kind: ai.ContentToolResult,
+						ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "tool", Parts: ai.TextParts("result text")}}}},
 			},
 		},
 	}
@@ -108,13 +110,14 @@ func TestTurnTokenizeCountsCombinedMessagesWithoutUpdatingMessages(t *testing.T)
 	counter := &mocks.MockTokenCounter{}
 	store := &turnTokenStore{}
 	turn := gaictx.Turn{
-		ID: "turn-1",
-		UserMessage: &gaictx.Message{
-			Content: gaictx.NewTextContent("hello user"),
-		},
-		Messages: []gaictx.Message{
-			{Content: gaictx.NewTextContent("assistant response")},
-			{Content: gaictx.NewToolResultContent("tool", "tool result", false, "")},
+		ID:          "turn-1",
+		UserMessage: &gaictx.StoredMessage{Message: ai.Message{Parts: ai.TextParts("hello user")}},
+		Messages: []gaictx.StoredMessage{
+			{Message: ai.Message{Parts: ai.TextParts("assistant response")}},
+			{Message: ai.Message{Parts: []ai.ContentPart{
+				{Kind: ai.ContentToolResult,
+					ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "tool", Parts: ai.TextParts("tool result")}}}},
+			},
 		},
 	}
 
@@ -150,8 +153,8 @@ func TestTurnTokenizeHandlesNilMessageContent(t *testing.T) {
 	counter := &mocks.MockTokenCounter{}
 	turn := gaictx.Turn{
 		ID:          "turn-1",
-		UserMessage: &gaictx.Message{Role: gaictx.RoleUser},
-		Messages:    []gaictx.Message{{Role: gaictx.RoleAssistant}},
+		UserMessage: &gaictx.StoredMessage{Message: ai.Message{Role: gaictx.RoleUser}},
+		Messages:    []gaictx.StoredMessage{{Message: ai.Message{Role: gaictx.RoleAssistant}}},
 	}
 
 	tokens, err := turn.Tokenize(context.Background(), counter, nil)
@@ -180,9 +183,8 @@ func TestMessageTokensRecountsNegativeCachedValue(t *testing.T) {
 	t.Parallel()
 
 	counter := &mocks.MockTokenCounter{Count: 4}
-	message := gaictx.Message{
-		Content:    gaictx.NewTextContent("hello world"),
-		TokenCount: map[string]int{"mock.counter": -1},
+	message := gaictx.StoredMessage{
+		TokenCount: map[string]int{"mock.counter": -1}, Message: ai.Message{Parts: ai.TextParts("hello world")},
 	}
 
 	tokens, err := message.Tokens(context.Background(), counter)
@@ -204,7 +206,7 @@ func TestMessageTokensHandlesNilContent(t *testing.T) {
 	t.Parallel()
 
 	counter := &mocks.MockTokenCounter{}
-	message := gaictx.Message{}
+	message := gaictx.StoredMessage{Message: ai.Message{}}
 
 	tokens, err := message.Tokens(context.Background(), counter)
 	if err != nil {
@@ -222,14 +224,13 @@ func TestTurnTokenizeIgnoresNegativeCachedMessageCounts(t *testing.T) {
 	store := &turnTokenStore{}
 	turn := gaictx.Turn{
 		ID: "turn-1",
-		UserMessage: &gaictx.Message{
-			Content:    gaictx.NewTextContent("hello"),
-			TokenCount: map[string]int{"mock.counter": -1},
+		UserMessage: &gaictx.StoredMessage{
+			TokenCount: map[string]int{"mock.counter": -1}, Message: ai.Message{Parts: ai.TextParts("hello")},
 		},
-		Messages: []gaictx.Message{
+		Messages: []gaictx.StoredMessage{
 			{
-				Content:    gaictx.NewTextContent("assistant response"),
-				TokenCount: map[string]int{"mock.counter": 2},
+
+				TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Parts: ai.TextParts("assistant response")},
 			},
 		},
 	}
@@ -260,8 +261,8 @@ func TestTurnTokenizeEmitsObservationWhenSavingTokensFails(t *testing.T) {
 	turn := gaictx.Turn{
 		ID:    "turn-1",
 		Count: 2,
-		Messages: []gaictx.Message{
-			{Content: gaictx.NewTextContent("three token message")},
+		Messages: []gaictx.StoredMessage{
+			{Message: ai.Message{Parts: ai.TextParts("three token message")}},
 		},
 	}
 	var event gai.Observation

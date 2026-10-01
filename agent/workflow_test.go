@@ -138,7 +138,7 @@ func TestAgentMiddlewareOutputPolicies(t *testing.T) {
 
 			workflow, err := main.NewRun(context.Background(), agent.RunInput{
 				ID:     "run-1",
-				Prompt: gaictx.PromptInput{User: gaictx.NewTextContent("question")},
+				Prompt: gaictx.PromptInput{User: ai.TextParts("question")},
 				Meta:   map[string]any{"session_id": "session-1"},
 			})
 			if err != nil {
@@ -184,7 +184,7 @@ func TestAgentMiddlewareMapsWorkflowResult(t *testing.T) {
 		Output: agent.PreserveOutput,
 		MapInput: func(_ context.Context, result agent.WorkflowResult) (agent.RunInput, error) {
 			mappedResult = result
-			return agent.RunInput{ID: "mapped", Prompt: gaictx.PromptInput{User: gaictx.NewTextContent("observation")}}, nil
+			return agent.RunInput{ID: "mapped", Prompt: gaictx.PromptInput{User: ai.TextParts("observation")}}, nil
 		},
 	}))
 	workflow, err := main.NewRun(context.Background(), textRunInput("question"))

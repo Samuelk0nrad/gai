@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
 )
 
@@ -57,7 +56,7 @@ func (a *primaryAccumulator) account(event Event) {
 
 func (a *primaryAccumulator) result() AgentResult {
 	tokens := iterationTokens(a.accepted)
-	var messages []gaictx.Message
+	var messages []ai.Message
 	for _, iteration := range a.accepted {
 		messages = append(messages, iteration.Messages()...)
 	}

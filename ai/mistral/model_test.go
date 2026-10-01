@@ -133,22 +133,25 @@ func TestModelGenerateUsesContentCapturePolicy(t *testing.T) {
 }
 
 func TestNativeMessagesMapUserPayload(t *testing.T) {
-	messages := mapNativeMessages([]ai.RequestMessage{{Role: ai.RequestMessageRoleUser, Text: "initial request"}})
+	messages, err := mapNativeMessages([]ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "initial request"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(messages) != 1 || messages[0].Role != "user" || messages[0].Content != "initial request" {
 		t.Fatalf("payload = %#v", messages)
 	}
 }
 
 func TestNativeMessagesMapToolErrorPayload(t *testing.T) {
-	messages := mapNativeMessages([]ai.RequestMessage{{
-		Role: ai.RequestMessageRoleTool,
-		ToolResult: &ai.RequestToolResult{
+	messages, err := mapNativeMessages([]ai.Message{{
+		Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{
 			ToolCallID: "call_1",
-			Name:       "search",
-			Content:    "upstream unavailable",
-			IsError:    true,
-		},
+			Name:       "search", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "upstream unavailable"}}, IsError: true,
+		}}},
 	}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(messages) != 1 || messages[0].Role != "tool" || messages[0].ToolCallID != "call_1" || messages[0].Content != `{"error":"upstream unavailable"}` {
 		t.Fatalf("payload = %#v", messages)
 	}
@@ -238,7 +241,7 @@ func TestBuildChatCompletionRequestRejectsUnsupportedToolChoiceMode(t *testing.T
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), `unsupported mistral tool choice mode "sometimes"`) {
+	if !strings.Contains(err.Error(), `unsupported tool choice mode "sometimes"`) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

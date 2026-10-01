@@ -38,7 +38,7 @@ func TestStreamOnlyModelRunsWithGenericLocalCounter(t *testing.T) {
 		builder = gaictx.New(gaictx.Definition{TokenBudget: 100, SystemInstructions: []gaictx.Part{gaictx.NewTextPart("instructions")}})
 		return builder, nil
 	}})
-	workflow, err := a.NewRun(t.Context(), agent.RunInput{Prompt: gaictx.PromptInput{User: gaictx.NewTextContent("question")}})
+	workflow, err := a.NewRun(t.Context(), agent.RunInput{Prompt: gaictx.PromptInput{User: ai.TextParts("question")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestAutomaticCounterDoesNotConsultLegacyTokenizer(t *testing.T) {
 type localCountHistoryStore struct{}
 
 func (localCountHistoryStore) GetLastHistoryState(context.Context, string) (*history.HistoryState, error) {
-	return &history.HistoryState{Turns: []gaictx.Turn{{ID: "turn", Count: 1, UserMessage: &gaictx.Message{Role: gaictx.RoleUser, Content: gaictx.NewTextContent("earlier question")}}}}, nil
+	return &history.HistoryState{Turns: []gaictx.Turn{{ID: "turn", Count: 1, UserMessage: &gaictx.StoredMessage{Message: ai.TextMessage(ai.RoleUser, "earlier question")}}}}, nil
 }
 func (localCountHistoryStore) SaveHistoryState(context.Context, string, *history.HistoryState) error {
 	return nil

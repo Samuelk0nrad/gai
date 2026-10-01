@@ -8,6 +8,32 @@
 // Provider-specific implementations live in subpackages such as anthropic,
 // gemini, mistral, and openai.
 //
+// # Canonical conversations
+//
+// Message is the conversation value shared by requests, provider responses, and
+// persisted history. Its ordered ContentPart values retain text, reasoning,
+// tool calls/results, JSON, media, and provider extensions. Message.Role uses
+// RoleSystem, RoleUser, RoleAssistant, or RoleTool. Storage metadata such as
+// session IDs and token caches belongs to storage envelopes outside Message.
+//
+// AIRequest.Messages is authoritative. Normalized lifts a legacy Prompt into a
+// user message only when Messages is empty; an existing Messages slice always
+// wins. Copy and Clone snapshot mutable payloads, including nested results,
+// media bytes, raw JSON, schemas, and opaque provider state.
+//
+// Message.Validate checks tagged payloads and role constraints. Request
+// validation additionally matches tool results to preceding call IDs and names;
+// repeated calls to the same named tool must retain distinct IDs. Media and
+// unknown namespaced extensions can be persisted even when a selected adapter
+// cannot replay them. RenderMessages preserves supported roles, part order,
+// and tool identity, and returns an UnsupportedContentError for media or opaque
+// continuity state that has no faithful text representation.
+//
+// AIResponse.Message is the authoritative output. SetMessage and AppendToken
+// refresh its Text, Reasoning, and ToolCalls convenience views. Token.Part is a
+// canonical semantic delta and takes precedence over compatibility token fields.
+// Errors and completion accounting remain execution metadata outside messages.
+//
 // # Local text counting
 //
 // TokenCounter is the runtime's count-only, local capability. Its ID includes an
@@ -25,6 +51,13 @@
 // They are never consulted for automatic budgeting.
 //
 // # Pre-v1 migration
+//
+// Replace RequestMessage with Message and its Text/ToolCalls/ToolResult fields
+// with ordered ContentPart values. TextMessage and TextParts construct text
+// payloads. Use ToolCall directly for calls; ToolResult carries the call ID,
+// tool name, ordered result parts, and IsError. Replace RequestMessageRole values
+// with Role values. Preserve provider extensions on their original message,
+// part, or call instead of converting opaque data to prompt text.
 //
 // Model implementations need only GenerateStream. Code that calls Generate or
 // Name through an ai.Model uses ModelGenerator or ModelNamer respectively;

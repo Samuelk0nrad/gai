@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
@@ -91,7 +90,6 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 			})
 		}
 	}()
-	var reasoningItems []json.RawMessage
 	for stream.Next() {
 		event := stream.Current()
 		switch event.Type {
@@ -117,7 +115,10 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 			}
 		case "response.output_item.done":
 			if event.Item.Type == "reasoning" {
-				reasoningItems = append(reasoningItems, json.RawMessage(event.Item.RawJSON()))
+				part := reasoningExtension(json.RawMessage(event.Item.RawJSON()))
+				if !emit(ai.Token{Type: ai.TokenTypePart, Part: &part}) {
+					return
+				}
 				continue
 			}
 			if event.Item.Type != "function_call" {
@@ -130,17 +131,7 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 				emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
 				return
 			}
-			var thoughtSignature []byte
-			if len(reasoningItems) > 0 {
-				thoughtSignature, err = json.Marshal(reasoningItems)
-				if err != nil {
-					err = fmt.Errorf("encode OpenAI reasoning items: %w", err)
-					streamErr = err
-					emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
-					return
-				}
-			}
-			call := &ai.ToolCall{ID: event.Item.CallID, Type: "function", Name: event.Item.Name, Args: args, ThoughtSignature: append([]byte(nil), thoughtSignature...)}
+			call := &ai.ToolCall{ID: event.Item.CallID, Type: "function", Name: event.Item.Name, Args: args}
 			if !emit(ai.Token{Type: ai.TokenTypeToolCall, Data: []byte(args), ToolCall: call}) {
 				return
 			}
@@ -179,15 +170,15 @@ func buildResponsesParams(model string, req ai.AIRequest) (responses.ResponseNew
 		Store:   param.NewOpt(false),
 		Include: []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
 	}
-	if len(req.Messages) == 0 {
-		params.Input.OfString = param.NewOpt(req.Prompt)
-	} else {
-		input, err := mapResponsesMessages(req.Messages)
-		if err != nil {
-			return responses.ResponseNewParams{}, err
-		}
-		params.Input.OfInputItemList = input
+	req, err := req.Normalized()
+	if err != nil {
+		return responses.ResponseNewParams{}, err
 	}
+	input, err := mapResponsesMessages(req.Messages)
+	if err != nil {
+		return responses.ResponseNewParams{}, err
+	}
+	params.Input.OfInputItemList = input
 	if req.MaxTokens > 0 {
 		params.MaxOutputTokens = param.NewOpt(int64(req.MaxTokens))
 	}
@@ -251,94 +242,128 @@ func buildResponsesParams(model string, req ai.AIRequest) (responses.ResponseNew
 	return params, nil
 }
 
-func mapResponsesMessages(messages []ai.RequestMessage) (responses.ResponseInputParam, error) {
+func mapResponsesMessages(messages []ai.Message) (responses.ResponseInputParam, error) {
 	input := make(responses.ResponseInputParam, 0, len(messages))
 	for _, message := range messages {
-		switch message.Role {
-		case ai.RequestMessageRoleUser:
-			input = append(input, responses.ResponseInputItemParamOfMessage(message.Text, responses.EasyInputMessageRoleUser))
-		case ai.RequestMessageRoleAssistant:
-			if message.Text != "" {
-				input = append(input, responses.ResponseInputItemParamOfMessage(message.Text, responses.EasyInputMessageRoleAssistant))
+		if err := message.Validate(); err != nil {
+			return nil, err
+		}
+		if err := rejectRequiredExtensions(message.Extensions); err != nil {
+			return nil, err
+		}
+		seenSignatures := map[string]struct{}{}
+		appendReasoning := func(data json.RawMessage) error {
+			if _, seen := seenSignatures[string(data)]; seen {
+				return nil
 			}
-			seenSignatures := map[string]struct{}{}
-			for _, call := range message.ToolCalls {
-				if len(call.ThoughtSignature) > 0 {
-					signature := string(call.ThoughtSignature)
-					if _, seen := seenSignatures[signature]; !seen {
-						var reasoningItems []responses.ResponseReasoningItem
-						if err := json.Unmarshal(call.ThoughtSignature, &reasoningItems); err != nil {
-							return nil, fmt.Errorf("decode OpenAI reasoning items: %w", err)
+			var items []responses.ResponseReasoningItem
+			if err := json.Unmarshal(data, &items); err != nil {
+				return fmt.Errorf("decode OpenAI reasoning items: %w", err)
+			}
+			for _, item := range items {
+				if item.Type != "reasoning" {
+					return fmt.Errorf("invalid OpenAI reasoning item type %q", item.Type)
+				}
+				params := item.ToParam()
+				input = append(input, responses.ResponseInputItemUnionParam{OfReasoning: &params})
+			}
+			seenSignatures[string(data)] = struct{}{}
+			return nil
+		}
+		for _, part := range message.Parts {
+			if part.Kind != ai.ContentExtension {
+				if err := rejectRequiredExtensions(part.Extensions); err != nil {
+					return nil, err
+				}
+			}
+			switch part.Kind {
+			case ai.ContentText, ai.ContentJSON:
+				text := part.Text
+				if part.Kind == ai.ContentJSON {
+					text = string(part.JSON)
+				}
+				role := responses.EasyInputMessageRole(message.Role)
+				input = append(input, responses.ResponseInputItemParamOfMessage(text, role))
+			case ai.ContentExtension:
+				for _, ext := range part.Extensions {
+					if ext.Namespace == "openai" && ext.Type == "responses_reasoning" {
+						if err := appendReasoning(ext.Data); err != nil {
+							return nil, err
 						}
-						for _, item := range reasoningItems {
-							params := item.ToParam()
-							input = append(input, responses.ResponseInputItemUnionParam{OfReasoning: &params})
-						}
-						seenSignatures[signature] = struct{}{}
+					} else if ext.Required {
+						return nil, fmt.Errorf("%w: OpenAI Responses extension %s/%s", ai.ErrUnsupportedCapability, ext.Namespace, ext.Type)
 					}
 				}
-				input = append(input, responses.ResponseInputItemParamOfFunctionCall(string(call.Arguments), call.ID, call.Name))
+			case ai.ContentToolCall:
+				call := part.ToolCall
+				for _, ext := range call.Extensions {
+					if ext.Namespace == "openai" && ext.Type == "responses_reasoning" {
+						if err := appendReasoning(ext.Data); err != nil {
+							return nil, err
+						}
+					} else if ext.Required {
+						return nil, fmt.Errorf("%w: OpenAI Responses call extension %s/%s", ai.ErrUnsupportedCapability, ext.Namespace, ext.Type)
+					}
+				}
+				if len(call.ThoughtSignature) > 0 {
+					if err := appendReasoning(call.ThoughtSignature); err != nil {
+						return nil, err
+					}
+				}
+				input = append(input, responses.ResponseInputItemParamOfFunctionCall(string(call.Args), call.ID, call.Name))
+			case ai.ContentToolResult:
+				content, err := canonicalResultText(part.ToolResult)
+				if err != nil {
+					return nil, err
+				}
+				input = append(input, responses.ResponseInputItemParamOfFunctionCallOutput(part.ToolResult.ToolCallID, content))
+			default:
+				return nil, fmt.Errorf("%w: OpenAI Responses content %q", ai.ErrUnsupportedCapability, part.Kind)
 			}
-		case ai.RequestMessageRoleTool:
-			content := message.ToolResult.Content
-			if message.ToolResult.IsError {
-				encoded, _ := json.Marshal(map[string]string{"error": content})
-				content = string(encoded)
-			}
-			input = append(input, responses.ResponseInputItemParamOfFunctionCallOutput(message.ToolResult.ToolCallID, content))
-		default:
-			return nil, fmt.Errorf("unsupported native message role %q", message.Role)
 		}
 	}
 	return input, nil
 }
 
-func responseFromResponses(response *responses.Response) (*ai.AIResponse, error) {
-	result := &ai.AIResponse{
-		Raw: json.RawMessage(response.RawJSON()), Text: responseText(response), FinishReason: string(response.Status),
-		InputTokens: int(response.Usage.InputTokens), OutputTokens: int(response.Usage.OutputTokens), ReasoningTokens: int(response.Usage.OutputTokensDetails.ReasoningTokens),
-	}
-	var reasoningItems []json.RawMessage
-	for _, output := range response.Output {
-		if output.Type == "reasoning" {
-			reasoningItems = append(reasoningItems, json.RawMessage(output.RawJSON()))
-		}
-	}
-	var thoughtSignature []byte
-	if len(reasoningItems) > 0 {
-		var err error
-		thoughtSignature, err = json.Marshal(reasoningItems)
-		if err != nil {
-			return nil, fmt.Errorf("encode OpenAI reasoning items: %w", err)
-		}
-	}
-	for _, output := range response.Output {
-		if output.Type != "function_call" {
-			continue
-		}
-		args := json.RawMessage(output.Arguments)
-		if !json.Valid(args) {
-			return nil, fmt.Errorf("invalid JSON arguments for tool %q", output.Name)
-		}
-		result.ToolCalls = append(result.ToolCalls, ai.ToolCall{ID: output.CallID, Type: "function", Name: output.Name, Args: args, ThoughtSignature: append([]byte(nil), thoughtSignature...)})
-	}
-	return result, nil
+func reasoningExtension(raw json.RawMessage) ai.ContentPart {
+	data, _ := json.Marshal([]json.RawMessage{raw})
+	return ai.ContentPart{Kind: ai.ContentExtension, Extensions: []ai.Extension{{Namespace: "openai", Type: "responses_reasoning", Data: data, Required: true}}}
 }
 
-func responseText(response *responses.Response) string {
-	var text strings.Builder
+func responseFromResponses(response *responses.Response) (*ai.AIResponse, error) {
+	result := &ai.AIResponse{
+		Raw: json.RawMessage(response.RawJSON()), FinishReason: string(response.Status),
+		InputTokens: int(response.Usage.InputTokens), OutputTokens: int(response.Usage.OutputTokens), ReasoningTokens: int(response.Usage.OutputTokensDetails.ReasoningTokens),
+	}
+	message := ai.Message{Role: ai.RoleAssistant}
 	for _, output := range response.Output {
-		if output.Type != "message" {
-			continue
-		}
-		for _, content := range output.Content {
-			switch content.Type {
-			case "output_text":
-				text.WriteString(content.Text)
-			case "refusal":
-				text.WriteString(content.Refusal)
+		switch output.Type {
+		case "reasoning":
+			message.Parts = append(message.Parts, reasoningExtension(json.RawMessage(output.RawJSON())))
+		case "message":
+			for _, content := range output.Content {
+				switch content.Type {
+				case "output_text":
+					message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentText, Text: content.Text})
+				case "refusal":
+					message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentText, Text: content.Refusal})
+				default:
+					return nil, fmt.Errorf("%w: OpenAI Responses output content %q", ai.ErrUnsupportedCapability, content.Type)
+				}
 			}
+		case "function_call":
+			args := json.RawMessage(output.Arguments)
+			if !json.Valid(args) {
+				return nil, fmt.Errorf("invalid JSON arguments for tool %q", output.Name)
+			}
+			message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: output.CallID, Type: "function", Name: output.Name, Args: args}})
+		default:
+			return nil, fmt.Errorf("%w: OpenAI Responses output %q", ai.ErrUnsupportedCapability, output.Type)
 		}
 	}
-	return text.String()
+	if len(message.Parts) == 0 {
+		message.Parts = ai.TextParts("")
+	}
+	result.SetMessage(message)
+	return result, nil
 }

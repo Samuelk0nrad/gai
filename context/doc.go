@@ -1,10 +1,16 @@
 // Package context builds the model-facing context used by GAI agents.
 //
 // A Builder combines system instructions, dynamic ContextSource values, the
-// current user prompt, and messages from a Conversation. Parts first produce a
-// renderer-neutral RenderNode tree, which a Renderer converts into the final
-// prompt string. Optional token budgets reserve space for model output and limit
-// how much dynamic context is included.
+// current user input, and canonical ai.Message values from a Conversation.
+// BuildRequest is the sole assembly path. Arbitrary context parts are lowered
+// through a Renderer; ConversationPart values retain their ordered content and
+// roles. BuildPrompt applies ai.RenderMessages to that same canonical request.
+// Optional token budgets reserve output space and limit dynamic context.
+//
+// StoredMessage adds IDs, token caches, and a schema version around ai.Message.
+// JSON readers upgrade legacy text messages but reject legacy tool records that
+// lack call IDs. Content implementations remain only as deprecated legacy
+// ingestion helpers. New inputs use PromptInput.User with []ai.ContentPart.
 //
 // New defaults to ai.TextTokenEstimator when no local TokenCounter is supplied.
 // Agents inject their resolved counter, and compatible history/context sources

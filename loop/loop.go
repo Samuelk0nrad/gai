@@ -155,67 +155,6 @@ type pendingToolCall struct {
 	call      ai.ToolCall
 }
 
-// renderedPromptRequest creates the compatibility request used by the loop.
-// Conversation state remains in Prompt until a provider-native message path is
-// introduced deliberately; this boundary keeps that future change separate
-// from the current rendered-prompt behavior.
-func renderedPromptRequest(prompt string, maxTokens int, tools []ai.ToolDefinition, toolChoice ai.ToolChoice, responseFormat ai.ResponseFormat, reasoning ai.ReasoningConfig) ai.AIRequest {
-	return ai.AIRequest{
-		Prompt:         prompt,
-		MaxTokens:      maxTokens,
-		Tools:          tools,
-		ToolChoice:     toolChoice,
-		ResponseFormat: responseFormat,
-		Reasoning:      reasoning,
-	}
-}
-
-// NativeMessages returns the provider-neutral history for completed iterations.
-// Prompt builders combine it with their own base user message.
-func (l *Loop) NativeMessages() []ai.RequestMessage {
-	var messages []ai.RequestMessage
-	if l == nil {
-		return nil
-	}
-	iterations := l.Iterations
-	for _, iteration := range iterations {
-		var text string
-		var toolCalls []ai.RequestToolCall
-		var toolResults []ai.RequestMessage
-		for _, part := range iteration.Parts {
-			switch part.Type {
-			case IterationTypeResponse:
-				if part.Response != nil && part.Response.Text != "" {
-					text += part.Response.Text
-				}
-			case IterationTypeToolCall, IterationTypeToolError:
-				if part.ToolReq == nil {
-					continue
-				}
-				toolCalls = append(toolCalls, ai.RequestToolCall{
-					ID:               part.ToolReq.ID,
-					Name:             part.ToolReq.Name,
-					Arguments:        append([]byte(nil), part.ToolReq.Args...),
-					ThoughtSignature: append([]byte(nil), part.ToolReq.ThoughtSignature...),
-				})
-				if part.ToolResp != nil {
-					result := ai.RequestToolResult{ToolCallID: part.ToolReq.ID, Name: part.ToolReq.Name, Content: part.ToolResp.TextValue()}
-					if err := part.ToolResp.ErrorValue(); err != nil {
-						result.Content = err.Error()
-						result.IsError = true
-					}
-					toolResults = append(toolResults, ai.RequestMessage{Role: ai.RequestMessageRoleTool, ToolResult: &result})
-				}
-			}
-		}
-		if text != "" || len(toolCalls) > 0 {
-			messages = append(messages, ai.RequestMessage{Role: ai.RequestMessageRoleAssistant, Text: text, ToolCalls: toolCalls})
-			messages = append(messages, toolResults...)
-		}
-	}
-	return messages
-}
-
 // Run starts asynchronous model and tool execution.
 //
 // The returned channel carries every token, retry, iteration, and terminal
@@ -246,16 +185,7 @@ func (l *Loop) run(ctx context.Context, events chan<- Event) {
 // It deliberately runs before the attempt deadline is installed: prompt building
 // belongs to iteration preparation, not model generation.
 func (l *Loop) buildAttemptRequest(ctx context.Context, toolDefinitions []ai.ToolDefinition, requiredToolCallSatisfied bool) (ai.AIRequest, error) {
-	var (
-		prompt         string
-		nativeMessages []ai.RequestMessage
-		err            error
-	)
-	if builder, ok := l.PromptBuilder.(gaictx.NativeMessageBuilder); ok {
-		prompt, nativeMessages, err = builder.BuildRequest(ctx, l)
-	} else {
-		prompt, err = l.PromptBuilder.BuildPrompt(ctx, l)
-	}
+	request, err := l.PromptBuilder.BuildRequest(ctx, attemptConversation{loop: l})
 	if err != nil {
 		return ai.AIRequest{}, err
 	}
@@ -269,20 +199,29 @@ func (l *Loop) buildAttemptRequest(ctx context.Context, toolDefinitions []ai.Too
 		// choice is likewise required when native tool definitions are absent.
 		toolChoice = ai.ToolChoice{}
 	}
-	request := renderedPromptRequest(prompt, l.MaxTokens, toolDefinitions, toolChoice, l.ResponseFormat, l.Reasoning)
-	request.Messages = nativeMessages
+	request.MaxTokens = l.MaxTokens
+	request.Tools = toolDefinitions
+	request.ToolChoice = toolChoice
+	request.ResponseFormat = l.ResponseFormat
+	request.Reasoning = l.Reasoning
+	if l.ToolTransport == ToolTransportText {
+		request.Prompt, err = ai.RenderMessages(ctx, request.Messages)
+		if err != nil {
+			return ai.AIRequest{}, err
+		}
+	}
 	return request, nil
 }
 
-func userMessageForIteration(promptBuilder gaictx.PromptBuilder, index int) *gaictx.Message {
+func userMessageForIteration(promptBuilder gaictx.PromptBuilder, index int) *ai.Message {
 	if index != 0 || promptBuilder == nil {
 		return nil
 	}
 	input := promptBuilder.Input()
-	if input.User == nil {
+	if len(input.User) == 0 {
 		return nil
 	}
-	return &gaictx.Message{Role: gaictx.RoleUser, Content: input.User}
+	return &ai.Message{Role: ai.RoleUser, Parts: ai.CloneParts(input.User)}
 }
 
 // hasPermittedToolCall reports whether the model requested at least one valid
@@ -327,6 +266,8 @@ func toolsNamed(tools []Tool, names []string) []Tool {
 // or tool-response processing failures are returned.
 func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, toolCalls []pendingToolCall, tools []Tool, events chan<- Event, iterationCount, attemptID, retryCount int) error {
 	var wg sync.WaitGroup
+	// A failed later start event must not leave tools mutating a snapshot.
+	defer wg.Wait()
 	var toolErr error
 	var toolErrMu sync.Mutex
 
@@ -374,7 +315,20 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, toolC
 		}(tc)
 	}
 	wg.Wait()
-
+	if toolErr == nil {
+		for _, tc := range toolCalls {
+			response := iteration.Parts[tc.partIndex].ToolResp
+			if response == nil {
+				continue
+			}
+			result := ai.ToolResult{ToolCallID: tc.call.ID, Name: tc.call.Name, Parts: ai.TextParts(response.TextValue())}
+			if err := response.ErrorValue(); err != nil {
+				result.IsError = true
+				result.Parts = ai.TextParts(err.Error())
+			}
+			iteration.Conversation = append(iteration.Conversation, ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &result}}})
+		}
+	}
 	return toolErr
 }
 
@@ -424,12 +378,25 @@ func cancellationError(ctx context.Context, err error) error {
 }
 
 // Messages returns the completed iterations as ordered conversation messages.
-func (l *Loop) Messages() []gaictx.Message {
-	var msgs []gaictx.Message
+func (l *Loop) Messages() []ai.Message {
+	var msgs []ai.Message
 
 	for _, i := range l.Iterations {
 		msgs = append(msgs, i.Messages()...)
 	}
 
 	return msgs
+}
+
+// attemptConversation excludes only the input recorded by the loop itself;
+// PromptBuilder.Input supplies that message. No content-based deduplication is
+// applied to arbitrary conversation messages.
+type attemptConversation struct{ loop *Loop }
+
+func (c attemptConversation) Messages() []ai.Message {
+	var messages []ai.Message
+	for i := range c.loop.Iterations {
+		messages = append(messages, c.loop.Iterations[i].DeltaMessages()...)
+	}
+	return messages
 }

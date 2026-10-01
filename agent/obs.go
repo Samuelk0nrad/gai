@@ -143,7 +143,7 @@ func (o *runCreationObserver) fields(ctx context.Context) map[string]any {
 		fields["run_id"] = o.input.ID
 	}
 	if o.input.Prompt.User != nil {
-		gai.AddObservationContent(ctx, o.debug, fields, "user_input", gai.ContentKindPrompt, o.input.Prompt.User.String())
+		gai.AddObservationContent(ctx, o.debug, fields, "user_input", gai.ContentKindPrompt, (ai.Message{Parts: o.input.Prompt.User}).Text())
 	}
 	return fields
 }
@@ -152,7 +152,7 @@ func promptUserChars(input gaictx.PromptInput) int {
 	if input.User == nil {
 		return 0
 	}
-	return len(input.User.String())
+	return len((ai.Message{Parts: input.User}).Text())
 }
 
 func (o *runCreationObserver) emit(ctx context.Context, name string, fields map[string]any, err error) {

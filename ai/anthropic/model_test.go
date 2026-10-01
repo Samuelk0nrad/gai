@@ -90,7 +90,7 @@ func TestGenerateSendsAnthropicRequestAndMapsBlocksAndUsage(t *testing.T) {
 }
 
 func TestNativeMessagesMapUserPayload(t *testing.T) {
-	messages, err := mapNativeMessages([]ai.RequestMessage{{Role: ai.RequestMessageRoleUser, Text: "initial request"}})
+	messages, err := mapNativeMessages([]ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "initial request"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,9 +108,9 @@ func TestNativeMessagesMapUserPayload(t *testing.T) {
 }
 
 func TestNativeMessagesGroupAdjacentToolResults(t *testing.T) {
-	messages, err := mapNativeMessages([]ai.RequestMessage{
-		{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: "call_1", Name: "search", Content: "first"}},
-		{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: "call_2", Name: "lookup", Content: "second", IsError: true}},
+	messages, err := mapNativeMessages([]ai.Message{
+		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call_1", Name: "search", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "first"}}}}}},
+		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call_2", Name: "lookup", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "second"}}, IsError: true}}}},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -62,7 +62,7 @@ func StartGenerationObservation(ctx context.Context, req AIRequest, config Gener
 		attribute.String("ai.provider", config.Provider),
 		attribute.String("ai.model", config.Model),
 		attribute.Int("ai.max_tokens", req.MaxTokens),
-		attribute.Int("ai.prompt_length", len(req.Prompt)),
+		attribute.Int("ai.prompt_length", generationPromptLength(req)),
 	}
 	if req.MaxTokens > 0 {
 		attrs = append(attrs, attribute.Int("gen_ai.request.max_tokens", req.MaxTokens))
@@ -73,6 +73,21 @@ func StartGenerationObservation(ctx context.Context, req AIRequest, config Gener
 	ctx, span := gai.StartClientOperationSpan(ctx, generationTracerName, "chat "+config.Model, "gen_ai.operation.name", "chat", attrs...)
 	startedAt := time.Now()
 	return ctx, &GenerationObservation{ctx: ctx, config: config, span: span, startedAt: startedAt}
+}
+
+// generationPromptLength counts selected system/user text without retaining
+// opaque provider state or tool payloads in observations.
+func generationPromptLength(req AIRequest) int {
+	if len(req.Messages) == 0 {
+		return len(req.Prompt)
+	}
+	length := 0
+	for _, message := range req.Messages {
+		if message.Role == RoleSystem || message.Role == RoleUser {
+			length += len(message.Text())
+		}
+	}
+	return length
 }
 
 func semanticProviderName(provider string) string {
@@ -107,6 +122,7 @@ func (o *GenerationObservation) ObserveToken(token Token) {
 	if o == nil {
 		return
 	}
+	token = token.Normalized()
 	switch token.Type {
 	case TokenTypeText, TokenTypeThought:
 		if token.Text != "" || len(token.Data) != 0 {
@@ -117,6 +133,10 @@ func (o *GenerationObservation) ObserveToken(token Token) {
 		o.mu.Lock()
 		o.stream.ToolCallCount++
 		o.mu.Unlock()
+	case TokenTypePart:
+		if token.Part != nil {
+			o.FirstOutput()
+		}
 	case TokenTypeCompletion:
 		if token.Completion == nil {
 			return

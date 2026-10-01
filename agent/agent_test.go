@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"errors"
+	"html"
 	"strings"
 	"sync"
 	"testing"
@@ -128,8 +129,8 @@ func (b *testPromptBuilder) BuildPrompt(ctx context.Context, conv gaictx.Convers
 	return b.prompt, nil
 }
 
-func (b *testPromptBuilder) BuildRequest(ctx context.Context, conv gaictx.Conversation) (string, []ai.RequestMessage, error) {
-	return b.prompt, []ai.RequestMessage{{Role: ai.RequestMessageRoleUser, Text: b.prompt}}, nil
+func (b *testPromptBuilder) BuildRequest(ctx context.Context, conv gaictx.Conversation) (ai.AIRequest, error) {
+	return ai.AIRequest{Prompt: b.prompt, Messages: []ai.Message{ai.TextMessage(ai.RoleUser, b.prompt)}}, nil
 }
 
 func (b *testPromptBuilder) Input() gaictx.PromptInput {
@@ -140,7 +141,7 @@ func (b *testPromptBuilder) SetInput(input gaictx.PromptInput) {
 	b.input = input.Clone()
 	b.prompt = ""
 	if input.User != nil {
-		b.prompt = input.User.String()
+		b.prompt = (ai.Message{Parts: input.User}).Text()
 		return
 	}
 	if len(input.Context) > 0 && input.Context[0] != nil {
@@ -468,7 +469,7 @@ func TestAgentToolsAutomaticallyAddPromptContract(t *testing.T) {
 		"tool: echo",
 		`{"type":"function","name":"<tool-name>","arguments":{...}}`,
 	} {
-		if !strings.Contains(prompt, expected) {
+		if !strings.Contains(html.UnescapeString(prompt), expected) {
 			t.Fatalf("automatic tool prompt missing %q:\n%s", expected, prompt)
 		}
 	}
@@ -509,7 +510,7 @@ func TestAgentNativeToolModelOmitsPromptToolProtocol(t *testing.T) {
 	if len(requests[0].Tools) != 1 || requests[0].Tools[0].Name != "echo" {
 		t.Fatalf("native tool model request did not include tool definition: %+v", requests[0])
 	}
-	if strings.Contains(requests[0].Prompt, `{"type":"function","name":"<tool-name>","arguments":{...}}`) {
+	if strings.Contains(html.UnescapeString(requests[0].Prompt), `{"type":"function","name":"<tool-name>","arguments":{...}}`) {
 		t.Fatalf("native tool model request included prompt tool protocol:\n%s", requests[0].Prompt)
 	}
 }
@@ -541,7 +542,7 @@ func TestAgentNativeToolModelWithoutSupportAddsPromptToolProtocol(t *testing.T) 
 	if err != nil {
 		t.Fatalf("BuildPrompt failed: %v", err)
 	}
-	if !strings.Contains(prompt, `{"type":"function","name":"<tool-name>","arguments":{...}}`) {
+	if !strings.Contains(html.UnescapeString(prompt), `{"type":"function","name":"<tool-name>","arguments":{...}}`) {
 		t.Fatalf("disabled native tool model prompt missing tool protocol:\n%s", prompt)
 	}
 }
@@ -676,7 +677,7 @@ func TestAgentToolDefinitionOptionsCustomizeAutomaticPromptContract(t *testing.T
 	if !strings.Contains(prompt, "Use tools only after asking for confirmation.") {
 		t.Fatalf("custom tool definition protocol missing:\n%s", prompt)
 	}
-	if strings.Contains(prompt, `{"type":"function","name":"<tool-name>","arguments":{...}}`) {
+	if strings.Contains(html.UnescapeString(prompt), `{"type":"function","name":"<tool-name>","arguments":{...}}`) {
 		t.Fatalf("default tool definition protocol still present:\n%s", prompt)
 	}
 }
@@ -1147,14 +1148,14 @@ func TestAgentNewRunUsesInputMaxTokens(t *testing.T) {
 }
 
 func textRunInput(text string) agent.RunInput {
-	return agent.RunInput{Prompt: gaictx.PromptInput{User: gaictx.NewTextContent(text)}}
+	return agent.RunInput{Prompt: gaictx.PromptInput{User: ai.TextParts(text)}}
 }
 
 func promptUserText(input agent.RunInput) string {
 	if input.Prompt.User == nil {
 		return ""
 	}
-	return input.Prompt.User.String()
+	return (ai.Message{Parts: input.Prompt.User}).Text()
 }
 
 func promptContextValue(input agent.RunInput, name string) string {
@@ -1251,4 +1252,8 @@ func TestAgentNewRunReturnsPromptError(t *testing.T) {
 	if !errors.Is(err, promptErr) {
 		t.Fatalf("expected prompt error, got %v", err)
 	}
+}
+
+func (*unclonablePromptBuilder) BuildRequest(context.Context, gaictx.Conversation) (ai.AIRequest, error) {
+	return ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "")}}, nil
 }

@@ -127,8 +127,8 @@ func TestMapFunctionCall(t *testing.T) {
 		t.Fatalf("mapFunctionCall error: %v", err)
 	}
 
-	if !strings.HasPrefix(got.ID, "call_echo_tool_") {
-		t.Fatalf("expected generated tool id for echo_tool, got %q", got.ID)
+	if got.ID != "call_1" {
+		t.Fatalf("expected provider tool id, got %q", got.ID)
 	}
 	if got.Type != "function" {
 		t.Fatalf("expected tool call type=function, got %q", got.Type)
@@ -147,7 +147,7 @@ func TestMapFunctionCall(t *testing.T) {
 }
 
 func TestNativeContentsMapUserPayload(t *testing.T) {
-	contents, err := nativeContents(ai.AIRequest{Messages: []ai.RequestMessage{{Role: ai.RequestMessageRoleUser, Text: "initial request"}}})
+	contents, err := nativeContents(ai.AIRequest{Messages: []ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "initial request"}}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,10 +157,10 @@ func TestNativeContentsMapUserPayload(t *testing.T) {
 }
 
 func TestNativeContentsAllowsFunctionNameAfterResult(t *testing.T) {
-	contents, err := nativeContents(ai.AIRequest{Messages: []ai.RequestMessage{
-		{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{ID: "call_1", Name: "echo", Arguments: json.RawMessage(`{"message":"first"}`)}}},
-		{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: "call_1", Name: "echo", Content: "first"}},
-		{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{ID: "call_2", Name: "echo", Arguments: json.RawMessage(`{"message":"second"}`)}}},
+	contents, err := nativeContents(ai.AIRequest{Messages: []ai.Message{
+		{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{Type: "function", ID: "call_1", Name: "echo", Args: json.RawMessage(`{"message":"first"}`)}}}},
+		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call_1", Name: "echo", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "first"}}}}}},
+		{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{Type: "function", ID: "call_2", Name: "echo", Args: json.RawMessage(`{"message":"second"}`)}}}},
 	}})
 	if err != nil {
 		t.Fatalf("nativeContents error: %v", err)
@@ -172,14 +172,12 @@ func TestNativeContentsAllowsFunctionNameAfterResult(t *testing.T) {
 
 func TestNativeContentsPreservesThoughtSignatureOnFunctionCall(t *testing.T) {
 	signature := []byte("opaque-thought-signature")
-	contents, err := nativeContents(ai.AIRequest{Messages: []ai.RequestMessage{
-		{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{
-			ID:               "call_1",
-			Name:             "echo",
-			Arguments:        json.RawMessage(`{"message":"hello"}`),
-			ThoughtSignature: signature,
-		}}},
-		{Role: ai.RequestMessageRoleTool, ToolResult: &ai.RequestToolResult{ToolCallID: "call_1", Name: "echo", Content: "hello"}},
+	contents, err := nativeContents(ai.AIRequest{Messages: []ai.Message{
+		{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{Type: "function",
+			ID:   "call_1",
+			Name: "echo", Args: json.RawMessage(`{"message":"hello"}`), ThoughtSignature: signature,
+		}}}},
+		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call_1", Name: "echo", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "hello"}}}}}},
 	}})
 	if err != nil {
 		t.Fatalf("nativeContents error: %v", err)
@@ -386,7 +384,7 @@ func TestBuildGenerateContentConfigRejectsUnsupportedToolChoices(t *testing.T) {
 				Mode:  ai.ToolChoiceAuto,
 				Names: []string{"search"},
 			},
-			wantErr: "Gemini SDK cannot enforce allowed tool names in auto mode",
+			wantErr: "tool choice names require mode",
 		},
 		{
 			name: "none names invalid",
@@ -394,14 +392,14 @@ func TestBuildGenerateContentConfigRejectsUnsupportedToolChoices(t *testing.T) {
 				Mode:  ai.ToolChoiceNone,
 				Names: []string{"search"},
 			},
-			wantErr: "no tools may be called",
+			wantErr: "tool choice names require mode",
 		},
 		{
 			name: "unknown mode",
 			choice: ai.ToolChoice{
 				Mode: "sometimes",
 			},
-			wantErr: `unsupported gemini tool choice mode "sometimes"`,
+			wantErr: `unsupported tool choice mode "sometimes"`,
 		},
 	}
 

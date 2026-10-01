@@ -427,3 +427,116 @@ func normalizeJSON(v []byte) string {
 	}
 	return string(b)
 }
+
+func TestAIResponseCanonicalDeltasPreserveOrderAndMetadata(t *testing.T) {
+	var response ai.AIResponse
+	response.AppendToken(ai.Token{Type: ai.TokenTypeThought, Text: "consider "})
+	response.AppendToken(ai.Token{Type: ai.TokenTypeThought, Text: "options"})
+	signature := ai.ContentPart{Kind: ai.ContentReasoning, Extensions: []ai.Extension{{
+		Namespace: "anthropic", Type: "signature", Data: json.RawMessage(`"opaque-state"`), Required: true,
+	}}}
+	response.AppendToken(ai.Token{Type: ai.TokenTypePart, Part: &signature})
+	response.AppendToken(ai.Token{Type: ai.TokenTypeText, Text: "before "})
+	response.AppendToken(ai.Token{Type: ai.TokenTypeText, Data: []byte("call")})
+	call := canonicalCall("first")
+	response.AppendToken(ai.Token{Type: ai.TokenTypePart, Part: &call, Text: "ignored compatibility text"})
+	response.AppendToken(ai.Token{Type: ai.TokenTypeText, Text: "after"})
+	response.AppendToken(ai.Token{Type: ai.TokenTypeErr, Err: errors.New("transport failed"), Data: []byte("not conversation")})
+	response.AppendToken(ai.Token{Type: ai.TokenTypeCompletion, Data: []byte("not conversation"), Completion: &ai.Completion{FinishReason: "tool_calls"}})
+
+	parts := response.Message.Parts
+	if response.Message.Role != ai.RoleAssistant || len(parts) != 4 {
+		t.Fatalf("unexpected accumulated message: %#v", response.Message)
+	}
+	if parts[0].Kind != ai.ContentReasoning || parts[0].Text != "consider options" || len(parts[0].Extensions) != 1 || string(parts[0].Extensions[0].Data) != `"opaque-state"` {
+		t.Fatalf("thought metadata must attach to its reasoning part: %#v", parts[0])
+	}
+	if parts[1].Kind != ai.ContentText || parts[1].Text != "before call" || parts[2].Kind != ai.ContentToolCall || parts[2].ToolCall.ID != "first" || parts[3].Text != "after" {
+		t.Fatalf("semantic part order changed: %#v", parts)
+	}
+	if response.Text != "before callafter" || response.Reasoning != "consider options" || len(response.ToolCalls) != 1 || response.FinishReason != "tool_calls" {
+		t.Fatalf("compatibility projections disagree with canonical message: %#v", response)
+	}
+	// Stream producers and event observers may reuse their buffers or edit views.
+	signature.Extensions[0].Data[1] = 'X'
+	call.ToolCall.Args[6] = 'y'
+	response.ToolCalls[0].Args[6] = 'z'
+	if string(parts[0].Extensions[0].Data) != `"opaque-state"` || string(parts[2].ToolCall.Args) != `{"q":"x"}` {
+		t.Fatal("stream input or convenience view aliases canonical message")
+	}
+}
+
+func TestAIResponseCanonicalReasoningDeltaCountsUsage(t *testing.T) {
+	var response ai.AIResponse
+	response.AppendToken(ai.Token{Type: ai.TokenTypePart, Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: "think"}, TokenUsage: 3})
+	if response.OutputTokens != 3 || response.ReasoningTokens != 3 {
+		t.Fatalf("canonical reasoning delta usage = output %d, reasoning %d; want 3, 3", response.OutputTokens, response.ReasoningTokens)
+	}
+}
+
+func TestAIResponseSetMessageReplacesAndSnapshotsProjections(t *testing.T) {
+	call := canonicalCall("first")
+	message := ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{
+		{Kind: ai.ContentReasoning, Text: "think"},
+		{Kind: ai.ContentText, Text: "answer"},
+		{Kind: ai.ContentJSON, JSON: json.RawMessage(`{"ok":true}`)},
+		call,
+	}}
+	response := ai.AIResponse{Text: "stale", Reasoning: "stale", ToolCalls: []ai.ToolCall{{Name: "stale"}}, InputTokens: 12, OutputTokens: 8}
+	response.SetMessage(message)
+	if response.Text != `answer{"ok":true}` || response.Reasoning != "think" || len(response.ToolCalls) != 1 || response.ToolCalls[0].ID != "first" {
+		t.Fatalf("SetMessage projections = %#v", response)
+	}
+	if response.InputTokens != 12 || response.OutputTokens != 8 {
+		t.Fatal("SetMessage changed usage metadata")
+	}
+	message.Parts[0].Text = "changed"
+	message.Parts[2].JSON[2] = 'X'
+	message.Parts[3].ToolCall.Args[6] = 'y'
+	response.ToolCalls[0].Args[6] = 'z'
+	if response.Message.Reasoning() != "think" || response.Message.Text() != `answer{"ok":true}` || string(response.Message.Parts[3].ToolCall.Args) != `{"q":"x"}` {
+		t.Fatal("SetMessage did not isolate canonical message from source or convenience view")
+	}
+}
+
+func TestDetectToolCallsPreservesAuthoritativeCanonicalPart(t *testing.T) {
+	part := ai.ContentPart{Kind: ai.ContentText, Text: "canonical output", Extensions: []ai.Extension{{Namespace: "provider", Type: "continuity", Data: json.RawMessage(`"opaque"`)}}}
+	in := make(chan ai.Token, 1)
+	in <- ai.Token{Type: ai.TokenTypeText, Part: &part, Text: "stale view", Data: []byte(`{"type":"function","name":"unintended","arguments":{}}`)}
+	close(in)
+	out := collectTokens(ai.DetectToolCallsInStream(t.Context(), in, nil))
+	if len(out) != 1 || out[0].Part == nil || out[0].Part.Text != "canonical output" || len(out[0].Part.Extensions) != 1 || out[0].ToolCall != nil {
+		t.Fatalf("canonical part was discarded or parsed as a legacy tool call: %#v", out)
+	}
+}
+
+func TestTokenCloneIsolatesSemanticAndCompletionPayloads(t *testing.T) {
+	part := canonicalCall("first")
+	part.ToolCall.Extensions = []ai.Extension{{Namespace: "provider", Type: "state", Data: json.RawMessage(`"opaque"`)}}
+	token := ai.Token{Type: ai.TokenTypePart, Data: []byte("raw"), Part: &part, ToolCall: part.ToolCall, Completion: &ai.Completion{Raw: json.RawMessage(`{"id":1}`), Usage: ai.Usage{InputTokens: 12}}}
+	copy := token.Clone()
+	copy.Data[0] = 'X'
+	copy.Part.ToolCall.ID = "changed"
+	copy.Part.ToolCall.Args[6] = 'y'
+	copy.Part.ToolCall.Extensions[0].Data[1] = 'X'
+	copy.ToolCall.Name = "changed"
+	copy.ToolCall.Args[6] = 'z'
+	copy.Completion.Raw[6] = '9'
+	copy.Completion.Usage.InputTokens = 99
+	if string(token.Data) != "raw" || token.Part.ToolCall.ID != "first" || token.ToolCall.Name != "search" || string(token.ToolCall.Args) != `{"q":"x"}` || string(token.Part.ToolCall.Extensions[0].Data) != `"opaque"` || string(token.Completion.Raw) != `{"id":1}` || token.Completion.Usage.InputTokens != 12 {
+		t.Fatalf("cloned token aliases source payloads: %#v", token)
+	}
+}
+
+func TestDetectToolCallsUsesCanonicalTextForCompatibilityProtocol(t *testing.T) {
+	in := make(chan ai.Token, 2)
+	for _, text := range []string{`{"type":"function","name":"echo",`, `"arguments":{"text":"canonical"}}`} {
+		part := ai.ContentPart{Kind: ai.ContentText, Text: text}
+		in <- ai.Token{Type: ai.TokenTypeText, Part: &part, Data: []byte("stale")}
+	}
+	close(in)
+	out := collectTokens(ai.DetectToolCallsInStream(t.Context(), in, nil))
+	if len(out) != 1 || out[0].ToolCall == nil || out[0].ToolCall.Name != "echo" || string(out[0].ToolCall.Args) != `{"text":"canonical"}` {
+		t.Fatalf("canonical text protocol lost: %#v", out)
+	}
+}

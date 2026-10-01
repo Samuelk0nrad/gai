@@ -6,7 +6,8 @@ import (
 	"fmt"
 )
 
-// Content is the atomic, serializable, and renderable payload of a message.
+// Content decodes the legacy message payload format.
+// Deprecated: use ai.ContentPart for all new conversation content.
 type Content interface {
 	String() string
 	Type() string

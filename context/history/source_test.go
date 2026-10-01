@@ -15,10 +15,17 @@ func TestHistoryPartRendersStructuredContent(t *testing.T) {
 	t.Parallel()
 
 	part := &history.Part{
-		Contents: []history.Content{
-			{Role: gaictx.RoleUser, Value: gaictx.NewTextContent("hello")},
-			{Role: gaictx.RoleAssistant, Value: gaictx.NewToolCallContent("search", `{"q":"lace"}`)},
-			{Role: gaictx.RoleTool, Value: gaictx.NewToolResultContent("search", "found docs", false, "")},
+		Messages: []ai.Message{
+			{Role: gaictx.RoleUser, Parts: ai.TextParts("hello")},
+			{Role: gaictx.RoleAssistant, Parts: []ai.ContentPart{
+				{Kind: ai.ContentToolCall,
+					ToolCall: &ai.ToolCall{ID: "call_search",
+						Type: "function", Name: "search", Args: []byte(`{"q":"lace"}`)}}},
+			},
+			{Role: gaictx.RoleTool, Parts: []ai.ContentPart{
+				{Kind: ai.ContentToolResult,
+					ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "search", Parts: ai.TextParts("found docs")}}},
+			},
 		},
 	}
 
@@ -33,11 +40,11 @@ func TestHistoryPartRendersStructuredContent(t *testing.T) {
 		`hello`,
 		`</user>`,
 		`<assistant>`,
-		`<tool_call name="search">`,
+		`<tool_call id="call_search" name="search">`,
 		`<arguments>`,
 		`&#34;q&#34;`,
 		`<tool>`,
-		`<tool_result name="search">`,
+		`<tool_result id="call_search" name="search" is_error="false">`,
 		`found docs`,
 	}
 	for _, fragment := range expected {
@@ -62,11 +69,18 @@ func TestHistoryPartRendersSimpleContent(t *testing.T) {
 	t.Parallel()
 
 	part := &history.Part{
-		Contents: []history.Content{
-			{Role: gaictx.RoleUser, Value: gaictx.NewTextContent(`hello <world> & "quotes"`)},
-			{Role: gaictx.RoleAssistant, Value: gaictx.NewToolCallContent("search", `{"q":"lace<&>"}`)},
-			{Role: gaictx.RoleTool, Value: gaictx.NewToolResultContent("search", `found <docs> & "notes"`, false, "")},
-			{Role: "summary", Value: gaictx.NewTextContent("older turns")},
+		Messages: []ai.Message{
+			{Role: gaictx.RoleUser, Parts: ai.TextParts(`hello <world> & "quotes"`)},
+			{Role: gaictx.RoleAssistant, Parts: []ai.ContentPart{
+				{Kind: ai.ContentToolCall,
+					ToolCall: &ai.ToolCall{ID: "call_search",
+						Type: "function", Name: "search", Args: []byte(`{"q":"lace<&>"}`)}}},
+			},
+			{Role: gaictx.RoleTool, Parts: []ai.ContentPart{
+				{Kind: ai.ContentToolResult,
+					ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "search", Parts: ai.TextParts(`found <docs> & "notes"`)}}},
+			},
+			{Role: ai.RoleUser, Parts: ai.TextParts("older turns")},
 		},
 	}
 
@@ -79,7 +93,7 @@ func TestHistoryPartRendersSimpleContent(t *testing.T) {
 user: hello <world> & "quotes"
 assistant: {"arguments":{"q":"lace\u003c\u0026\u003e"},"name":"search","type":"function"}
 tool res: found <docs> & "notes"
-summary: older turns
+user: older turns
 </history>`
 	if got != want {
 		t.Fatalf("unexpected simple render output:\nwant %q\n got %q", want, got)
@@ -94,8 +108,11 @@ func TestHistoryPartTruncatesToolResultToPrefix(t *testing.T) {
 
 	result := strings.Repeat("a", 499) + "👋" + "discarded"
 	part := &history.Part{
-		Contents: []history.Content{
-			{Role: gaictx.RoleTool, Value: gaictx.NewToolResultContent("search", result, false, "")},
+		Messages: []ai.Message{
+			{Role: gaictx.RoleTool, Parts: []ai.ContentPart{
+				{Kind: ai.ContentToolResult,
+					ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "search", Parts: ai.TextParts(result)}}},
+			},
 		},
 	}
 
@@ -129,8 +146,8 @@ func TestHistoryPartRendersSummary(t *testing.T) {
 	t.Parallel()
 
 	part := &history.Part{
-		Contents: []history.Content{
-			{Role: "summary", Value: gaictx.NewTextContent("older turns")},
+		Messages: []ai.Message{
+			{Role: ai.RoleUser, Parts: ai.TextParts("older turns")},
 		},
 	}
 
@@ -141,7 +158,7 @@ func TestHistoryPartRendersSummary(t *testing.T) {
 
 	expected := []string{
 		`<history>`,
-		`<summary>`,
+		`<user>`,
 		`older turns`,
 	}
 	for _, fragment := range expected {
@@ -151,32 +168,6 @@ func TestHistoryPartRendersSummary(t *testing.T) {
 	}
 	if strings.Contains(got, `<message role="summary">`) || strings.Contains(got, `<summary><text>`) {
 		t.Fatalf("expected summary not to render as a message:\n%s", got)
-	}
-}
-
-func TestHistoryContentImplementsContent(t *testing.T) {
-	t.Parallel()
-
-	var content gaictx.Content = history.Content{
-		Text: "hello",
-		Role: gaictx.RoleUser,
-	}
-
-	if content.String() != "hello" {
-		t.Fatalf("unexpected String result: %q", content.String())
-	}
-	if content.Type() != gaictx.ContentTypeText {
-		t.Fatalf("unexpected Type result: %q", content.Type())
-	}
-
-	got, err := content.Marshal()
-	if err != nil {
-		t.Fatalf("Marshal failed: %v", err)
-	}
-
-	want := `{"Text":"hello","Role":"user"}`
-	if string(got) != want {
-		t.Fatalf("unexpected Marshal result:\nwant %q\n got %q", want, string(got))
 	}
 }
 
@@ -209,23 +200,21 @@ func TestHistorySourceDoesNotDiscardTurnsExcludedFromPrompt(t *testing.T) {
 				EndTurnID:      "turn-2",
 				StartTurnCount: 1,
 				EndTurnCount:   2,
-				Content:        gaictx.NewTextContent("summary"),
+				Content:        summaryText("summary"),
 			},
 			Turns: []gaictx.Turn{
 				{
 					ID:    "turn-3",
 					Count: 3,
-					UserMessage: &gaictx.Message{
-						Content:    gaictx.NewTextContent("hello"),
-						TokenCount: map[string]int{"mock.counter": 1},
+					UserMessage: &gaictx.StoredMessage{
+						TokenCount: map[string]int{"mock.counter": 1}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("hello")},
 					},
 				},
 				{
 					ID:    "turn-4",
 					Count: 4,
-					UserMessage: &gaictx.Message{
-						Content:    gaictx.NewTextContent("this message is too long"),
-						TokenCount: map[string]int{"mock.counter": 100},
+					UserMessage: &gaictx.StoredMessage{
+						TokenCount: map[string]int{"mock.counter": 100}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("this message is too long")},
 					},
 				},
 			},
@@ -262,17 +251,17 @@ func TestHistorySourceIncludesNewestFittingTurnsInChronologicalOrder(t *testing.
 				{
 					ID:       "turn-1",
 					Count:    1,
-					Messages: []gaictx.Message{{Role: gaictx.RoleAssistant, Content: gaictx.NewTextContent("oldest"), TokenCount: map[string]int{"mock.counter": 100}}},
+					Messages: []gaictx.StoredMessage{{TokenCount: map[string]int{"mock.counter": 100}, Message: ai.Message{Role: gaictx.RoleAssistant, Parts: ai.TextParts("oldest")}}},
 				},
 				{
 					ID:       "turn-2",
 					Count:    2,
-					Messages: []gaictx.Message{{Role: gaictx.RoleAssistant, Content: gaictx.NewTextContent("middle"), TokenCount: map[string]int{"mock.counter": 2}}},
+					Messages: []gaictx.StoredMessage{{TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: gaictx.RoleAssistant, Parts: ai.TextParts("middle")}}},
 				},
 				{
 					ID:       "turn-3",
 					Count:    3,
-					Messages: []gaictx.Message{{Role: gaictx.RoleAssistant, Content: gaictx.NewTextContent("newest"), TokenCount: map[string]int{"mock.counter": 2}}},
+					Messages: []gaictx.StoredMessage{{TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: gaictx.RoleAssistant, Parts: ai.TextParts("newest")}}},
 				},
 			},
 		},
@@ -286,8 +275,8 @@ func TestHistorySourceIncludesNewestFittingTurnsInChronologicalOrder(t *testing.
 		t.Fatalf("Function failed: %v", err)
 	}
 	part := result.(*history.Part)
-	if len(part.Contents) != 2 || part.Contents[0].String() != "middle" || part.Contents[1].String() != "newest" {
-		t.Fatalf("expected newest fitting turns in chronological order, got %+v", part.Contents)
+	if len(part.Messages) != 2 || part.Messages[0].Text() != "middle" || part.Messages[1].Text() != "newest" {
+		t.Fatalf("expected newest fitting turns in chronological order, got %+v", part.Messages)
 	}
 	if len(store.saved.Turns) != 3 {
 		t.Fatalf("expected all persisted turns to be preserved, got %+v", store.saved.Turns)
@@ -314,25 +303,22 @@ func TestHistorySourceDoesNotSummarizeWhenHistoryFitsBudget(t *testing.T) {
 				{
 					ID:    "turn-1",
 					Count: 1,
-					UserMessage: &gaictx.Message{
-						Content:    gaictx.NewTextContent("first user"),
-						TokenCount: map[string]int{"mock.counter": 2},
+					UserMessage: &gaictx.StoredMessage{
+						TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("first user")},
 					},
 				},
 				{
 					ID:    "turn-2",
 					Count: 2,
-					UserMessage: &gaictx.Message{
-						Content:    gaictx.NewTextContent("second user"),
-						TokenCount: map[string]int{"mock.counter": 2},
+					UserMessage: &gaictx.StoredMessage{
+						TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("second user")},
 					},
 				},
 				{
 					ID:    "turn-3",
 					Count: 3,
-					UserMessage: &gaictx.Message{
-						Content:    gaictx.NewTextContent("third user"),
-						TokenCount: map[string]int{"mock.counter": 2},
+					UserMessage: &gaictx.StoredMessage{
+						TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("third user")},
 					},
 				},
 			},
@@ -383,25 +369,22 @@ func TestHistorySourceSummarizesOldestTurnsWhenBudgetReached(t *testing.T) {
 				{
 					ID:    "turn-1",
 					Count: 1,
-					UserMessage: &gaictx.Message{
-						Content:    gaictx.NewTextContent("first user"),
-						TokenCount: map[string]int{"mock.counter": 2},
+					UserMessage: &gaictx.StoredMessage{
+						TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("first user")},
 					},
 				},
 				{
 					ID:    "turn-2",
 					Count: 2,
-					UserMessage: &gaictx.Message{
-						Content:    gaictx.NewTextContent("second user"),
-						TokenCount: map[string]int{"mock.counter": 2},
+					UserMessage: &gaictx.StoredMessage{
+						TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("second user")},
 					},
 				},
 				{
 					ID:    "turn-3",
 					Count: 3,
-					UserMessage: &gaictx.Message{
-						Content:    gaictx.NewTextContent("third user"),
-						TokenCount: map[string]int{"mock.counter": 2},
+					UserMessage: &gaictx.StoredMessage{
+						TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("third user")},
 					},
 				},
 			},
@@ -438,7 +421,7 @@ func TestHistorySourceSummarizesOldestTurnsWhenBudgetReached(t *testing.T) {
 	if store.saved.Summary == nil {
 		t.Fatal("expected summary to be saved")
 	}
-	if got := store.saved.Summary.Content.String(); got != "summary text" {
+	if got := store.saved.Summary.Content.Text; got != "summary text" {
 		t.Fatalf("unexpected summary content: %q", got)
 	}
 	if store.saved.Summary.StartTurnID != "turn-1" || store.saved.Summary.EndTurnID != "turn-2" {
@@ -482,23 +465,21 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 					EndTurnID:      "turn-2",
 					StartTurnCount: 1,
 					EndTurnCount:   2,
-					Content:        gaictx.NewTextContent("summary"),
+					Content:        summaryText("summary"),
 				},
 				Turns: []gaictx.Turn{
 					{
 						ID:    "turn-3",
 						Count: 3,
-						UserMessage: &gaictx.Message{
-							Content:    gaictx.NewTextContent("hello"),
-							TokenCount: map[string]int{"mock.counter": 1},
+						UserMessage: &gaictx.StoredMessage{
+							TokenCount: map[string]int{"mock.counter": 1}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("hello")},
 						},
 					},
 					{
 						ID:    "turn-4",
 						Count: 4,
-						UserMessage: &gaictx.Message{
-							Content:    gaictx.NewTextContent("this message is too long"),
-							TokenCount: map[string]int{"mock.counter": 100},
+						UserMessage: &gaictx.StoredMessage{
+							TokenCount: map[string]int{"mock.counter": 100}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("this message is too long")},
 						},
 					},
 				},
@@ -516,25 +497,22 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 					{
 						ID:    "turn-1",
 						Count: 1,
-						UserMessage: &gaictx.Message{
-							Content:    gaictx.NewTextContent("first user"),
-							TokenCount: map[string]int{"mock.counter": 2},
+						UserMessage: &gaictx.StoredMessage{
+							TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("first user")},
 						},
 					},
 					{
 						ID:    "turn-2",
 						Count: 2,
-						UserMessage: &gaictx.Message{
-							Content:    gaictx.NewTextContent("second user"),
-							TokenCount: map[string]int{"mock.counter": 2},
+						UserMessage: &gaictx.StoredMessage{
+							TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("second user")},
 						},
 					},
 					{
 						ID:    "turn-3",
 						Count: 3,
-						UserMessage: &gaictx.Message{
-							Content:    gaictx.NewTextContent("third user"),
-							TokenCount: map[string]int{"mock.counter": 2},
+						UserMessage: &gaictx.StoredMessage{
+							TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("third user")},
 						},
 					},
 				},
@@ -557,25 +535,22 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 					{
 						ID:    "turn-1",
 						Count: 1,
-						UserMessage: &gaictx.Message{
-							Content:    gaictx.NewTextContent("first user"),
-							TokenCount: map[string]int{"mock.counter": 2},
+						UserMessage: &gaictx.StoredMessage{
+							TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("first user")},
 						},
 					},
 					{
 						ID:    "turn-2",
 						Count: 2,
-						UserMessage: &gaictx.Message{
-							Content:    gaictx.NewTextContent("second user"),
-							TokenCount: map[string]int{"mock.counter": 2},
+						UserMessage: &gaictx.StoredMessage{
+							TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("second user")},
 						},
 					},
 					{
 						ID:    "turn-3",
 						Count: 3,
-						UserMessage: &gaictx.Message{
-							Content:    gaictx.NewTextContent("third user"),
-							TokenCount: map[string]int{"mock.counter": 2},
+						UserMessage: &gaictx.StoredMessage{
+							TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("third user")},
 						},
 					},
 				},
@@ -650,7 +625,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 				if tt.wantSummaryEndTurn != "" && store.saved.Summary.EndTurnID != tt.wantSummaryEndTurn {
 					t.Fatalf("unexpected summary end turn: want %q got %q", tt.wantSummaryEndTurn, store.saved.Summary.EndTurnID)
 				}
-				if got := store.saved.Summary.Content.String(); tt.wantSummaryContent != "" && got != tt.wantSummaryContent {
+				if got := store.saved.Summary.Content.Text; tt.wantSummaryContent != "" && got != tt.wantSummaryContent {
 					t.Fatalf("unexpected summary content: want %q got %q", tt.wantSummaryContent, got)
 				}
 			}
@@ -674,8 +649,8 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 func TestDefaultEstimatorRecountsCJKHistoryUnderNewIdentity(t *testing.T) {
 	t.Parallel()
 	store := &historyStore{state: &history.HistoryState{Turns: []gaictx.Turn{
-		{ID: "old", Count: 1, UserMessage: &gaictx.Message{Role: gaictx.RoleUser, Content: gaictx.NewTextContent(strings.Repeat("界", 40))}, TokenCount: map[string]int{"gai.estimate/chars-v1": 10}},
-		{ID: "new", Count: 2, UserMessage: &gaictx.Message{Role: gaictx.RoleUser, Content: gaictx.NewTextContent("ok")}},
+		{ID: "old", Count: 1, UserMessage: &gaictx.StoredMessage{Message: ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts(strings.Repeat("界", 40))}}, TokenCount: map[string]int{"gai.estimate/chars-v1": 10}},
+		{ID: "new", Count: 2, UserMessage: &gaictx.StoredMessage{Message: ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("ok")}}},
 	}}}
 	source := history.NewHistory("session", store)
 	builder := gaictx.New(gaictx.Definition{TokenBudget: 20, ContextSources: []gaictx.ContextSource{source}})
@@ -696,3 +671,5 @@ func TestDefaultEstimatorRecountsCJKHistoryUnderNewIdentity(t *testing.T) {
 		t.Fatal("prompt selection discarded persisted history")
 	}
 }
+
+func summaryText(text string) ai.ContentPart { return ai.ContentPart{Kind: ai.ContentText, Text: text} }

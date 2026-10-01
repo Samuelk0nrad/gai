@@ -195,9 +195,9 @@ func TestModelDescriptorRejectsUnadvertisedReasoningEffort(t *testing.T) {
 }
 
 func TestModelDescriptorRejectsUnsupportedNativeCapabilities(t *testing.T) {
-	messageErr := (ModelDescriptor{Model: "test", NativeMessages: FeatureSupportUnsupported}).ValidateRequest(AIRequest{Messages: []RequestMessage{{Role: RequestMessageRoleUser, Text: "hello"}}})
-	if !errors.Is(messageErr, ErrUnsupportedCapability) {
-		t.Fatalf("native message error = %v, want unsupported capability", messageErr)
+	messageErr := (ModelDescriptor{Model: "test", NativeMessages: FeatureSupportUnsupported}).ValidateRequest(AIRequest{Messages: []Message{TextMessage(RoleUser, "hello")}})
+	if messageErr != nil {
+		t.Fatalf("canonical text must not require native messages: %v", messageErr)
 	}
 	toolErr := (ModelDescriptor{Model: "test", NativeTools: FeatureSupportUnsupported}).ValidateRequest(AIRequest{Tools: []ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: []byte(`{"type":"object"}`)}}})
 	if !errors.Is(toolErr, ErrUnsupportedCapability) {
@@ -205,25 +205,24 @@ func TestModelDescriptorRejectsUnsupportedNativeCapabilities(t *testing.T) {
 	}
 }
 
-func TestModelDescriptorRejectsToolHistoryWithoutNativeTools(t *testing.T) {
+func TestModelDescriptorPermitsSemanticToolHistoryWithoutNativeTools(t *testing.T) {
 	d := ModelDescriptor{
 		Model:          "test",
 		NativeMessages: FeatureSupportSupported,
 		NativeTools:    FeatureSupportUnsupported,
 	}
-	req := AIRequest{Messages: []RequestMessage{
-		{Role: RequestMessageRoleAssistant, ToolCalls: []RequestToolCall{{ID: "call_1", Name: "search", Arguments: json.RawMessage(`{"q":"x"}`)}}},
-		{Role: RequestMessageRoleTool, ToolResult: &RequestToolResult{ToolCallID: "call_1", Name: "search", Content: "ok"}},
+	req := AIRequest{Messages: []Message{
+		{Role: RoleAssistant, Parts: []ContentPart{{Kind: ContentToolCall, ToolCall: &ToolCall{ID: "call_1", Type: "function", Name: "search", Args: json.RawMessage(`{"q":"x"}`)}}}},
+		{Role: RoleTool, Parts: []ContentPart{{Kind: ContentToolResult, ToolResult: &ToolResult{ToolCallID: "call_1", Name: "search", Parts: TextParts("ok")}}}},
 	}}
 
-	err := d.ValidateRequest(req)
-	if !errors.Is(err, ErrUnsupportedCapability) {
-		t.Fatalf("tool history error = %v, want unsupported capability", err)
+	if err := d.ValidateRequest(req); err != nil {
+		t.Fatalf("semantic tool history must permit text fallback: %v", err)
 	}
-	var unsupported *UnsupportedCapabilityError
-	if !errors.As(err, &unsupported) || unsupported.Capability != "native tools" {
-		t.Fatalf("error = %#v, want native tools capability error", err)
+	if _, err := RenderMessages(t.Context(), req.Messages); err != nil {
+		t.Fatalf("fallback: %v", err)
 	}
+
 }
 
 func TestValidateModelRequestSupportsLegacyModel(t *testing.T) {

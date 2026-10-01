@@ -2,7 +2,6 @@ package agent
 
 import (
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
 )
 
@@ -40,46 +39,22 @@ func cloneTokens(tokens []ai.Token) []ai.Token {
 	if tokens == nil {
 		return nil
 	}
-	cloned := make([]ai.Token, len(tokens))
-	for i, token := range tokens {
-		cloned[i] = token
-		cloned[i].Data = append([]byte(nil), token.Data...)
-		cloned[i].ToolCall = cloneToolCall(token.ToolCall)
-		if token.Completion != nil {
-			completion := *token.Completion
-			completion.Raw = append([]byte(nil), token.Completion.Raw...)
-			cloned[i].Completion = &completion
-		}
+	out := make([]ai.Token, len(tokens))
+	for i := range tokens {
+		out[i] = tokens[i].Clone()
 	}
-	return cloned
+	return out
 }
 
 func cloneToolCall(call *ai.ToolCall) *ai.ToolCall {
 	if call == nil {
 		return nil
 	}
-	cloned := *call
-	cloned.Args = append([]byte(nil), call.Args...)
-	cloned.ThoughtSignature = append([]byte(nil), call.ThoughtSignature...)
+	cloned := call.Clone()
 	return &cloned
 }
 
-func cloneMessages(messages []gaictx.Message) []gaictx.Message {
-	if messages == nil {
-		return nil
-	}
-	cloned := make([]gaictx.Message, len(messages))
-	for i, message := range messages {
-		cloned[i] = message
-		if message.TokenCount != nil {
-			cloned[i].TokenCount = make(map[string]int, len(message.TokenCount))
-			for counter, count := range message.TokenCount {
-				cloned[i].TokenCount[counter] = count
-			}
-		}
-	}
-	return cloned
-}
+func cloneMessages(messages []ai.Message) []ai.Message { return ai.CloneMessages(messages) }
 
 func cloneIterationPtr(iteration *loop.Iteration) *loop.Iteration {
 	if iteration == nil {
@@ -93,30 +68,11 @@ func cloneIterations(iterations []loop.Iteration) []loop.Iteration {
 	if iterations == nil {
 		return nil
 	}
-	cloned := make([]loop.Iteration, len(iterations))
-	for i, iteration := range iterations {
-		cloned[i] = iteration
-		if iteration.UserMessage != nil {
-			message := cloneMessages([]gaictx.Message{*iteration.UserMessage})[0]
-			cloned[i].UserMessage = &message
-		}
-		cloned[i].Parts = make([]loop.IterationPart, len(iteration.Parts))
-		for j, part := range iteration.Parts {
-			cloned[i].Parts[j] = part
-			if part.Response != nil {
-				response := *part.Response
-				response.Raw = append([]byte(nil), part.Response.Raw...)
-				response.ToolCalls = make([]ai.ToolCall, len(part.Response.ToolCalls))
-				for k := range part.Response.ToolCalls {
-					response.ToolCalls[k] = *cloneToolCall(&part.Response.ToolCalls[k])
-				}
-				cloned[i].Parts[j].Response = &response
-			}
-			cloned[i].Parts[j].ToolReq = cloneToolCall(part.ToolReq)
-			cloned[i].Parts[j].ToolResp = cloneToolResponse(part.ToolResp)
-		}
+	out := make([]loop.Iteration, len(iterations))
+	for i := range iterations {
+		out[i] = iterations[i].Clone()
 	}
-	return cloned
+	return out
 }
 
 func cloneToolResponse(response *loop.ToolResponse) *loop.ToolResponse {

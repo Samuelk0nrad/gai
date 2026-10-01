@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -17,18 +18,52 @@ type Summary struct {
 	EndTurnID      string
 	StartTurnCount int
 	EndTurnCount   int
-	Content        gaictx.TextContent
+	Content        ai.ContentPart
 	tokenCount     map[string]int
 }
 
-func NewSummary(id, startTurnID, endTurnID string, startTurnCount, endTurnCount int, content gaictx.TextContent) *Summary {
+// MarshalJSON rejects content that the summary reader cannot retain. Storage
+// must not successfully save a state that its own decoder will reject.
+func (s Summary) MarshalJSON() ([]byte, error) {
+	type summaryValue Summary
+	if s.Content.Kind != ai.ContentText {
+		return nil, fmt.Errorf("summary requires a text content part")
+	}
+	if err := s.Content.Validate(); err != nil {
+		return nil, err
+	}
+	return json.Marshal(summaryValue(s))
+}
+
+// UnmarshalJSON upgrades legacy {"Text": ...} summary payloads to canonical
+// text parts while rejecting structured content that a summary cannot retain.
+func (s *Summary) UnmarshalJSON(data []byte) error {
+	type summaryValue Summary
+	var decoded summaryValue
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if decoded.Content.Kind == "" {
+		decoded.Content.Kind = ai.ContentText
+	}
+	if decoded.Content.Kind != ai.ContentText {
+		return fmt.Errorf("summary requires a text content part")
+	}
+	if err := decoded.Content.Validate(); err != nil {
+		return err
+	}
+	*s = Summary(decoded)
+	return nil
+}
+
+func NewSummary(id, startTurnID, endTurnID string, startTurnCount, endTurnCount int, content ai.ContentPart) *Summary {
 	return &Summary{
 		ID:             id,
 		StartTurnID:    startTurnID,
 		EndTurnID:      endTurnID,
 		StartTurnCount: startTurnCount,
 		EndTurnCount:   endTurnCount,
-		Content:        content,
+		Content:        ai.CloneParts([]ai.ContentPart{content})[0],
 		tokenCount:     map[string]int{},
 	}
 }
@@ -61,7 +96,12 @@ func (s *HistorySource) summarizeState(ctx context.Context, state *HistoryState,
 	var builder strings.Builder
 
 	if state.Summary != nil {
-		builder.WriteString(state.Summary.Content.String())
+		text, renderErr := ai.RenderMessages(ctx, []ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{state.Summary.Content}}})
+		if renderErr != nil {
+			err = renderErr
+			return nil, err
+		}
+		builder.WriteString(text)
 		builder.WriteString("\n")
 	}
 
@@ -72,7 +112,9 @@ func (s *HistorySource) summarizeState(ctx context.Context, state *HistoryState,
 	}
 	summarizedTurns := state.Turns[:summarizedTurnCount]
 	for i := range summarizedTurns {
-		writeTurn(&builder, &summarizedTurns[i])
+		if err = writeTurn(ctx, &builder, &summarizedTurns[i]); err != nil {
+			return nil, err
+		}
 	}
 
 	req := summary.Request{
@@ -93,13 +135,13 @@ func (s *HistorySource) summarizeState(ctx context.Context, state *HistoryState,
 		EndTurnID:      lastTurn.ID,
 		StartTurnCount: firstTurn.Count,
 		EndTurnCount:   lastTurn.Count,
-		Content:        gaictx.NewTextContent(res),
+		Content:        ai.ContentPart{Kind: ai.ContentText, Text: res},
 	}
 	if state.Summary != nil {
 		nextSummary.StartTurnID = state.Summary.StartTurnID
 		nextSummary.StartTurnCount = state.Summary.StartTurnCount
 	}
-	tokenCount, err := s.counter.CountTokens(ctx, nextSummary.Content.String())
+	tokenCount, err := s.counter.CountTokens(ctx, nextSummary.Content.Text)
 	if err != nil {
 		obs.SummaryTokenCountFailed(ctx, nextSummary, err)
 		return nil, err
@@ -128,22 +170,21 @@ func (s *HistorySource) summarizedTurnCount(turnCount int) int {
 	return count
 }
 
-func writeTurn(builder *strings.Builder, turn *gaictx.Turn) {
+func writeTurn(ctx context.Context, builder *strings.Builder, turn *gaictx.Turn) error {
+	var messages []ai.Message
 	if turn.UserMessage != nil {
-		builder.WriteString("user: ")
-		if turn.UserMessage.Content != nil {
-			builder.WriteString(turn.UserMessage.Content.String())
-		}
-		builder.WriteString("\n")
+		messages = append(messages, turn.UserMessage.Message)
 	}
 	for _, message := range turn.Messages {
-		builder.WriteString(string(message.Role))
-		builder.WriteString(": ")
-		if message.Content != nil {
-			builder.WriteString(message.Content.String())
-		}
-		builder.WriteString("\n")
+		messages = append(messages, message.Message)
 	}
+	text, err := ai.RenderMessages(ctx, messages)
+	if err != nil {
+		return err
+	}
+	builder.WriteString(text)
+	builder.WriteString("\n")
+	return nil
 }
 
 func (s *Summary) TokenCount(counter ai.TokenCounter) (int, error) {
@@ -162,7 +203,7 @@ func (s *Summary) TokenCount(counter ai.TokenCounter) (int, error) {
 	} else if ok {
 		delete(s.tokenCount, counterID)
 	}
-	count, err := counter.CountTokens(context.Background(), s.Content.String())
+	count, err := counter.CountTokens(context.Background(), s.Content.Text)
 	if err != nil {
 		return 0, err
 	}

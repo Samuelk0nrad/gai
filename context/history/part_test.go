@@ -2,9 +2,9 @@ package history
 
 import (
 	"context"
+	"github.com/lace-ai/gai/ai"
 	"testing"
 
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/testutil/mocks"
 )
 
@@ -13,8 +13,8 @@ func TestPartTokensRecountsNegativeCachedValue(t *testing.T) {
 
 	counter := &mocks.MockTokenCounter{Count: 6}
 	part := &Part{
-		Contents: []Content{
-			{Value: gaictx.NewTextContent("hello")},
+		Messages: []ai.Message{
+			{Parts: ai.TextParts("hello")},
 		},
 		TokenCount: map[string]int{"mock.counter": -1},
 	}

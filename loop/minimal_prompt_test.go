@@ -23,7 +23,7 @@ func (b *fixedPromptBuilder) BuildContext(context.Context) ([]gaictx.Part, error
 }
 
 func (b *fixedPromptBuilder) BuildPrompt(context.Context, gaictx.Conversation) (string, error) {
-	return b.input.User.String(), nil
+	return (ai.Message{Parts: b.input.User}).Text(), nil
 }
 
 func (b *fixedPromptBuilder) Input() gaictx.PromptInput { return b.input.Clone() }
@@ -34,7 +34,7 @@ func TestLoopAcceptsMinimalPromptBuilderAndRecordsUserInput(t *testing.T) {
 	model := &scriptedStreamModel{sequences: [][]ai.Token{
 		{{Type: ai.TokenTypeText, Data: []byte("answer")}},
 	}}
-	builder := &fixedPromptBuilder{input: gaictx.PromptInput{User: gaictx.NewTextContent("question")}}
+	builder := &fixedPromptBuilder{input: gaictx.PromptInput{User: ai.TextParts("question")}}
 	l := loop.New(model, nil, builder, nil)
 	if err := loopError(collectLoopEvents(t, l, t.Context())); err != nil {
 		t.Fatalf("loop failed: %v", err)
@@ -43,14 +43,18 @@ func TestLoopAcceptsMinimalPromptBuilderAndRecordsUserInput(t *testing.T) {
 		t.Fatalf("BuildContext calls = %d, want 1", builder.contextCalls)
 	}
 	requests := model.Requests()
-	if len(requests) != 1 || requests[0].Prompt != "question" {
+	if len(requests) != 1 || len(requests[0].Messages) != 1 || requests[0].Messages[0].Text() != "question" {
 		t.Fatalf("requests = %#v, want rendered question", requests)
 	}
-	if len(requests[0].Messages) != 0 {
+	if len(requests[0].Messages) != 1 {
 		t.Fatalf("minimal builder unexpectedly supplied native messages: %#v", requests[0].Messages)
 	}
 	messages := l.Messages()
-	if len(messages) != 2 || messages[0].Role != gaictx.RoleUser || messages[0].Content.String() != "question" || messages[1].Role != gaictx.RoleAssistant || messages[1].Content.String() != "answer" {
+	if len(messages) != 2 || messages[0].Role != gaictx.RoleUser || messages[0].Text() != "question" || messages[1].Role != gaictx.RoleAssistant || messages[1].Text() != "answer" {
 		t.Fatalf("conversation = %#v, want the user question and assistant answer", messages)
 	}
+}
+
+func (b *fixedPromptBuilder) BuildRequest(ctx context.Context, conv gaictx.Conversation) (ai.AIRequest, error) {
+	return ai.AIRequest{Messages: []ai.Message{{Role: ai.RoleUser, Parts: ai.CloneParts(b.input.User)}}}, nil
 }

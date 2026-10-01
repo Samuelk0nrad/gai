@@ -25,6 +25,30 @@ type ToolCall struct {
 	// ThoughtSignature is opaque provider state that must accompany a tool call
 	// in a subsequent provider-native history request.
 	ThoughtSignature []byte
+	// Extensions retains provider continuity state on this exact call.
+	Extensions []Extension
+}
+
+// Clone snapshots a call. Legacy signatures remain opaque until a provider
+// adapter can identify their namespace; new providers emit Extensions directly.
+func (tc ToolCall) Clone() ToolCall {
+	tc.Args = append(json.RawMessage(nil), tc.Args...)
+	tc.Extensions = CloneExtensions(tc.Extensions)
+	tc.ThoughtSignature = append([]byte(nil), tc.ThoughtSignature...)
+	return tc
+}
+
+// ThoughtSignatureBytes decodes the scoped Google continuity signature.
+func (tc ToolCall) ThoughtSignatureBytes() []byte {
+	for _, e := range tc.Extensions {
+		if e.Namespace == "google" && e.Type == "thought_signature" {
+			var data []byte
+			if json.Unmarshal(e.Data, &data) == nil {
+				return data
+			}
+		}
+	}
+	return append([]byte(nil), tc.ThoughtSignature...)
 }
 
 // Validate checks that the tool call has an ID, the "function" type, and a
@@ -251,8 +275,16 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 				}
 			}
 			result.inputTokenEvents++
-			// non-text tokens: passthrough.
-			if t.Type != TokenTypeText {
+			// Unsigned canonical text participates in the compatibility tool
+			// protocol using its authoritative text, never stale legacy Data.
+			// Opaque metadata and other parts pass through intact.
+			if t.Part != nil && t.Part.Kind == ContentText && len(t.Part.Extensions) == 0 {
+				t.Type = TokenTypeText
+				t.Text = t.Part.Text
+				t.Data = []byte(t.Part.Text)
+				t.Part = nil
+			}
+			if t.Part != nil || t.Type != TokenTypeText {
 				if t.Type == TokenTypeCompletion && isJSONCandidate {
 					pendingPayload := joinTokenData(pending)
 					observer.Pending(&result, pendingPayload)

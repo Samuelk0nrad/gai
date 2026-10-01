@@ -31,7 +31,7 @@ func (s *testContextSource) Function(ctx context.Context, tokenBudget int) (Part
 
 type emptyConversation struct{}
 
-func (emptyConversation) Messages() []Message {
+func (emptyConversation) Messages() []ai.Message {
 	return nil
 }
 
@@ -58,14 +58,14 @@ func TestNewPromptBuilderFromDefinition(t *testing.T) {
 	builder := New(Definition{
 		SystemInstructions: []Part{NewTextPart("system")},
 		ContextSources:     []ContextSource{source},
-		PromptInput:        PromptInput{User: NewTextContent("user")},
+		PromptInput:        PromptInput{User: ai.TextParts("user")},
 		TokenBudget:        12,
 	})
 
 	if builder.Renderer == nil {
 		t.Fatal("expected default renderer")
 	}
-	if got := builder.Input().User.String(); got != "user" {
+	if got := builder.Input().User[0].Text; got != "user" {
 		t.Fatalf("expected user prompt %q, got %q", "user", got)
 	}
 
@@ -84,7 +84,7 @@ func TestNewPromptBuilderFromDefinition(t *testing.T) {
 
 	systemIndex := strings.Index(prompt, "system")
 	contextIndex := strings.Index(prompt, "context")
-	userIndex := strings.Index(prompt, "user")
+	userIndex := strings.LastIndex(prompt, "user\n")
 	if systemIndex < 0 || contextIndex < 0 || userIndex < 0 {
 		t.Fatalf("expected prompt to contain system, context, and user prompt: %q", prompt)
 	}
@@ -94,46 +94,41 @@ func TestNewPromptBuilderFromDefinition(t *testing.T) {
 }
 
 type messageConversation struct {
-	messages []Message
+	messages []ai.Message
 }
 
-func (c messageConversation) Messages() []Message {
+func (c messageConversation) Messages() []ai.Message {
 	return c.messages
 }
 
-type nativeMessageConversation struct {
-	messageConversation
-	nativeMessages []ai.RequestMessage
-}
-
-func (c nativeMessageConversation) NativeMessages() []ai.RequestMessage {
-	return c.nativeMessages
-}
-
-func TestBuildRequestCombinesPromptAndNativeConversation(t *testing.T) {
+func TestBuildRequestPreservesRolesAndCanonicalConversation(t *testing.T) {
 	t.Parallel()
-
-	builder := New(Definition{
-		SystemInstructions: []Part{NewTextPart("system")},
-		PromptInput:        PromptInput{User: NewTextContent("question")},
-	})
-	prompt, messages, err := builder.BuildRequest(context.Background(), nativeMessageConversation{
-		nativeMessages: []ai.RequestMessage{{Role: ai.RequestMessageRoleAssistant, Text: "answer"}},
-	})
+	builder := New(Definition{SystemInstructions: []Part{NewTextPart("system")}, PromptInput: PromptInput{User: ai.TextParts("question")}})
+	request, err := builder.BuildRequest(t.Context(), messageConversation{messages: []ai.Message{ai.TextMessage(ai.RoleAssistant, "answer")}})
 	if err != nil {
-		t.Fatalf("BuildRequest failed: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(prompt, "system") || !strings.Contains(prompt, "question") {
-		t.Fatalf("compatibility prompt = %q", prompt)
+	if request.Prompt != "" {
+		t.Fatalf("request retains second source of truth: %q", request.Prompt)
 	}
-	if len(messages) != 2 {
-		t.Fatalf("messages = %#v, want base user and native assistant messages", messages)
+	if len(request.Messages) != 3 {
+		t.Fatalf("messages = %#v", request.Messages)
 	}
-	if messages[0].Role != ai.RequestMessageRoleUser || !strings.Contains(messages[0].Text, "system") || !strings.Contains(messages[0].Text, "question") {
-		t.Fatalf("base message = %#v", messages[0])
+	for i, role := range []ai.Role{ai.RoleSystem, ai.RoleUser, ai.RoleAssistant} {
+		if request.Messages[i].Role != role {
+			t.Fatalf("message %d role = %q, want %q", i, request.Messages[i].Role, role)
+		}
 	}
-	if messages[1].Role != ai.RequestMessageRoleAssistant || messages[1].Text != "answer" {
-		t.Fatalf("native message = %#v", messages[1])
+	if !strings.Contains(request.Messages[0].Text(), "system") || request.Messages[1].Text() != "question" || request.Messages[2].Text() != "answer" {
+		t.Fatalf("messages = %#v", request.Messages)
+	}
+	prompt, err := builder.BuildPrompt(t.Context(), messageConversation{messages: []ai.Message{ai.TextMessage(ai.RoleAssistant, "answer")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := ai.RenderMessages(t.Context(), request.Messages)
+	if err != nil || prompt != want {
+		t.Fatalf("fallback = %q, want canonical projection %q: %v", prompt, want, err)
 	}
 }
 
@@ -142,18 +137,21 @@ func TestBuildPromptRendersStructuredConversationContent(t *testing.T) {
 
 	builder := New(Definition{
 		SystemInstructions: []Part{NewTextPart("system")},
-		PromptInput:        PromptInput{User: NewTextContent("find docs")},
+		PromptInput:        PromptInput{User: ai.TextParts("find docs")},
 	})
 
 	prompt, err := builder.BuildPrompt(context.Background(), messageConversation{
-		messages: []Message{
+		messages: []ai.Message{
 			{
-				Role:    RoleAssistant,
-				Content: NewToolCallContent("search", `{"q":"lace"}`),
+				Role: RoleAssistant, Parts: []ai.ContentPart{
+					{Kind: ai.ContentToolCall,
+						ToolCall: &ai.ToolCall{ID: "call_search",
+							Type: "function", Name: "search", Args: []byte(`{"q":"lace"}`)}}},
 			},
 			{
-				Role:    RoleTool,
-				Content: NewToolResultContent("search", "found <docs>", true, "cached"),
+				Role: RoleTool, Parts: []ai.ContentPart{
+					{Kind: ai.ContentToolResult,
+						ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "search", Parts: ai.TextParts("found <docs>")}}},
 			},
 		},
 	})
@@ -166,12 +164,10 @@ func TestBuildPromptRendersStructuredConversationContent(t *testing.T) {
 		`find docs`,
 		`</user>`,
 		`<assistant>`,
-		`<tool_call name="search">`,
-		`<arguments>`,
+		`<tool_call id="call_search" name="search">`,
 		`{&#34;q&#34;:&#34;lace&#34;}`,
 		`<tool>`,
-		`<tool_result name="search">`,
-		`<result>`,
+		`<tool_result id="call_search" name="search" is_error="false">`,
 		`found &lt;docs&gt;`,
 	}
 	for _, fragment := range expected {
@@ -207,19 +203,20 @@ func TestBuildPromptOrdersInputContextBeforeUserAndConversation(t *testing.T) {
 		SystemInstructions: []Part{NewTextPart("system")},
 		ContextSources:     []ContextSource{&testContextSource{name: "source", text: "configured context"}},
 		PromptInput: PromptInput{
-			User:    NewTextContent("current user"),
+			User: ai.TextParts("current user"),
+
 			Context: []Part{observation},
 		},
 	})
 	if _, err := builder.BuildContext(t.Context()); err != nil {
 		t.Fatalf("BuildContext failed: %v", err)
 	}
-	prompt, err := builder.BuildPrompt(t.Context(), messageConversation{messages: []Message{{Role: RoleAssistant, Content: NewTextContent("assistant delta")}}})
+	prompt, err := builder.BuildPrompt(t.Context(), messageConversation{messages: []ai.Message{{Role: RoleAssistant, Parts: ai.TextParts("assistant delta")}}})
 	if err != nil {
 		t.Fatalf("BuildPrompt failed: %v", err)
 	}
 
-	ordered := []string{"system", "configured context", "<memory_observation>", "current user", "assistant delta"}
+	ordered := []string{"system", "configured context", "memory_observation", "current user", "assistant delta"}
 	previous := -1
 	for _, fragment := range ordered {
 		index := strings.Index(prompt, fragment)
@@ -260,7 +257,7 @@ func TestPromptBuilderEmitsExistingEventsWithoutSensitiveFieldsByDefault(t *test
 	builder := New(Definition{
 		SystemInstructions: []Part{NewTextPart("system prompt")},
 		ContextSources:     []ContextSource{source},
-		PromptInput:        PromptInput{User: NewTextContent("find docs")},
+		PromptInput:        PromptInput{User: ai.TextParts("find docs")},
 		TokenBudget:        10,
 		ObservationSink:    sink,
 	})
@@ -283,7 +280,8 @@ func TestPromptBuilderEmitsExistingEventsWithoutSensitiveFieldsByDefault(t *test
 		"prompt_builder_context_build_finished",
 		"renderer_render_started",
 		"renderer_part_rendered",
-		"renderer_part_rendered",
+		"renderer_render_finished",
+		"renderer_render_started",
 		"renderer_part_rendered",
 		"renderer_render_finished",
 		"prompt_builder_render_finished",
@@ -307,13 +305,13 @@ func TestPromptBuilderEmitsSensitiveRenderFieldsWhenEnabled(t *testing.T) {
 	sink := &debugEventSink{}
 	builder := New(Definition{
 		SystemInstructions: []Part{NewTextPart(strings.Repeat("system ", 900))},
-		PromptInput:        PromptInput{User: NewTextContent("find docs")},
+		PromptInput:        PromptInput{User: ai.TextParts("find docs")},
 		ObservationSink:    sink,
 	})
 
 	ctx := gai.WithContentCapturePolicy(context.Background(), gai.ContentCapturePolicy{Prompt: gai.CaptureEnabled, Completion: gai.CaptureEnabled, Memory: gai.CaptureEnabled})
 	if _, err := builder.BuildPrompt(ctx, messageConversation{
-		messages: []Message{{Role: RoleAssistant, Content: NewTextContent("assistant reply")}},
+		messages: []ai.Message{{Role: RoleAssistant, Parts: ai.TextParts("assistant reply")}},
 	}); err != nil {
 		t.Fatalf("BuildPrompt failed: %v", err)
 	}
@@ -337,8 +335,9 @@ func TestPromptBuilderSetObservationSinkUpdatesDefaultRenderer(t *testing.T) {
 		original := &debugEventSink{}
 		replacement := &debugEventSink{}
 		builder := New(Definition{
-			PromptInput:     PromptInput{User: NewTextContent("find docs")},
-			ObservationSink: original,
+			SystemInstructions: []Part{NewTextPart("system")},
+			PromptInput:        PromptInput{User: ai.TextParts("find docs")},
+			ObservationSink:    original,
 		})
 		builder.SetObservationSink(replacement)
 
@@ -354,8 +353,9 @@ func TestPromptBuilderSetObservationSinkUpdatesDefaultRenderer(t *testing.T) {
 	t.Run("nil", func(t *testing.T) {
 		original := &debugEventSink{}
 		builder := New(Definition{
-			PromptInput:     PromptInput{User: NewTextContent("find docs")},
-			ObservationSink: original,
+			SystemInstructions: []Part{NewTextPart("system")},
+			PromptInput:        PromptInput{User: ai.TextParts("find docs")},
+			ObservationSink:    original,
 		})
 		builder.SetObservationSink(nil)
 
@@ -410,7 +410,7 @@ func TestPromptBuilderReturnsCancellationBeforeBuilding(t *testing.T) {
 	cancel()
 	builder := New(Definition{
 		ContextSources: []ContextSource{&testContextSource{name: "source", text: "context"}},
-		PromptInput:    PromptInput{User: NewTextContent("question")},
+		PromptInput:    PromptInput{User: ai.TextParts("question")},
 	})
 
 	if _, err := builder.BuildContext(ctx); !errors.Is(err, context.Canceled) {
@@ -459,7 +459,7 @@ func TestConcurrentBuildersCanShareImmutablePromptParts(t *testing.T) {
 		t.Fatal(err)
 	}
 	system := NewTextPart(strings.Repeat("instructions ", 2000))
-	message := NewMessagePart(RoleUser, NewTextContent("shared message"))
+	message := NewMessagePart(ai.Message{Role: RoleUser, Parts: ai.TextParts("shared message")})
 	input := PromptInput{Context: []Part{named, message}}
 	var group sync.WaitGroup
 	start := make(chan struct{})
@@ -539,5 +539,43 @@ func TestBuildContextSkipsUnusedCountsWhenBudgetDisabled(t *testing.T) {
 				t.Fatalf("source failure = %v, want %v", err, sourceErr)
 			}
 		})
+	}
+}
+
+func TestBuildRequestPreservesOpaqueConversationAndOwnsPayloads(t *testing.T) {
+	t.Parallel()
+	message := ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-1", Type: "function", Name: "search", Args: []byte(`{"q":"x"}`), Extensions: []ai.Extension{{Namespace: "future", Type: "signature", Data: []byte(`"opaque"`), Required: true}}}}}}
+	conv := messageConversation{messages: []ai.Message{message}}
+	builder := New(Definition{PromptInput: PromptInput{User: ai.TextParts("question")}})
+	request, err := builder.BuildRequest(t.Context(), conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(request.Messages[1], message) {
+		t.Fatal("native request dropped opaque continuity state")
+	}
+	request.Messages[1].Parts[0].ToolCall.Args[6] = 'z'
+	request.Messages[1].Parts[0].ToolCall.Extensions[0].Data[1] = 'X'
+	if string(message.Parts[0].ToolCall.Args) != `{"q":"x"}` || string(message.Parts[0].ToolCall.Extensions[0].Data) != `"opaque"` {
+		t.Fatal("request aliases conversation")
+	}
+	if _, err := builder.BuildPrompt(t.Context(), conv); err == nil {
+		t.Fatal("fallback discarded required provider extension")
+	}
+}
+
+func TestBuildRequestPreservesRepeatedIdenticalUserMessages(t *testing.T) {
+	t.Parallel()
+	user := ai.TextMessage(ai.RoleUser, "question")
+	builder := New(Definition{PromptInput: PromptInput{User: user.Parts}})
+	conv := messageConversation{messages: []ai.Message{user, ai.TextMessage(ai.RoleAssistant, "clarification"), ai.TextMessage(ai.RoleUser, "follow-up")}}
+	request, err := builder.BuildRequest(t.Context(), conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Equal content does not establish that two messages have the same origin.
+	// The builder preserves every caller-supplied conversation entry.
+	if len(request.Messages) != 4 || request.Messages[0].Text() != "question" || request.Messages[1].Text() != "question" || request.Messages[3].Text() != "follow-up" {
+		t.Fatalf("builder dropped a caller-supplied user message: %#v", request.Messages)
 	}
 }

@@ -13,14 +13,15 @@ import (
 // User may be nil for context-only agents. Context parts are rendered after
 // configured context sources and before the user message.
 type PromptInput struct {
-	User    Content
+	User    []ai.ContentPart
 	Context []Part
 }
 
-// Clone copies the context slice. Content and Part values must be treated as
-// immutable after they are supplied to a run.
+// Clone deeply copies canonical user content and copies the context slice.
+// Part values must be treated as immutable after they are supplied to a run.
 func (i PromptInput) Clone() PromptInput {
 	cloned := i
+	cloned.User = ai.CloneParts(i.User)
 	cloned.Context = append([]Part(nil), i.Context...)
 	return cloned
 }

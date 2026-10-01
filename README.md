@@ -84,6 +84,7 @@ import (
   "os"
 
   "github.com/lace-ai/gai/agent"
+  "github.com/lace-ai/gai/ai"
   "github.com/lace-ai/gai/ai/openai"
   gaictx "github.com/lace-ai/gai/context"
 )
@@ -123,7 +124,7 @@ func run(ctx context.Context) error {
 
   workflow, err := assistant.NewRun(ctx, agent.RunInput{
     Prompt: gaictx.PromptInput{
-      User: gaictx.NewTextContent("What is the capital of France?"),
+      User: ai.TextParts("What is the capital of France?"),
     },
   })
   if err != nil {
@@ -330,13 +331,62 @@ builder := gaictx.New(gaictx.Definition{
 })
 ```
 
-`BuildContext` allocates budget to context sources. `BuildPrompt` then renders the current user input and accumulated conversation for each loop iteration.
+`BuildContext` allocates budget to context sources. `BuildRequest` assembles system instructions, selected history, user input, and accepted conversation as one `ai.AIRequest`. Provider adapters consume those messages directly. `BuildPrompt` is a compatibility wrapper that renders the same messages. Custom renderers lower application context parts; they do not replace conversation semantics.
 
 ## History and summarization
 
 `context/history` provides a `ContextSource` backed by a `HistoryStore`. It loads persisted state, selects recent turns that fit the available budget, and reuses cached per-turn token counts.
 
 Use `history.NewHistory(sessionID, store)` for budgeted history selection. Use `history.New(sessionID, store, summarizerDefinition)` when older turns should be summarized under token pressure. The built-in `agent/summary` package can supply the summarizer agent.
+
+Built-in summarization uses a text projection. If the selected turns contain media,
+signed reasoning, or other opaque provider state, it returns
+`ai.ErrUnsupportedCapability` instead of dropping that content. Such content can
+still be preserved in storage and replayed by a compatible native adapter.
+
+## Canonical messages and migration
+
+`ai.Message` is the shared semantic value for generation, accepted runtime output,
+and stored history. Its `Role` and ordered `Parts` preserve text, reasoning, tool
+call IDs and results, structured JSON, media, and namespaced provider extensions.
+`ai.Token` remains a streaming event; `loop.Iteration` retains execution diagnostics
+and canonical snapshots. `context.StoredMessage` adds storage IDs and token caches.
+
+```go
+request := ai.AIRequest{Messages: []ai.Message{
+  ai.TextMessage(ai.RoleSystem, "Answer concisely."),
+  ai.TextMessage(ai.RoleUser, "What is the capital of France?"),
+}}
+```
+
+This is a breaking pre-v1 API migration:
+
+- Replace `ai.RequestMessage` with `ai.Message` and ordered `ai.ContentPart` values.
+  Reuse `ai.ToolCall`; results use `ai.ToolResult` with matching `ToolCallID`.
+- Replace `context.PromptInput.User` content objects with `ai.TextParts(text)` or
+  structured parts. `Conversation.Messages` and `AgentResult.Messages` return
+  `[]ai.Message`. Custom builders implement `BuildRequest`; `context.AdaptLegacyPromptBuilder` can lift an already-rendered prompt into a user message.
+- Construct message context with `context.NewMessagePart(ai.Message{...})`.
+  `history.Part.Messages` replaces `Contents`; `history.Summary.Content` is now a
+  text `ai.ContentPart`. `NativeConversation` and `NativeMessageBuilder` are removed;
+  use the canonical `Conversation` and `PromptBuilder` contracts.
+- Replace persisted `context.Message` with `context.StoredMessage{Message: ...}`.
+  New history JSON has a schema version. Legacy plain-text records are readable;
+  old tool records without call IDs need an application migration from authoritative
+  call records. The reader returns an error instead of pairing tools by name.
+- `AIRequest.Messages` is authoritative when both messages and deprecated `Prompt`
+  are supplied. `Normalized` snapshots the request and lifts a prompt-only request
+  to one user message. `AIResponse.Message` owns output; text/reasoning/tool-call
+  fields are compatibility views refreshed by `SetMessage` or `AppendToken`.
+- Preserve extensions on their original message, part, or call. Built-in adapters
+  replay supported provider continuity state and reject required unsupported content.
+  Text fallback cannot encode media or opaque continuity state and returns
+  `ai.ErrUnsupportedCapability` rather than discarding it. Storing media does not
+  imply that every provider adapter supports media input.
+
+History selection and tool-result previews happen before transport selection.
+Local `TokenCounter` estimates remain separate from future full-request provider
+preflight; both preflight and generation can now consume the same request value.
 
 ## Structured output and direct model calls
 
@@ -364,7 +414,7 @@ if err != nil {
 fmt.Println(response.Text)
 ```
 
-`AIRequest.Messages` can carry provider-neutral native user, assistant, and tool-result history. When it is empty, `Prompt` remains the rendered compatibility fallback.
+`AIRequest.Messages` carries the canonical system, user, assistant, and tool-result history. A legacy prompt-only request is normalized into one user message before transport selection.
 
 ## Workflow middleware
 

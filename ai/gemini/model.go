@@ -129,6 +129,13 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			}
 			return false
 		}
+		normalized, normalizeErr := req.Normalized()
+		if normalizeErr != nil {
+			streamErr = normalizeErr
+			emit(ai.Token{Type: ai.TokenTypeErr, Err: normalizeErr, Text: normalizeErr.Error()})
+			return
+		}
+		req = normalized
 		if err := ai.ValidateModelRequest(m, req); err != nil {
 			streamErr = err
 			emit(ai.Token{Err: err, Type: ai.TokenTypeErr, Text: err.Error()})
@@ -171,7 +178,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		ctx = generationCtx
 		if gai.ObservationEnabled(ctx, m.debug) {
 			fields := map[string]any{"max_tokens": req.MaxTokens}
-			gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, req.Prompt)
+			gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, observationPrompt(req))
 			gai.EmitObservation(ctx, m.debug, gai.Observation{
 				Name:   "gemini_stream_request",
 				Source: "ai:gemini.Model.GenerateStream",
@@ -293,7 +300,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 						emit(ai.Token{Err: mapErr, Type: ai.TokenTypeErr, Text: mapErr.Error()})
 						return
 					}
-					toolCall.ThoughtSignature = append([]byte(nil), part.ThoughtSignature...)
+					toolCall.Extensions = thoughtExtensions(part.ThoughtSignature)
 					if gai.ObservationEnabled(ctx, m.debug) {
 						fields := map[string]any{}
 						if gai.ObservationContentEnabled(ctx, m.debug, gai.ContentKindToolInput) {
@@ -313,6 +320,15 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					}) {
 						return
 					}
+				case len(part.ThoughtSignature) > 0:
+					semantic := ai.ContentPart{Kind: ai.ContentExtension, Extensions: thoughtExtensions(part.ThoughtSignature)}
+					if !emit(ai.Token{Type: ai.TokenTypePart, Part: &semantic}) {
+						return
+					}
+				default:
+					streamErr = fmt.Errorf("%w: Gemini stream output part", ai.ErrUnsupportedCapability)
+					emit(ai.Token{Type: ai.TokenTypeErr, Err: streamErr, Text: streamErr.Error()})
+					return
 				}
 			}
 		}
@@ -327,6 +343,11 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 }
 
 func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AIResponse, err error) {
+	normalized, normalizeErr := req.Normalized()
+	if normalizeErr != nil {
+		return nil, normalizeErr
+	}
+	req = normalized
 	if err := ai.ValidateModelRequest(m, req); err != nil {
 		return nil, err
 	}
@@ -357,7 +378,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	ctx, observation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "gemini", Model: m.name, Sink: m.debug})
 	if gai.ObservationEnabled(ctx, m.debug) {
 		fields := map[string]any{"max_tokens": req.MaxTokens}
-		gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, req.Prompt)
+		gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, observationPrompt(req))
 		gai.EmitObservation(ctx, m.debug, gai.Observation{
 			Name:   "gemini_generate_request",
 			Source: "ai:gemini.Model.Generate",
@@ -400,7 +421,8 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	if result.UsageMetadata != nil {
 		reasoningTokens = int(result.UsageMetadata.ThoughtsTokenCount)
 	}
-	text, reasoning, toolCalls, err := mapGenerateContentResponse(result)
+	semantic, err := mapCanonicalResponse(result)
+	text, reasoning, toolCalls := semantic.Text(), semantic.Reasoning(), semantic.ToolCalls()
 	if err != nil {
 		return nil, err
 	}
@@ -431,7 +453,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	if len(result.Candidates) > 0 && result.Candidates[0] != nil {
 		generationResult.FinishReason = string(result.Candidates[0].FinishReason)
 	}
-	return &ai.AIResponse{
+	response = &ai.AIResponse{
 		Text:            text,
 		Reasoning:       reasoning,
 		ToolCalls:       toolCalls,
@@ -440,54 +462,122 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		OutputTokens:    outputTokens,
 		ReasoningTokens: reasoningTokens,
 		FinishReason:    generationResult.FinishReason,
-	}, nil
+	}
+	response.SetMessage(semantic)
+	return response, nil
 }
 
+// nativeContents maps only the conversation; system messages are mapped to
+// GenerateContentConfig.SystemInstruction by buildGenerateContentConfig.
 func nativeContents(req ai.AIRequest) ([]*genai.Content, error) {
-	if err := req.ValidateMessages(); err != nil {
+	req, err := req.Normalized()
+	if err != nil {
 		return nil, err
 	}
-	if len(req.Messages) == 0 {
-		return genai.Text(req.Prompt), nil
-	}
-	seen := map[string]struct{}{}
 	out := make([]*genai.Content, 0, len(req.Messages))
 	for _, m := range req.Messages {
-		if m.Role == ai.RequestMessageRoleUser {
-			out = append(out, &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: m.Text}}})
+		if err := rejectRequiredGeminiExtensions(m.Extensions); err != nil {
+			return nil, err
+		}
+		if m.Role == ai.RoleSystem {
 			continue
 		}
-		if m.Role == ai.RequestMessageRoleTool {
-			r := m.ToolResult
-			response := map[string]any{"output": r.Content}
-			if r.IsError {
-				response = map[string]any{"error": r.Content}
-			}
-			out = append(out, &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: r.Name, Response: response}}}})
-			delete(seen, r.Name)
-			continue
-		}
-		parts := []*genai.Part{}
-		if m.Text != "" {
-			parts = append(parts, &genai.Part{Text: m.Text})
-		}
-		for _, c := range m.ToolCalls {
-			if _, ok := seen[c.Name]; ok {
-				return nil, fmt.Errorf("gemini native history has duplicate function %q", c.Name)
-			}
-			seen[c.Name] = struct{}{}
-			var args map[string]any
-			if err := json.Unmarshal(c.Arguments, &args); err != nil {
+		parts := make([]*genai.Part, 0, len(m.Parts))
+		for _, part := range m.Parts {
+			signature, err := geminiSignature(part.Extensions)
+			if err != nil {
 				return nil, err
 			}
-			parts = append(parts, &genai.Part{
-				FunctionCall:     &genai.FunctionCall{Name: c.Name, Args: args},
-				ThoughtSignature: append([]byte(nil), c.ThoughtSignature...),
-			})
+			switch part.Kind {
+			case ai.ContentText, ai.ContentJSON, ai.ContentReasoning:
+				text := part.Text
+				if part.Kind == ai.ContentJSON {
+					text = string(part.JSON)
+				}
+				parts = append(parts, &genai.Part{Text: text, Thought: part.Kind == ai.ContentReasoning, ThoughtSignature: signature})
+			case ai.ContentToolCall:
+				c := part.ToolCall
+				callSignature, err := geminiSignature(c.Extensions)
+				if err != nil {
+					return nil, err
+				}
+				if len(callSignature) == 0 {
+					callSignature = c.ThoughtSignatureBytes()
+				}
+				if len(signature) != 0 {
+					return nil, fmt.Errorf("%w: Gemini signature must be attached to the tool call", ai.ErrUnsupportedCapability)
+				}
+				var args map[string]any
+				if err := json.Unmarshal(c.Args, &args); err != nil {
+					return nil, err
+				}
+				parts = append(parts, &genai.Part{FunctionCall: &genai.FunctionCall{ID: c.ID, Name: c.Name, Args: args}, ThoughtSignature: callSignature})
+			case ai.ContentToolResult:
+				if len(signature) > 0 {
+					return nil, fmt.Errorf("%w: Gemini tool-result signature", ai.ErrUnsupportedCapability)
+				}
+				r := part.ToolResult
+				var text strings.Builder
+				for _, resultPart := range r.Parts {
+					if _, err := geminiSignature(resultPart.Extensions); err != nil {
+						return nil, err
+					}
+					if len(resultPart.Extensions) != 0 {
+						return nil, fmt.Errorf("%w: Gemini result signatures", ai.ErrUnsupportedCapability)
+					}
+					switch resultPart.Kind {
+					case ai.ContentText:
+						text.WriteString(resultPart.Text)
+					case ai.ContentJSON:
+						text.Write(resultPart.JSON)
+					default:
+						return nil, fmt.Errorf("%w: Gemini result %q", ai.ErrUnsupportedCapability, resultPart.Kind)
+					}
+				}
+				key := "output"
+				if r.IsError {
+					key = "error"
+				}
+				parts = append(parts, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: r.ToolCallID, Name: r.Name, Response: map[string]any{key: text.String()}}})
+			case ai.ContentExtension:
+				if len(signature) > 0 {
+					parts = append(parts, &genai.Part{ThoughtSignature: signature})
+				}
+			default:
+				return nil, fmt.Errorf("%w: Gemini content %q", ai.ErrUnsupportedCapability, part.Kind)
+			}
 		}
-		out = append(out, &genai.Content{Role: genai.RoleModel, Parts: parts})
+		role := genai.RoleUser
+		if m.Role == ai.RoleAssistant {
+			role = genai.RoleModel
+		}
+		if len(parts) > 0 {
+			out = append(out, &genai.Content{Role: role, Parts: parts})
+		}
 	}
 	return out, nil
+}
+
+func geminiSignature(extensions []ai.Extension) ([]byte, error) {
+	var signature []byte
+	for _, ext := range extensions {
+		if ext.Namespace == "google" && ext.Type == "thought_signature" {
+			if err := json.Unmarshal(ext.Data, &signature); err != nil {
+				return nil, fmt.Errorf("decode Gemini thought signature: %w", err)
+			}
+		} else if ext.Required {
+			return nil, fmt.Errorf("%w: Gemini extension %s/%s", ai.ErrUnsupportedCapability, ext.Namespace, ext.Type)
+		}
+	}
+	return signature, nil
+}
+
+func thoughtExtensions(signature []byte) []ai.Extension {
+	if len(signature) == 0 {
+		return nil
+	}
+	data, _ := json.Marshal(signature)
+	return []ai.Extension{{Namespace: "google", Type: "thought_signature", Data: data, Required: true}}
 }
 
 func buildGenerateContentConfig(req ai.AIRequest) (*genai.GenerateContentConfig, error) {
@@ -503,6 +593,36 @@ func buildGenerateContentConfig(req ai.AIRequest) (*genai.GenerateContentConfig,
 		return config
 	}
 
+	normalized, err := req.Normalized()
+	if err != nil {
+		return nil, err
+	}
+	for _, message := range normalized.Messages {
+		if message.Role != ai.RoleSystem {
+			continue
+		}
+		if len(message.Extensions) != 0 {
+			return nil, fmt.Errorf("%w: Gemini system extensions", ai.ErrUnsupportedCapability)
+		}
+		system := ensureConfig().SystemInstruction
+		if system == nil {
+			system = &genai.Content{}
+			ensureConfig().SystemInstruction = system
+		}
+		for _, part := range message.Parts {
+			if len(part.Extensions) > 0 {
+				return nil, fmt.Errorf("%w: Gemini system part extensions", ai.ErrUnsupportedCapability)
+			}
+			switch part.Kind {
+			case ai.ContentText:
+				system.Parts = append(system.Parts, &genai.Part{Text: part.Text})
+			case ai.ContentJSON:
+				system.Parts = append(system.Parts, &genai.Part{Text: string(part.JSON)})
+			default:
+				return nil, fmt.Errorf("%w: Gemini system content %q", ai.ErrUnsupportedCapability, part.Kind)
+			}
+		}
+	}
 	if req.MaxTokens > 0 {
 		ensureConfig().MaxOutputTokens = int32(req.MaxTokens)
 	}
@@ -621,33 +741,42 @@ func mapGenerateContentThinkingConfig(reasoning ai.ReasoningConfig) *genai.Think
 }
 
 func mapGenerateContentResponse(result *genai.GenerateContentResponse) (string, string, []ai.ToolCall, error) {
-	if result == nil || len(result.Candidates) == 0 || result.Candidates[0] == nil || result.Candidates[0].Content == nil {
-		return "", "", nil, nil
-	}
-	var text strings.Builder
-	var reasoning strings.Builder
-	var toolCalls []ai.ToolCall
-	for _, part := range result.Candidates[0].Content.Parts {
-		if part == nil {
-			continue
-		}
-		switch {
-		case part.Text != "":
-			if part.Thought {
-				reasoning.WriteString(part.Text)
-			} else {
-				text.WriteString(part.Text)
+	message, err := mapCanonicalResponse(result)
+	return message.Text(), message.Reasoning(), message.ToolCalls(), err
+}
+
+func mapCanonicalResponse(result *genai.GenerateContentResponse) (ai.Message, error) {
+	message := ai.Message{Role: ai.RoleAssistant}
+	if result != nil && len(result.Candidates) > 0 && result.Candidates[0] != nil && result.Candidates[0].Content != nil {
+		for _, part := range result.Candidates[0].Content.Parts {
+			if part == nil {
+				continue
 			}
-		case part.FunctionCall != nil:
-			toolCall, err := mapFunctionCall(part.FunctionCall)
-			if err != nil {
-				return "", "", nil, err
+			switch {
+			case part.Text != "":
+				kind := ai.ContentText
+				if part.Thought {
+					kind = ai.ContentReasoning
+				}
+				message.Parts = append(message.Parts, ai.ContentPart{Kind: kind, Text: part.Text, Extensions: thoughtExtensions(part.ThoughtSignature)})
+			case part.FunctionCall != nil:
+				call, err := mapFunctionCall(part.FunctionCall)
+				if err != nil {
+					return ai.Message{}, err
+				}
+				call.Extensions = thoughtExtensions(part.ThoughtSignature)
+				message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: call})
+			case len(part.ThoughtSignature) > 0:
+				message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentExtension, Extensions: thoughtExtensions(part.ThoughtSignature)})
+			default:
+				return ai.Message{}, fmt.Errorf("%w: Gemini output part", ai.ErrUnsupportedCapability)
 			}
-			toolCall.ThoughtSignature = append([]byte(nil), part.ThoughtSignature...)
-			toolCalls = append(toolCalls, *toolCall)
 		}
 	}
-	return text.String(), reasoning.String(), toolCalls, nil
+	if len(message.Parts) == 0 {
+		message.Parts = ai.TextParts("")
+	}
+	return message, nil
 }
 
 func mapFunctionCall(functionCall *genai.FunctionCall) (*ai.ToolCall, error) {
@@ -660,8 +789,12 @@ func mapFunctionCall(functionCall *genai.FunctionCall) (*ai.ToolCall, error) {
 	if err != nil {
 		return nil, err
 	}
+	id := functionCall.ID
+	if id == "" {
+		id = ai.GenerateToolCallID(toolName)
+	}
 	return &ai.ToolCall{
-		ID:   ai.GenerateToolCallID(toolName),
+		ID:   id,
 		Type: "function",
 		Name: toolName,
 		Args: args,
@@ -669,15 +802,12 @@ func mapFunctionCall(functionCall *genai.FunctionCall) (*ai.ToolCall, error) {
 }
 
 func buildTextToken(part *genai.Part) ai.Token {
-	tokenType := ai.TokenTypeText
+	kind, typ := ai.ContentText, ai.TokenTypeText
 	if part.Thought {
-		tokenType = ai.TokenTypeThought
+		kind, typ = ai.ContentReasoning, ai.TokenTypeThought
 	}
-	return ai.Token{
-		Type: tokenType,
-		Data: []byte(part.Text),
-		Text: part.Text,
-	}
+	semantic := ai.ContentPart{Kind: kind, Text: part.Text, Extensions: thoughtExtensions(part.ThoughtSignature)}
+	return ai.Token{Type: typ, Text: part.Text, Data: []byte(part.Text), Part: &semantic}
 }
 
 func marshalArgs(args map[string]any) (json.RawMessage, error) {
@@ -788,4 +918,25 @@ func (t *Tokenizer) getLocal() (*genaitokenizer.LocalTokenizer, error) {
 	}
 	t.local = local
 	return t.local, nil
+}
+
+func rejectRequiredGeminiExtensions(extensions []ai.Extension) error {
+	for _, ext := range extensions {
+		if ext.Required {
+			return fmt.Errorf("%w: Gemini extension %s/%s", ai.ErrUnsupportedCapability, ext.Namespace, ext.Type)
+		}
+	}
+	return nil
+}
+
+// observationPrompt respects the prompt capture category without mixing in
+// tool inputs/results, reasoning, or opaque provider state.
+func observationPrompt(req ai.AIRequest) string {
+	var parts []string
+	for _, message := range req.Messages {
+		if message.Role == ai.RoleSystem || message.Role == ai.RoleUser {
+			parts = append(parts, message.Text())
+		}
+	}
+	return strings.Join(parts, "\n")
 }

@@ -33,8 +33,8 @@ func (b *failingAttemptPromptBuilder) BuildPrompt(context.Context, gaictx.Conver
 	return "", b.err
 }
 
-func (b *failingAttemptPromptBuilder) BuildRequest(context.Context, gaictx.Conversation) (string, []ai.RequestMessage, error) {
-	return "", nil, b.err
+func (b *failingAttemptPromptBuilder) BuildRequest(context.Context, gaictx.Conversation) (ai.AIRequest, error) {
+	return ai.AIRequest{}, b.err
 }
 
 type attemptTimeoutModel struct{}
@@ -130,7 +130,7 @@ func TestLoopCharacterizationSuccessEventSequence(t *testing.T) {
 	for _, index := range []int{0, 1, 2} {
 		requireAttemptMetadata(t, events[index], 1, 1, 0)
 	}
-	if events[2].Iteration == nil || events[2].Iteration.UserMessage == nil || events[2].PartCount != 1 {
+	if events[2].Iteration == nil || events[2].Iteration.InputMessage() == nil || events[2].PartCount != 1 {
 		t.Fatalf("completed iteration snapshot = %#v, want user input and one part", events[2])
 	}
 	if got := events[2].Iteration.Parts[0].Response.Text; got != "done" {
@@ -209,7 +209,7 @@ func TestLoopCharacterizationRequiredToolDiscardEventSequence(t *testing.T) {
 	)
 	requireAttemptMetadata(t, events[0], 1, 1, 0)
 	requireAttemptMetadata(t, events[1], 1, 1, 0)
-	if events[1].PartCount != 1 || events[1].Iteration == nil || len(events[1].Iteration.Parts) != 0 || events[1].Iteration.UserMessage != nil {
+	if events[1].PartCount != 1 || events[1].Iteration == nil || len(events[1].Iteration.Parts) != 0 || events[1].Iteration.InputMessage() != nil {
 		t.Fatalf("discard snapshot = %#v, want sanitized metadata only", events[1])
 	}
 	for _, index := range []int{2, 3, 4, 5, 6} {
@@ -274,7 +274,7 @@ func TestLoopCharacterizationPromptFailureEventSequence(t *testing.T) {
 	if !errors.Is(events[1].Err, loop.ErrBuildPrompt) || !errors.Is(events[1].Err, promptErr) {
 		t.Fatalf("prompt error = %v, want ErrBuildPrompt wrapping sentinel", events[1].Err)
 	}
-	if events[1].Iteration == nil || events[1].Iteration.UserMessage == nil || events[1].PartCount != 0 {
+	if events[1].Iteration == nil || events[1].Iteration.InputMessage() == nil || events[1].PartCount != 0 {
 		t.Fatalf("prompt failure snapshot = %#v, want user input and no parts", events[1])
 	}
 }
@@ -393,7 +393,7 @@ func TestLoopCharacterizationAttemptTimeoutEventSequence(t *testing.T) {
 	if !errors.Is(events[1].Err, loop.ErrAttemptTimeout) || !errors.Is(events[1].Err, loop.ErrMaxRetries) {
 		t.Fatalf("timeout error = %v, want exhausted attempt timeout", events[1].Err)
 	}
-	if events[1].Iteration == nil || events[1].Iteration.UserMessage == nil || events[1].PartCount != 0 {
+	if events[1].Iteration == nil || events[1].Iteration.InputMessage() == nil || events[1].PartCount != 0 {
 		t.Fatalf("timeout snapshot = %#v, want empty attempt with retained input", events[1])
 	}
 }

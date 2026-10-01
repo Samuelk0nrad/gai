@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
 )
 
@@ -16,7 +15,7 @@ type AgentResult struct {
 	Reasoning       string
 	AttemptedTokens []ai.Token
 	AttemptedText   string
-	Messages        []gaictx.Message
+	Messages        []ai.Message
 	Iterations      []loop.Iteration
 	Usage           ai.Usage
 	BilledUsage     ai.Usage
@@ -68,6 +67,7 @@ func (w *Workflow) setVisibleOutputLocked(output []OutputPart) {
 func outputPartsFromTokens(tokens []ai.Token) []OutputPart {
 	var output []OutputPart
 	for _, token := range tokens {
+		token = token.Normalized()
 		text := token.Text
 		if text == "" {
 			text = string(token.Data)
@@ -126,17 +126,27 @@ func tokenReasoning(tokens []ai.Token) string {
 func iterationTokens(iterations []loop.Iteration) []ai.Token {
 	var tokens []ai.Token
 	for _, iteration := range iterations {
-		for _, part := range iteration.Parts {
-			if part.Response != nil {
-				if part.Response.Reasoning != "" {
-					tokens = append(tokens, ai.Token{Type: ai.TokenTypeThought, Text: part.Response.Reasoning})
-				}
-				if part.Response.Text != "" {
-					tokens = append(tokens, ai.Token{Type: ai.TokenTypeText, Text: part.Response.Text})
-				}
+		for _, message := range iteration.Conversation {
+			if message.Role != ai.RoleAssistant {
+				continue
 			}
-			if part.ToolReq != nil {
-				tokens = append(tokens, ai.Token{Type: ai.TokenTypeToolCall, ToolCall: cloneToolCall(part.ToolReq)})
+			for _, part := range message.Parts {
+				p := ai.CloneParts([]ai.ContentPart{part})[0]
+				token := ai.Token{Part: &p}
+				switch p.Kind {
+				case ai.ContentText:
+					token.Type = ai.TokenTypeText
+					token.Text = p.Text
+				case ai.ContentReasoning:
+					token.Type = ai.TokenTypeThought
+					token.Text = p.Text
+				case ai.ContentToolCall:
+					token.Type = ai.TokenTypeToolCall
+					token.ToolCall = cloneToolCall(p.ToolCall)
+				default:
+					token.Type = ai.TokenTypePart
+				}
+				tokens = append(tokens, token)
 			}
 		}
 	}

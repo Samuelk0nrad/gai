@@ -128,7 +128,7 @@ func (s Summarizer) Summarize(ctx context.Context, req Request) (string, error) 
 	}
 	input := agent.RunInput{
 		ID:     req.ID,
-		Prompt: gaictx.PromptInput{User: gaictx.NewTextContent(req.Text)},
+		Prompt: gaictx.PromptInput{User: ai.TextParts(req.Text)},
 		Meta:   req.Meta,
 	}
 	// Request.MaxTokens retains its existing non-positive-means-inherit API.

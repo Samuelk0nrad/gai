@@ -136,7 +136,8 @@ type chatCompletionResponse struct {
 }
 
 func buildChatCompletionRequest(req ai.AIRequest, modelName string, stream bool) (chatCompletionRequest, error) {
-	if err := req.ValidateMessages(); err != nil {
+	req, err := req.Normalized()
+	if err != nil {
 		return chatCompletionRequest{}, err
 	}
 	if err := req.ResponseFormat.Validate(); err != nil {
@@ -156,7 +157,11 @@ func buildChatCompletionRequest(req ai.AIRequest, modelName string, stream bool)
 		payload.StreamOptions = &chatStreamOptions{IncludeUsage: true}
 	}
 	if len(req.Messages) > 0 {
-		payload.Messages = mapNativeMessages(req.Messages)
+		messages, err := mapNativeMessages(req.Messages)
+		if err != nil {
+			return chatCompletionRequest{}, err
+		}
+		payload.Messages = messages
 	}
 	if req.MaxTokens > 0 {
 		payload.MaxTokens = &req.MaxTokens
@@ -180,29 +185,55 @@ func buildChatCompletionRequest(req ai.AIRequest, modelName string, stream bool)
 	payload.ResponseFormat = responseFormat
 	return payload, nil
 }
-func mapNativeMessages(messages []ai.RequestMessage) []chatMessageRequest {
+func mapNativeMessages(messages []ai.Message) ([]chatMessageRequest, error) {
 	out := make([]chatMessageRequest, 0, len(messages))
 	for _, m := range messages {
-		if m.Role == ai.RequestMessageRoleUser {
-			out = append(out, chatMessageRequest{Role: "user", Content: m.Text})
-			continue
+		if err := m.Validate(); err != nil {
+			return nil, err
 		}
-		if m.Role == ai.RequestMessageRoleTool {
-			content := m.ToolResult.Content
-			if m.ToolResult.IsError {
-				encoded, _ := json.Marshal(map[string]string{"error": content})
-				content = string(encoded)
+		if err := rejectRequiredExtensions(m.Extensions); err != nil {
+			return nil, err
+		}
+		message := chatMessageRequest{Role: string(m.Role)}
+		for _, part := range m.Parts {
+			if err := rejectRequiredExtensions(part.Extensions); err != nil {
+				return nil, err
 			}
-			out = append(out, chatMessageRequest{Role: "tool", Content: content, ToolCallID: m.ToolResult.ToolCallID})
-			continue
+			switch part.Kind {
+			case ai.ContentText, ai.ContentJSON:
+				if len(message.ToolCalls) > 0 {
+					return nil, fmt.Errorf("%w: Mistral text after tool calls", ai.ErrUnsupportedCapability)
+				}
+				if part.Kind == ai.ContentText {
+					message.Content += part.Text
+				} else {
+					message.Content += string(part.JSON)
+				}
+			case ai.ContentToolCall:
+				c := part.ToolCall
+				if err := rejectRequiredExtensions(c.Extensions); err != nil {
+					return nil, err
+				}
+				if len(c.ThoughtSignature) > 0 {
+					return nil, fmt.Errorf("%w: Mistral tool signature", ai.ErrUnsupportedCapability)
+				}
+				message.ToolCalls = append(message.ToolCalls, chatMessageToolCall{ID: c.ID, Type: "function", Function: chatToolCallFunction{Name: c.Name, Arguments: string(c.Args)}})
+			case ai.ContentToolResult:
+				content, err := canonicalResultText(part.ToolResult)
+				if err != nil {
+					return nil, err
+				}
+				out = append(out, chatMessageRequest{Role: "tool", Content: content, ToolCallID: part.ToolResult.ToolCallID})
+			case ai.ContentExtension:
+			default:
+				return nil, fmt.Errorf("%w: Mistral content %q", ai.ErrUnsupportedCapability, part.Kind)
+			}
 		}
-		x := chatMessageRequest{Role: "assistant", Content: m.Text}
-		for _, c := range m.ToolCalls {
-			x.ToolCalls = append(x.ToolCalls, chatMessageToolCall{ID: c.ID, Type: "function", Function: chatToolCallFunction{Name: c.Name, Arguments: string(c.Arguments)}})
+		if m.Role != ai.RoleTool {
+			out = append(out, message)
 		}
-		out = append(out, x)
 	}
-	return out
+	return out, nil
 }
 
 func mapChatTools(definitions []ai.ToolDefinition) ([]chatToolRequest, error) {
@@ -526,6 +557,13 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			}
 			return false
 		}
+		normalized, normalizeErr := req.Normalized()
+		if normalizeErr != nil {
+			streamErr = normalizeErr
+			emit(ai.Token{Type: ai.TokenTypeErr, Err: normalizeErr, Text: normalizeErr.Error()})
+			return
+		}
+		req = normalized
 		if err := ai.ValidateModelRequest(m, req); err != nil {
 			streamErr = err
 			emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
@@ -593,7 +631,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		ctx = generationCtx
 		if gai.ObservationEnabled(ctx, m.debug) {
 			fields := map[string]any{"max_tokens": req.MaxTokens}
-			gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, req.Prompt)
+			gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, observationPrompt(req))
 			gai.EmitObservation(ctx, m.debug, gai.Observation{
 				Name:   "mistral_stream_request",
 				Source: "ai:mistral.Model.GenerateStream",
@@ -926,6 +964,11 @@ func intPtr(v int) *int {
 }
 
 func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AIResponse, err error) {
+	normalized, normalizeErr := req.Normalized()
+	if normalizeErr != nil {
+		return nil, normalizeErr
+	}
+	req = normalized
 	if err := ai.ValidateModelRequest(m, req); err != nil {
 		return nil, err
 	}
@@ -953,7 +996,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	ctx, observation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "mistral", Model: m.name, Sink: m.debug})
 	if gai.ObservationEnabled(ctx, m.debug) {
 		fields := map[string]any{"max_tokens": req.MaxTokens}
-		gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, req.Prompt)
+		gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, observationPrompt(req))
 		gai.EmitObservation(ctx, m.debug, gai.Observation{
 			Name:   "mistral_generate_request",
 			Source: "ai:mistral.Model.Generate",
@@ -1018,14 +1061,21 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		})
 	}
 
-	return &ai.AIResponse{
+	result := &ai.AIResponse{
 		Text:         parsed.Choices[0].Message.Content,
 		ToolCalls:    toolCalls,
 		Raw:          append([]byte(nil), resBody...),
 		FinishReason: parsed.Choices[0].FinishReason,
 		InputTokens:  usage.InputTokens,
 		OutputTokens: usage.OutputTokens,
-	}, nil
+	}
+	semantic := ai.TextMessage(ai.RoleAssistant, result.Text)
+	for _, call := range toolCalls {
+		c := call
+		semantic.Parts = append(semantic.Parts, ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &c})
+	}
+	result.SetMessage(semantic)
+	return result, nil
 }
 
 func mapChatResponseToolCalls(raw json.RawMessage) ([]ai.ToolCall, error) {
@@ -1067,4 +1117,16 @@ func mapChatResponseToolCalls(raw json.RawMessage) ([]ai.ToolCall, error) {
 		})
 	}
 	return result, nil
+}
+
+// observationPrompt respects the prompt capture category without mixing in
+// tool inputs/results, reasoning, or opaque provider state.
+func observationPrompt(req ai.AIRequest) string {
+	var parts []string
+	for _, message := range req.Messages {
+		if message.Role == ai.RoleSystem || message.Role == ai.RoleUser {
+			parts = append(parts, message.Text())
+		}
+	}
+	return strings.Join(parts, "\n")
 }

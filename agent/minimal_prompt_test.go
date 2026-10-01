@@ -21,7 +21,7 @@ func (b *readOnlyPromptBuilder) BuildPrompt(context.Context, gaictx.Conversation
 	if b.input.User == nil {
 		return "", nil
 	}
-	return b.input.User.String(), nil
+	return (ai.Message{Parts: b.input.User}).Text(), nil
 }
 func (b *readOnlyPromptBuilder) Input() gaictx.PromptInput { return b.input.Clone() }
 
@@ -76,7 +76,7 @@ func TestAgentAcceptsInputOnlyPromptBuilder(t *testing.T) {
 				t.Fatalf("workflow errors: %v", consumed.errs)
 			}
 			requests := model.Requests()
-			if len(requests) != 1 || requests[0].Prompt != "question" {
+			if len(requests) != 1 || len(requests[0].Messages) != 1 || requests[0].Messages[0].Text() != "question" {
 				t.Fatalf("requests = %#v, want run input", requests)
 			}
 			if native && (len(requests[0].Tools) != 1 || requests[0].Tools[0].Name != "echo") {
@@ -146,4 +146,8 @@ func TestAgentModelOverrideToNativeRemovesStaleTextToolDefinitions(t *testing.T)
 	if len(requests) != 1 || len(requests[0].Tools) != 1 || strings.Contains(requests[0].Prompt, "tool_definitions") || strings.Contains(requests[0].Prompt, "standalone JSON") {
 		t.Fatalf("native request retained text protocol or omitted tools: %#v", requests)
 	}
+}
+
+func (b *readOnlyPromptBuilder) BuildRequest(ctx context.Context, conv gaictx.Conversation) (ai.AIRequest, error) {
+	return ai.AIRequest{Messages: []ai.Message{{Role: ai.RoleUser, Parts: ai.CloneParts(b.input.User)}}}, nil
 }

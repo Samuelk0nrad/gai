@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 )
 
 type runExecution struct {
@@ -19,7 +18,7 @@ type runExecution struct {
 	state                     *loopRunState
 	executionTools            []Tool
 	toolDefinitions           []ai.ToolDefinition
-	userMessage               *gaictx.Message
+	userMessage               *ai.Message
 	requiredToolCallSatisfied bool
 }
 
@@ -155,7 +154,11 @@ func (r *runExecution) runIteration(iterationCount int) iterationOutcome {
 }
 
 func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferTokens bool) (*attemptExecution, attemptOutcome) {
-	attemptIteration := Iteration{Count: iterationCount, UserMessage: r.userMessage}
+	attemptIteration := Iteration{Count: iterationCount}
+	if r.userMessage != nil {
+		attemptIteration.Conversation = []ai.Message{r.userMessage.Clone()}
+		attemptIteration.inputMessages = 1
+	}
 	attemptCtx, state := r.state.startIteration(r.ctx, iterationCount, attemptID)
 	attemptCtx, baseCancel := context.WithCancel(attemptCtx)
 	attempt := &attemptExecution{
@@ -216,6 +219,8 @@ func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferToken
 func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request ai.AIRequest, deferTokens bool) (bool, attemptOutcome, error) {
 	tokens := a.run.owner.Model.GenerateStream(modelCtx, request)
 	for token := range tokens {
+		token = token.Normalized()
+
 		if token.Err != nil {
 			retryErr := token.Err
 			attemptTimedOut := a.timedOut()
@@ -257,7 +262,7 @@ func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request 
 			a.iteration.AppendToken(token)
 			a.toolCalls = append(a.toolCalls, pendingToolCall{
 				partIndex: len(a.iteration.Parts) - 1,
-				call:      *token.ToolCall,
+				call:      token.ToolCall.Clone(),
 			})
 		} else {
 			a.iteration.AppendToken(token)

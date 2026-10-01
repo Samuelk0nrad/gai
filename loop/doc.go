@@ -6,10 +6,12 @@
 // reusable definitions, per-run configuration, workflow lifecycle, middleware,
 // and aggregated copied results.
 //
-// A Loop builds a prompt, streams model tokens, executes requested Tools, adds
-// their results to subsequent prompts, and stops when the model returns a final
+// A Loop builds a canonical request, streams model tokens, executes Tools, adds
+// identified results to subsequent requests, and stops when the model returns a final
 // response. Each run exposes one ordered Event stream containing tokens,
 // attempt starts, retries, completed iterations, and terminal results.
-// Iteration values retain the transcript needed to render later prompt turns or
-// inspect the completed run.
+// Iteration retains attempt execution diagnostics and canonical message snapshots.
+// Only accepted iterations enter Loop.Messages; retries and discards stay in events.
+// Message views clone the retained ai.Message values instead of reconstructing
+// different native and rendered transcripts from execution records.
 package loop

@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"errors"
+	"html"
 	"reflect"
 	"strings"
 	"sync"
@@ -180,9 +181,9 @@ func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 	if len(result.Primary.Messages) != 4 {
 		t.Fatalf("expected user, tool call, tool result, and final assistant messages, got %+v", result.Primary.Messages)
 	}
-	if result.Primary.Messages[1].Content.Type() != gaictx.ContentTypeToolCall ||
-		result.Primary.Messages[2].Content.Type() != gaictx.ContentTypeToolResult ||
-		result.Primary.Messages[3].Content.String() != "final answer" {
+	if len(result.Primary.Messages[1].ToolCalls()) != 1 || result.Primary.Messages[1].Reasoning() != "checking tool" ||
+		result.Primary.Messages[2].Parts[0].Kind != ai.ContentToolResult ||
+		result.Primary.Messages[3].Text() != "final answer" {
 		t.Fatalf("unexpected reconstructed messages: %+v", result.Primary.Messages)
 	}
 
@@ -193,7 +194,7 @@ func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 	if requests[0].MaxTokens != 64 || len(requests[0].Tools) != 0 {
 		t.Fatalf("first request did not preserve limits or text tool transport: %+v", requests[0])
 	}
-	if !strings.Contains(requests[0].Prompt, `{"type":"function","name":"<tool-name>","arguments":{...}}`) {
+	if !strings.Contains(html.UnescapeString(requests[0].Prompt), `{"type":"function","name":"<tool-name>","arguments":{...}}`) {
 		t.Fatalf("first request did not include the text tool protocol:\n%s", requests[0].Prompt)
 	}
 	for index, request := range requests {
@@ -204,7 +205,7 @@ func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 			t.Fatalf("request %d sent provider-native tools during text transport: %+v", index, request.Tools)
 		}
 	}
-	if !strings.Contains(requests[1].Prompt, "tool res: tool says hi") {
+	if !strings.Contains(html.UnescapeString(requests[1].Prompt), "tool says hi") {
 		t.Fatalf("second prompt did not include tool result:\n%s", requests[1].Prompt)
 	}
 }

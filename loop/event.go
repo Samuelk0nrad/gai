@@ -85,7 +85,7 @@ func RetryEvent(iteration, attempt, retry int, reason string, delay time.Duratio
 		RetryReason:    reason,
 		RetryDelay:     delay,
 		PartCount:      len(attemptIteration.Parts),
-		Iteration:      &attemptIteration,
+		Iteration:      iterationSnapshot(attemptIteration),
 	}
 }
 
@@ -111,7 +111,7 @@ func IterationDoneEvent(iteration Iteration, attempt, retry int) Event {
 		AttemptID:      attempt,
 		RetryCount:     retry,
 		PartCount:      len(iteration.Parts),
-		Iteration:      &iteration,
+		Iteration:      iterationSnapshot(iteration),
 	}
 }
 
@@ -167,7 +167,7 @@ func attemptTerminalEvent(eventType EventType, iterationCount, attemptID, retryC
 		Err:            err,
 	}
 	if attemptIteration != nil {
-		iteration := *attemptIteration
+		iteration := attemptIteration.Clone()
 		event.PartCount = len(iteration.Parts)
 		event.Iteration = &iteration
 	}
@@ -175,6 +175,27 @@ func attemptTerminalEvent(eventType EventType, iterationCount, attemptID, retryC
 }
 
 func sendEvent(ctx context.Context, ch chan<- Event, event Event) error {
+	if event.Token != nil {
+		t := event.Token.Clone()
+		event.Token = &t
+	}
+	if event.ToolCall != nil {
+		c := event.ToolCall.Clone()
+		event.ToolCall = &c
+	}
+	if event.ToolResponse != nil {
+		r := *event.ToolResponse
+		if r.Text != nil {
+			v := *r.Text
+			r.Text = &v
+		}
+		if r.Err != nil {
+			v := *r.Err
+			r.Err = &v
+		}
+		event.ToolResponse = &r
+	}
+
 	select {
 	case ch <- event:
 		return nil
@@ -182,3 +203,5 @@ func sendEvent(ctx context.Context, ch chan<- Event, event Event) error {
 		return ctx.Err()
 	}
 }
+
+func iterationSnapshot(i Iteration) *Iteration { snapshot := i.Clone(); return &snapshot }

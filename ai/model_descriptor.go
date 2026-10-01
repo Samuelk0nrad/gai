@@ -41,7 +41,8 @@ type ModelDescriptor struct {
 	// through ModelRepository. Direct model descriptors may leave it empty.
 	Provider string
 	Model    string
-	// NativeMessages reports support for AIRequest.Messages.
+	// NativeMessages reports native role/part transport support. Canonical
+	// AIRequest.Messages may also be lowered to a rendered compatibility prompt.
 	NativeMessages FeatureSupport
 	// NativeTools reports support for AIRequest.Tools and tool-call responses.
 	NativeTools FeatureSupport
@@ -328,20 +329,12 @@ func (d ModelDescriptor) ValidateRequest(req AIRequest) error {
 	if err := req.Validate(); err != nil {
 		return err
 	}
-	if len(req.Messages) > 0 && d.NativeMessages == FeatureSupportUnsupported {
-		return d.unsupported("native messages")
-	}
-	usesToolHistory := false
-	for _, message := range req.Messages {
-		if len(message.ToolCalls) > 0 || message.ToolResult != nil {
-			usesToolHistory = true
-			break
-		}
-	}
+	// Messages describes semantic input even for rendered transports. Native
+	// capability flags constrain native tool definitions, not conversation data.
 	if len(req.Tools) > 0 && d.ToolCalling == FeatureSupportUnsupported {
 		return d.unsupported("tool calling")
 	}
-	if (len(req.Tools) > 0 || usesToolHistory) && d.NativeTools == FeatureSupportUnsupported {
+	if len(req.Tools) > 0 && d.NativeTools == FeatureSupportUnsupported {
 		return d.unsupported("native tools")
 	}
 	if len(req.Tools) > 0 && req.ToolChoice.Mode != "" && len(d.ToolChoiceModes) > 0 && !containsToolChoiceMode(d.ToolChoiceModes, req.ToolChoice.Mode) {

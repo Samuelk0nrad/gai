@@ -748,7 +748,7 @@ func TestMiddlewareCanEmitStructuredOutputWithUpstreamIdentity(t *testing.T) {
 		}()
 		return out
 	})
-	workflow, err := workflowAgent("main", "product-123", transform).NewRun(context.Background(), agent.RunInput{Prompt: gaictx.PromptInput{User: gaictx.NewTextContent("question")}})
+	workflow, err := workflowAgent("main", "product-123", transform).NewRun(context.Background(), agent.RunInput{Prompt: gaictx.PromptInput{User: ai.TextParts("question")}})
 	if err != nil {
 		t.Fatalf("NewRun failed: %v", err)
 	}

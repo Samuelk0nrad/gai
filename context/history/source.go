@@ -2,6 +2,8 @@ package history
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"sort"
 
 	"github.com/lace-ai/gai"
@@ -13,9 +15,38 @@ import (
 // HistoryState is the persisted conversation state consumed by HistorySource.
 // Turns contains the unsummarized tail of the conversation; Summary contains
 // older turns that have already been compacted.
+const HistorySchemaVersion = 1
+
 type HistoryState struct {
-	Turns   []gaictx.Turn
-	Summary *Summary
+	SchemaVersion int `json:"schema_version"`
+	Turns         []gaictx.Turn
+	Summary       *Summary
+}
+
+// MarshalJSON versions newly persisted state while retaining the store API.
+func (s HistoryState) MarshalJSON() ([]byte, error) {
+	type state HistoryState
+	if s.SchemaVersion != 0 && s.SchemaVersion != HistorySchemaVersion {
+		return nil, fmt.Errorf("unsupported history schema version: %d", s.SchemaVersion)
+	}
+	s.SchemaVersion = HistorySchemaVersion
+	return json.Marshal(state(s))
+}
+
+// UnmarshalJSON accepts unversioned legacy states; StoredMessage migrates plain
+// text entries and rejects legacy tool payloads whose call IDs were never saved.
+func (s *HistoryState) UnmarshalJSON(data []byte) error {
+	type state HistoryState
+	var decoded state
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if decoded.SchemaVersion != 0 && decoded.SchemaVersion != HistorySchemaVersion {
+		return fmt.Errorf("unsupported history schema version: %d", decoded.SchemaVersion)
+	}
+	decoded.SchemaVersion = HistorySchemaVersion
+	*s = HistoryState(decoded)
+	return nil
 }
 
 // HistoryStore loads and saves history state for a session.
@@ -176,6 +207,7 @@ func (s *HistorySource) Function(ctx context.Context, tokenBudget int) (result g
 			}
 
 			if state.Summary != nil || len(state.Turns) > 0 {
+				state.SchemaVersion = HistorySchemaVersion
 				if err := s.historyStateStore.SaveHistoryState(ctx, s.sessionID, state); err != nil {
 					obs.StateSaveFailed(ctx, err)
 					return nil, err
@@ -205,13 +237,12 @@ func (s *HistorySource) buildPart(
 	summaryIncluded *bool,
 ) (bool, error) {
 	if state.Summary != nil {
-		*summaryIncluded = true
-		summaryContent := Content{
-			Text:  state.Summary.Content.String(),
-			Role:  "summary",
-			Value: state.Summary.Content,
+		if state.Summary.Content.Kind != ai.ContentText {
+			return false, fmt.Errorf("summary requires a text content part")
 		}
-		part.Contents = append(part.Contents, summaryContent)
+		if err := state.Summary.Content.Validate(); err != nil {
+			return false, err
+		}
 		summaryTokenCount, err := state.Summary.TokenCount(counter)
 		if err != nil {
 			obs.SummaryTokenCountFailed(ctx, state.Summary, err)
@@ -221,6 +252,10 @@ func (s *HistorySource) buildPart(
 			obs.BudgetReached(ctx, *tokenCount, nil)
 			return true, nil
 		}
+		*summaryIncluded = true
+		summaryParts := ai.TextParts("Conversation summary:\n")
+		summaryParts = append(summaryParts, ai.CloneParts([]ai.ContentPart{state.Summary.Content})...)
+		part.Messages = append(part.Messages, ai.Message{Role: ai.RoleUser, Parts: summaryParts})
 		*tokenCount += summaryTokenCount
 		obs.SummaryIncluded(ctx, state.Summary)
 	} else {
@@ -251,11 +286,11 @@ func (s *HistorySource) buildPart(
 
 	for _, turn := range state.Turns[firstIncluded:] {
 		if turn.UserMessage != nil {
-			part.Contents = append(part.Contents, MapMessageToContent(*turn.UserMessage))
+			part.Messages = append(part.Messages, turn.UserMessage.Message.Clone())
 			*messageCount++
 		}
 		for _, message := range turn.Messages {
-			part.Contents = append(part.Contents, MapMessageToContent(message))
+			part.Messages = append(part.Messages, message.Message.Clone())
 			*messageCount++
 		}
 	}
