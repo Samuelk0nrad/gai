@@ -10,6 +10,8 @@ import (
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
+	"github.com/lace-ai/gai/internal/modelcatalog"
+	"github.com/lace-ai/gai/internal/syncutil"
 )
 
 const modelDiscoveryTimeout = 10 * time.Second
@@ -20,8 +22,8 @@ type Provider struct {
 	baseURL    string
 	httpClient *http.Client
 	debug      gai.ObservationSink
-	catalog    ai.ModelCatalogCache
-	catalogMu  ai.ContextMutex
+	catalog    modelcatalog.ModelCatalogCache
+	catalogMu  syncutil.ContextMutex
 	transport  Transport
 }
 
@@ -82,6 +84,16 @@ func (p *Provider) streamingHTTPClient() *http.Client {
 }
 
 func (p *Provider) Model(name string) (ai.Model, error) {
+	model, err := p.TypedModel(name)
+	if err != nil {
+		return nil, err
+	}
+	return model, nil
+}
+
+// TypedModel resolves a concrete model without discovery. Options are applied
+// once at construction; configured models may be shared between runs.
+func (p *Provider) TypedModel(name string, options ...ModelOption) (*Model, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
@@ -89,7 +101,13 @@ func (p *Provider) Model(name string) (ai.Model, error) {
 	if name == "" {
 		return nil, ai.ErrModelNotFound
 	}
-	return &Model{name: name, provider: p}, nil
+	model := &Model{name: name, provider: p}
+	for _, option := range options {
+		if option != nil {
+			option(model)
+		}
+	}
+	return model, nil
 }
 
 func (p *Provider) ListModels() ([]string, error) {
@@ -215,8 +233,8 @@ func effectiveOpenAIDescriptor(model string, catalog ai.ModelDescriptor) ai.Mode
 	// currently returns model IDs only, so omitted remote facts must retain that
 	// baseline rather than downgrading known adapter support to Unknown.
 	adapter := openAIDescriptor(model)
-	facts := ai.OverrideModelDescriptor(adapter, catalog)
-	return ai.IntersectModelDescriptors(adapter, facts)
+	facts := modelcatalog.OverrideModelDescriptor(adapter, catalog)
+	return modelcatalog.IntersectModelDescriptors(adapter, facts)
 }
 
 func isKnownModel(name string) bool {

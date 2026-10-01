@@ -12,8 +12,8 @@ import (
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
 	sdk "github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/packages/param"
+	"github.com/openai/openai-go/responses"
 	"github.com/openai/openai-go/shared"
 )
 
@@ -31,8 +31,10 @@ func classifyProviderError(err error) error {
 
 // Model is an OpenAI chat-completions model.
 type Model struct {
-	name     string
-	provider *Provider
+	name           string
+	provider       *Provider
+	chatHooks      []func(*sdk.ChatCompletionNewParams) error
+	responsesHooks []func(*responses.ResponseNewParams) error
 }
 
 var _ ai.Model = (*Model)(nil)
@@ -71,7 +73,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (result *ai.AIRe
 	if m.provider.transport == TransportResponses {
 		return m.generateResponses(ctx, req)
 	}
-	params, err := buildChatCompletionParams(m.name, req, false)
+	params, err := m.chatCompletionParams(req, false)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +141,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			m.generateResponsesStream(ctx, out, req)
 			return
 		}
-		params, err := buildChatCompletionParams(m.name, req, true)
+		params, err := m.chatCompletionParams(req, true)
 		if err != nil {
 			ai.SendToken(ctx, out, ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
 			return
@@ -361,14 +363,8 @@ func openAIDescriptor(model string) ai.ModelDescriptor {
 	d := ai.ModelDescriptor{
 		Model: model, NativeMessages: ai.FeatureSupportSupported, NativeTools: ai.FeatureSupportSupported,
 		ToolChoiceModes: []ai.ToolChoiceMode{ai.ToolChoiceAuto, ai.ToolChoiceNone, ai.ToolChoiceRequired},
-		Multimodal:      ai.FeatureSupportUnsupported,
 		Usage:           ai.FeatureSupportSupported, FinishReason: ai.FeatureSupportSupported, StreamingUsage: ai.FeatureSupportSupported,
-		ToolCalling: ai.FeatureSupportSupported,
-		JSONOutput:  ai.FeatureSupportSupported, JSONSchemaOutput: ai.FeatureSupportSupported,
-		Tokenizer: ai.TokenizerDescriptor{Available: ai.FeatureSupportUnsupported},
-	}
-	if isTokenizerAvailableForModel(model) {
-		d.Tokenizer = ai.TokenizerDescriptor{Available: ai.FeatureSupportSupported, Fidelity: ai.TokenizerFidelityEstimated}
+		JSONOutput: ai.FeatureSupportSupported, JSONSchemaOutput: ai.FeatureSupportSupported,
 	}
 	if efforts := gpt5ReasoningEfforts(model); len(efforts) > 0 {
 		d.ReasoningEffort = ai.FeatureSupportSupported
@@ -506,14 +502,7 @@ func applyResponseFormat(params *sdk.ChatCompletionNewParams, format ai.Response
 	}
 }
 
-func (m *Model) client(streaming bool) *sdk.Client {
-	httpClient := m.provider.httpClient
-	if streaming {
-		httpClient = m.provider.streamingHTTPClient()
-	}
-	client := sdk.NewClient(option.WithAPIKey(m.provider.apiKey), option.WithBaseURL(m.provider.baseURL), option.WithHTTPClient(httpClient), option.WithMaxRetries(0))
-	return &client
-}
+func (m *Model) client(streaming bool) *sdk.Client { return m.provider.sdkClient(streaming) }
 
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {

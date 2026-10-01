@@ -18,11 +18,12 @@ import (
 const geminiTracerName = "github.com/lace-ai/gai/ai/gemini"
 
 type Model struct {
-	name   string
-	client *Provider
-	debug  gai.ObservationSink
-	mu     sync.Mutex
-	api    *genai.Client
+	name        string
+	client      *Provider
+	debug       gai.ObservationSink
+	mu          sync.Mutex
+	api         *genai.Client
+	configHooks []func(*genai.GenerateContentConfig) error
 }
 
 var _ ai.Model = (*Model)(nil)
@@ -54,12 +55,10 @@ func (m *Model) Descriptor() ai.ModelDescriptor {
 func geminiAdapterDescriptor(model string) ai.ModelDescriptor {
 	return ai.ModelDescriptor{Model: model, NativeMessages: ai.FeatureSupportSupported, NativeTools: ai.FeatureSupportSupported,
 		ToolChoiceModes: []ai.ToolChoiceMode{ai.ToolChoiceAuto, ai.ToolChoiceNone, ai.ToolChoiceRequired},
-		Multimodal:      ai.FeatureSupportUnsupported,
 		Usage:           ai.FeatureSupportSupported, FinishReason: ai.FeatureSupportSupported, StreamingUsage: ai.FeatureSupportSupported,
-		ToolCalling: ai.FeatureSupportSupported,
-		JSONOutput:  ai.FeatureSupportSupported, JSONSchemaOutput: ai.FeatureSupportSupported,
+		JSONOutput: ai.FeatureSupportSupported, JSONSchemaOutput: ai.FeatureSupportSupported,
 		Reasoning: ai.FeatureSupportSupported, ReasoningEffort: ai.FeatureSupportSupported, ReasoningEfforts: []ai.ReasoningEffort{ai.ReasoningEffortLow, ai.ReasoningEffortMedium, ai.ReasoningEffortHigh},
-		Tokenizer: ai.TokenizerDescriptor{Available: ai.FeatureSupportSupported, Fidelity: ai.TokenizerFidelityExact}}
+	}
 }
 
 func geminiHTTPStatus(err error) int {
@@ -152,7 +151,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			return
 		}
 
-		config, err := buildGenerateContentConfig(req)
+		config, err := m.generateContentConfig(req)
 		if err != nil {
 			streamErr = err
 			emit(ai.Token{Err: err, Type: ai.TokenTypeErr, Text: err.Error()})
@@ -345,7 +344,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		return nil, err
 	}
 
-	config, err := buildGenerateContentConfig(req)
+	config, err := m.generateContentConfig(req)
 	if err != nil {
 		return nil, err
 	}

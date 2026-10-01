@@ -11,6 +11,8 @@ import (
 	antropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
+	"github.com/lace-ai/gai/internal/modelcatalog"
+	"github.com/lace-ai/gai/internal/syncutil"
 )
 
 const (
@@ -26,16 +28,22 @@ type Provider struct {
 	baseURL    string
 	httpClient *http.Client
 	debug      gai.ObservationSink
-	catalog    ai.ModelCatalogCache
-	catalogMu  ai.ContextMutex
+	catalog    modelcatalog.ModelCatalogCache
+	catalogMu  syncutil.ContextMutex
 }
 
 var _ ai.Provider = (*Provider)(nil)
 var _ ai.ModelCatalogProvider = (*Provider)(nil)
 
 // New creates an Anthropic provider using apiKey.
-func New(apiKey string, debug gai.ObservationSink) *Provider {
-	return &Provider{apiKey: strings.TrimSpace(apiKey), baseURL: "https://api.anthropic.com", httpClient: &http.Client{}, debug: debug}
+func New(apiKey string, debug gai.ObservationSink, options ...Option) *Provider {
+	p := &Provider{apiKey: strings.TrimSpace(apiKey), baseURL: "https://api.anthropic.com", httpClient: &http.Client{}, debug: debug}
+	for _, option := range options {
+		if option != nil {
+			option(p)
+		}
+	}
+	return p
 }
 
 func (p *Provider) Validate() error {
@@ -51,6 +59,16 @@ func (p *Provider) Validate() error {
 func (p *Provider) Name() string { return "anthropic" }
 
 func (p *Provider) Model(name string) (ai.Model, error) {
+	model, err := p.TypedModel(name)
+	if err != nil {
+		return nil, err
+	}
+	return model, nil
+}
+
+// TypedModel resolves a concrete model without discovery. Options are applied
+// once at construction; configured models may be shared between runs.
+func (p *Provider) TypedModel(name string, options ...ModelOption) (*Model, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
@@ -58,7 +76,13 @@ func (p *Provider) Model(name string) (ai.Model, error) {
 	if name == "" {
 		return nil, ai.ErrModelNotFound
 	}
-	return &Model{name: name, client: p, debug: p.debug}, nil
+	model := &Model{name: name, client: p, debug: p.debug}
+	for _, option := range options {
+		if option != nil {
+			option(model)
+		}
+	}
+	return model, nil
 }
 
 func (p *Provider) ListModels() ([]string, error) {
@@ -165,14 +189,6 @@ func anthropicCatalogFacts(name string, model antropic.ModelInfo) ai.ModelDescri
 		support := featureSupport(capabilities.StructuredOutputs.Supported)
 		facts.JSONOutput = support
 		facts.JSONSchemaOutput = support
-	}
-	imagePresent := capabilities.JSON.ImageInput.Valid() && capabilities.ImageInput.JSON.Supported.Valid()
-	pdfPresent := capabilities.JSON.PDFInput.Valid() && capabilities.PDFInput.JSON.Supported.Valid()
-	switch {
-	case imagePresent && capabilities.ImageInput.Supported, pdfPresent && capabilities.PDFInput.Supported:
-		facts.Multimodal = ai.FeatureSupportSupported
-	case imagePresent && pdfPresent:
-		facts.Multimodal = ai.FeatureSupportUnsupported
 	}
 	return facts
 }
