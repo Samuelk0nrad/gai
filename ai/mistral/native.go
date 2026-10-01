@@ -68,6 +68,8 @@ type NativeClient struct {
 // Requests and redirects are restricted to the configured origin before auth is
 // attached. Use context deadlines: native streaming has no whole-body timeout.
 // Native calls bypass GAI preflight, observations, normalization, and retries.
+// Redirect callbacks decide whether to proceed; accepted redirects always use
+// this client's provider authentication, even if a callback changes the headers.
 func (p *Provider) NativeClient() (*NativeClient, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
@@ -108,6 +110,13 @@ func (p *Provider) NativeClient() (*NativeClient, error) {
 		if len(via) >= 10 {
 			return fmt.Errorf("mistral native request stopped after 10 redirects")
 		}
+		// net/http may strip sensitive headers before CheckRedirect, including
+		// for equivalent authorities on older Go versions. Restore only our
+		// provider credential, and only after every destination check succeeds.
+		if req.Header == nil {
+			req.Header = make(http.Header)
+		}
+		req.Header.Set("Authorization", "Bearer "+native.apiKey)
 		return nil
 	}
 	return native, nil

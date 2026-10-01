@@ -302,3 +302,79 @@ func TestNativeHTTPDefaultPortNormalizationKeepsOriginBoundary(t *testing.T) {
 		}
 	}
 }
+
+func TestNativeHTTPRedirectOwnsAuthenticationAfterValidation(t *testing.T) {
+	denied := errors.New("redirect denied")
+	for _, mode := range []string{"clear", "nil", "replace", "reject", "stop"} {
+		t.Run(mode, func(t *testing.T) {
+			calls := 0
+			var redirect *http.Request
+			transport := &http.Client{
+				Transport: nativeRoundTripper(func(req *http.Request) (*http.Response, error) {
+					calls++
+					if req.Header.Get("Authorization") != "Bearer test-key" {
+						t.Error("provider authentication lost or replaced")
+					}
+					header := make(http.Header)
+					status := http.StatusOK
+					if calls == 1 {
+						status = http.StatusFound
+						header.Set("Location", "https://API.MISTRAL.AI:443/final")
+					}
+					return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+				}),
+				CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+					redirect = req
+					switch mode {
+					case "clear":
+						req.Header.Del("Authorization")
+					case "nil":
+						req.Header = nil
+					case "replace":
+						req.Header.Set("Authorization", "Bearer other-key")
+					case "reject":
+						req.Header = nil
+						return denied
+					case "stop":
+						req.Header = nil
+						return http.ErrUseLastResponse
+					}
+					return nil
+				},
+			}
+			client, err := mistral.New("test-key", nil, mistral.WithHTTPClient(transport)).NativeClient()
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://api.mistral.ai/start", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := client.Do(req)
+			if res != nil {
+				defer res.Body.Close()
+			}
+			if redirect == nil {
+				t.Fatal("redirect callback was not invoked")
+			}
+			if mode == "reject" || mode == "stop" {
+				if calls != 1 || redirect.Header != nil {
+					t.Fatal("rejected redirect was sent or reauthenticated")
+				}
+				if mode == "reject" && !errors.Is(err, denied) {
+					t.Fatalf("callback error lost: %v", err)
+				}
+				if mode == "stop" && (err != nil || res == nil || res.StatusCode != http.StatusFound) {
+					t.Fatalf("ErrUseLastResponse not preserved: response=%v err=%v", res, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 2 || res.StatusCode != http.StatusOK {
+				t.Fatalf("calls=%d status=%d", calls, res.StatusCode)
+			}
+		})
+	}
+}

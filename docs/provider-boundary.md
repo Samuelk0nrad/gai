@@ -139,9 +139,13 @@ defer response.Body.Close()
 ```
 
 Relative URLs resolve against the configured base URL, including an optional
-base path. Absolute URLs and redirects must use the same scheme and host/port;
-userinfo and mismatched Host overrides are rejected before authentication is
-sent. Request headers and URL are copied; body ownership follows `http.Client`.
+base path. Absolute URLs and redirects must use the same scheme and host/port
+(with implicit and explicit default ports treated as equivalent); userinfo and
+mismatched Host overrides are rejected before authentication is
+sent. Accepted redirects restore the provider bearer token after all destination
+checks and the caller's redirect callback succeed. Callbacks may reject redirects
+but cannot replace or suppress provider authentication on accepted redirects.
+Request headers and URL are copied; body ownership follows `http.Client`.
 Native HTTP errors retain their original status, headers, and response body.
 There are no GAI retries or whole-body timeouts; use a context deadline.
 The supported sampling fields follow the [Mistral Chat API](https://docs.mistral.ai/api/endpoint/chat).
