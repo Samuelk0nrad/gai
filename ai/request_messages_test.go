@@ -32,6 +32,24 @@ func TestAIRequestMatchesRepeatedToolNamesByCallID(t *testing.T) {
 	}
 }
 
+func TestAIRequestReusesCompletedToolCallIDs(t *testing.T) {
+	secondCall := canonicalCall("call_1")
+	secondCall.ToolCall.Name = "other"
+	request := ai.AIRequest{Messages: []ai.Message{
+		{Role: ai.RoleAssistant, Parts: []ai.ContentPart{canonicalCall("call_1")}},
+		{Role: ai.RoleTool, Parts: []ai.ContentPart{canonicalResult("call_1", "search")}},
+		{Role: ai.RoleAssistant, Parts: []ai.ContentPart{secondCall}},
+		{Role: ai.RoleTool, Parts: []ai.ContentPart{canonicalResult("call_1", "other")}},
+	}}
+	if err := request.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	request.Messages[3].Parts[0].ToolResult.Name = "search"
+	if err := request.Validate(); err == nil {
+		t.Fatal("later result matched the completed call instead of the outstanding call")
+	}
+}
+
 func TestAIRequestRejectsInvalidToolReferences(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -397,7 +397,9 @@ if !ok {
   return fmt.Errorf("%w: model does not support synchronous generation", ai.ErrUnsupportedCapability)
 }
 response, err := generator.Generate(ctx, ai.AIRequest{
-  Prompt:    "Return one JSON object describing Paris.",
+  Messages: []ai.Message{
+    ai.TextMessage(ai.RoleUser, "Return one JSON object describing Paris."),
+  },
   MaxTokens: 200,
   ResponseFormat: ai.ResponseFormat{
     Type: ai.ResponseFormatJSONObject,

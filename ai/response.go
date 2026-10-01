@@ -201,7 +201,7 @@ func (m *Message) AppendToken(t Token) {
 	}
 	if n := len(m.Parts); n > 0 && (p.Kind == ContentText || p.Kind == ContentReasoning) && m.Parts[n-1].Kind == p.Kind {
 		last := &m.Parts[n-1]
-		if p.Text == "" && len(p.Extensions) > 0 {
+		if p.Text == "" && len(p.Extensions) > 0 && len(last.Extensions) == 0 {
 			last.Extensions = append(last.Extensions, p.Extensions...)
 			return
 		}

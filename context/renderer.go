@@ -417,7 +417,16 @@ func renderSimpleNodeBody(node RenderNode) string {
 	case string(ai.ContentToolCall):
 		return renderSimpleToolCall(node)
 	case string(ai.ContentToolResult):
-		result := simpleNodeChildValue(node, "result")
+		results := make([]string, 0, len(node.Children))
+		for _, child := range node.Children {
+			if child.Type == "result" {
+				results = append(results, child.Value)
+			}
+		}
+		result := node.Value
+		if len(results) > 0 {
+			result = strings.Join(results, "\n")
+		}
 		if simpleNodeFieldValue(node, "is_error") == "true" {
 			return "error: " + result
 		}

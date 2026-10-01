@@ -585,9 +585,14 @@ func buildGenerateContentConfig(req ai.AIRequest) (*genai.GenerateContentConfig,
 	if err != nil {
 		return nil, err
 	}
+	conversationStarted := false
 	for _, message := range normalized.Messages {
 		if message.Role != ai.RoleSystem {
+			conversationStarted = true
 			continue
+		}
+		if conversationStarted {
+			return nil, fmt.Errorf("%w: Gemini only supports leading system messages", ai.ErrUnsupportedCapability)
 		}
 		if err := rejectRequiredGeminiExtensions(message.Extensions); err != nil {
 			return nil, err

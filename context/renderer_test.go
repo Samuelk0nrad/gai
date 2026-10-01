@@ -9,6 +9,7 @@ import (
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
 	gaictx "github.com/lace-ai/gai/context"
+	"github.com/lace-ai/gai/context/history"
 	"github.com/lace-ai/gai/context/tooldefinitions"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -739,5 +740,53 @@ func TestSimpleRendererUsesCanonicalToolResultErrorStatus(t *testing.T) {
 		if got != want {
 			t.Fatalf("IsError=%t: got %q, want %q", isError, got, want)
 		}
+	}
+}
+
+func TestSimpleRendererPreservesOrderedToolResultParts(t *testing.T) {
+	t.Parallel()
+	for _, outcome := range []struct {
+		name    string
+		isError bool
+	}{
+		{name: "success"},
+		{name: "error", isError: true},
+	} {
+		t.Run(outcome.name, func(t *testing.T) {
+			message := ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{{
+				Kind: ai.ContentToolResult,
+				ToolResult: &ai.ToolResult{
+					ToolCallID: "call-1", Name: "search", IsError: outcome.isError,
+					Parts: []ai.ContentPart{
+						{Kind: ai.ContentText, Text: "first\nline"},
+						{Kind: ai.ContentJSON, JSON: []byte(`{"second":2}`)},
+						{Kind: ai.ContentText, Text: "last"},
+					},
+				},
+			}}}
+			body := "first\nline\n{\"second\":2}\nlast"
+			if outcome.isError {
+				body = "error: " + body
+			}
+			want := "tool res:\n" + body
+			for _, projection := range []struct {
+				name string
+				part gaictx.Part
+				want string
+			}{
+				{name: "message", part: gaictx.NewMessagePart(message), want: want},
+				{name: "history", part: &history.Part{Messages: []ai.Message{message}}, want: "<history>\n" + want + "\n</history>"},
+			} {
+				t.Run(projection.name, func(t *testing.T) {
+					got, err := (gaictx.SimpleRenderer{}).Render(t.Context(), []gaictx.Part{projection.part})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got != projection.want {
+						t.Fatalf("rendered tool result = %q, want %q", got, projection.want)
+					}
+				})
+			}
+		})
 	}
 }

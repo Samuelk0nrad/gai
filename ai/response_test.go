@@ -465,6 +465,30 @@ func TestAIResponseCanonicalDeltasPreserveOrderAndMetadata(t *testing.T) {
 	}
 }
 
+func TestAIResponsePreservesAdjacentSignedReasoningBlocks(t *testing.T) {
+	var response ai.AIResponse
+	response.AppendToken(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: "reasoning"}})
+	for _, signature := range []string{"first", "empty-second"} {
+		data, err := json.Marshal(signature)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.AppendToken(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Extensions: []ai.Extension{{Namespace: "anthropic", Type: "signature", Data: data, Required: true}}}})
+	}
+	parts := response.Message.Parts
+	if len(parts) != 2 || parts[0].Text != "reasoning" || parts[1].Text != "" {
+		t.Fatalf("thinking blocks merged: %#v", parts)
+	}
+	for i, signature := range []string{`"first"`, `"empty-second"`} {
+		if len(parts[i].Extensions) != 1 || string(parts[i].Extensions[0].Data) != signature {
+			t.Fatalf("block %d lost its signature: %#v", i, parts[i])
+		}
+	}
+	if err := response.Message.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAIResponseCanonicalReasoningDeltaCountsUsage(t *testing.T) {
 	var response ai.AIResponse
 	response.AppendToken(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: "think"}, TokenUsage: 3})

@@ -119,9 +119,14 @@ func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor) (antr
 		Model:     antropic.Model(descriptor.Model),
 		MaxTokens: int64(maxTokens),
 	}
+	conversationStarted := false
 	for _, message := range req.Messages {
 		if message.Role != ai.RoleSystem {
+			conversationStarted = true
 			continue
+		}
+		if conversationStarted {
+			return antropic.MessageNewParams{}, fmt.Errorf("%w: Anthropic only supports leading system messages", ai.ErrUnsupportedCapability)
 		}
 		if err := unsupportedExtensions(message.Extensions); err != nil {
 			return antropic.MessageNewParams{}, err

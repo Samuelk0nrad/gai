@@ -62,9 +62,12 @@ func TestCanonicalAnthropicStreamSignatureRoundTrip(t *testing.T) {
 			`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reason"}}`,
 			`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"signed"}}`,
 			`{"type":"content_block_stop","index":0}`,
-			`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"one","name":"lookup","input":{}}}`,
-			`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"x\":1}"}}`,
+			`{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":"","signature":""}}`,
+			`{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"empty-signed"}}`,
 			`{"type":"content_block_stop","index":1}`,
+			`{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"one","name":"lookup","input":{}}}`,
+			`{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"x\":1}"}}`,
+			`{"type":"content_block_stop","index":2}`,
 			`{"type":"message_stop"}`,
 		}
 		for _, event := range events {
@@ -87,7 +90,7 @@ func TestCanonicalAnthropicStreamSignatureRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &restored); err != nil {
 		t.Fatal(err)
 	}
-	if len(restored.Parts) != 2 || restored.Parts[0].Text != "reason" {
+	if len(restored.Parts) != 3 || restored.Parts[0].Text != "reason" || restored.Parts[1].Kind != ai.ContentReasoning || restored.Parts[1].Text != "" {
 		t.Fatalf("streamed message = %s", data)
 	}
 	mapped, err := mapNativeMessages([]ai.Message{restored})
@@ -101,7 +104,7 @@ func TestCanonicalAnthropicStreamSignatureRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &messages); err != nil {
 		t.Fatal(err)
 	}
-	if messages[0].Content[0]["signature"] != "signed" || messages[0].Content[1]["id"] != "one" {
+	if len(messages) != 1 || len(messages[0].Content) != 3 || messages[0].Content[0]["signature"] != "signed" || messages[0].Content[1]["signature"] != "empty-signed" || messages[0].Content[2]["id"] != "one" {
 		t.Fatalf("mapped = %s", raw)
 	}
 }

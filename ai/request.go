@@ -48,7 +48,6 @@ func (r AIRequest) ValidateMessages() error {
 		return fmt.Errorf("request requires messages")
 	}
 	calls := map[string]string{}
-	results := map[string]bool{}
 	for _, m := range r.Messages {
 		if err := m.Validate(); err != nil {
 			return err
@@ -64,10 +63,10 @@ func (r AIRequest) ValidateMessages() error {
 			if p.ToolResult != nil {
 				v := p.ToolResult
 				name, ok := calls[v.ToolCallID]
-				if !ok || name != v.Name || results[v.ToolCallID] {
+				if !ok || name != v.Name {
 					return fmt.Errorf("unmatched or duplicate tool result %q", v.ToolCallID)
 				}
-				results[v.ToolCallID] = true
+				delete(calls, v.ToolCallID)
 			}
 		}
 	}
