@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -150,5 +151,154 @@ func TestNativeHTTPHonorsCancellationAndStreamLifetime(t *testing.T) {
 	}
 	if transport.Timeout != time.Nanosecond {
 		t.Fatal("mutated caller client")
+	}
+}
+
+// nativeRoundTripper exercises redirects through http.Client without dialing
+// privileged default ports or contacting the provider.
+type nativeRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f nativeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestNativeHTTPDefaultPortEquivalence(t *testing.T) {
+	for _, tc := range []struct{ name, base, target string }{
+		{"https explicit", "https://api.mistral.ai", "https://API.MISTRAL.AI:443"},
+		{"https implicit", "https://api.mistral.ai:443", "https://api.mistral.ai"},
+		{"http explicit", "http://api.mistral.ai", "http://api.mistral.ai:80"},
+		{"http implicit", "http://api.mistral.ai:80", "http://api.mistral.ai"},
+		{"ipv6 explicit", "https://[::1]", "https://[::1]:443"},
+	} {
+		for _, phase := range []string{"direct", "redirect", "host override", "callback host"} {
+			t.Run(tc.name+"/"+phase, func(t *testing.T) {
+				target, err := url.Parse(tc.target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				calls := 0
+				transport := &http.Client{Transport: nativeRoundTripper(func(req *http.Request) (*http.Response, error) {
+					calls++
+					if req.Header.Get("Authorization") != "Bearer test-key" {
+						t.Error("authentication lost")
+					}
+					header := make(http.Header)
+					code := http.StatusOK
+					if (phase == "redirect" || phase == "callback host") && calls == 1 {
+						code = http.StatusTemporaryRedirect
+						header.Set("Location", tc.target+"/final")
+					}
+					return &http.Response{StatusCode: code, Header: header, Body: io.NopCloser(strings.NewReader("ok")), Request: req}, nil
+				})}
+				if phase == "callback host" {
+					transport.CheckRedirect = func(req *http.Request, _ []*http.Request) error { req.Host = target.Host; return nil }
+				}
+				client, err := mistral.New("test-key", nil, mistral.WithBaseURL(tc.base), mistral.WithHTTPClient(transport)).NativeClient()
+				if err != nil {
+					t.Fatal(err)
+				}
+				requestURL := tc.base + "/start"
+				if phase == "direct" {
+					requestURL = tc.target + "/start"
+				}
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, requestURL, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if phase == "host override" {
+					req.Host = target.Host
+				}
+				res, err := client.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				res.Body.Close()
+				want := 1
+				if phase == "redirect" || phase == "callback host" {
+					want = 2
+				}
+				if calls != want || res.StatusCode != http.StatusOK {
+					t.Fatalf("calls=%d status=%d", calls, res.StatusCode)
+				}
+			})
+		}
+	}
+}
+
+func TestNativeHTTPDefaultPortNormalizationKeepsOriginBoundary(t *testing.T) {
+	for _, target := range []string{
+		"https://foreign.example:443/final",
+		"https://api.mistral.ai:444/final",
+		"http://api.mistral.ai:443/final",
+		"https://user@api.mistral.ai:443/final",
+	} {
+		for _, redirect := range []bool{false, true} {
+			t.Run(target+"/redirect="+strconv.FormatBool(redirect), func(t *testing.T) {
+				calls := 0
+				transport := &http.Client{Transport: nativeRoundTripper(func(req *http.Request) (*http.Response, error) {
+					calls++
+					if calls > 1 || !redirect {
+						t.Error("rejected destination reached transport")
+					}
+					return &http.Response{StatusCode: http.StatusTemporaryRedirect, Header: http.Header{"Location": []string{target}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+				})}
+				client, err := mistral.New("test-key", nil, mistral.WithHTTPClient(transport)).NativeClient()
+				if err != nil {
+					t.Fatal(err)
+				}
+				requestURL := target
+				if redirect {
+					requestURL = "https://api.mistral.ai/start"
+				}
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, requestURL, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				res, err := client.Do(req)
+				if res != nil {
+					res.Body.Close()
+				}
+				if err == nil {
+					t.Fatal("accepted different origin")
+				}
+				want := 0
+				if redirect {
+					want = 1
+				}
+				if calls != want {
+					t.Fatalf("transport calls=%d, want %d", calls, want)
+				}
+			})
+		}
+	}
+	for _, host := range []string{"api.mistral.ai:444", "foreign.example:443", "user@api.mistral.ai:443", "api.mistral.ai:443/path", "api.mistral.ai:443?query", "api.mistral.ai:443#fragment", "api.mistral.ai:invalid"} {
+		for _, callback := range []bool{false, true} {
+			t.Run("Host="+host+"/callback="+strconv.FormatBool(callback), func(t *testing.T) {
+				calls := 0
+				transport := &http.Client{Transport: nativeRoundTripper(func(req *http.Request) (*http.Response, error) {
+					calls++
+					if !callback || calls > 1 {
+						t.Error("invalid Host reached transport")
+					}
+					return &http.Response{StatusCode: http.StatusTemporaryRedirect, Header: http.Header{"Location": []string{"https://api.mistral.ai:443/final"}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+				})}
+				if callback {
+					transport.CheckRedirect = func(req *http.Request, _ []*http.Request) error { req.Host = host; return nil }
+				}
+				client, err := mistral.New("test-key", nil, mistral.WithHTTPClient(transport)).NativeClient()
+				if err != nil {
+					t.Fatal(err)
+				}
+				req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://api.mistral.ai/start", nil)
+				if !callback {
+					req.Host = host
+				}
+				res, err := client.Do(req)
+				if res != nil {
+					res.Body.Close()
+				}
+				if err == nil {
+					t.Fatal("accepted invalid Host")
+				}
+			})
+		}
 	}
 }

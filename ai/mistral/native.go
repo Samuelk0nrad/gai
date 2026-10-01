@@ -90,7 +90,7 @@ func (p *Provider) NativeClient() (*NativeClient, error) {
 		if err := native.checkURL(req.URL); err != nil {
 			return err
 		}
-		if req.Host != "" && !strings.EqualFold(req.Host, base.Host) {
+		if req.Host != "" && !native.sameAuthority(req.Host) {
 			return fmt.Errorf("mistral native redirect changes host")
 		}
 		if originalRedirect != nil {
@@ -101,7 +101,7 @@ func (p *Provider) NativeClient() (*NativeClient, error) {
 			if err := native.checkURL(req.URL); err != nil {
 				return err
 			}
-			if req.Host != "" && !strings.EqualFold(req.Host, base.Host) {
+			if req.Host != "" && !native.sameAuthority(req.Host) {
 				return fmt.Errorf("mistral native redirect changes host")
 			}
 		}
@@ -113,8 +113,20 @@ func (p *Provider) NativeClient() (*NativeClient, error) {
 	return native, nil
 }
 
+// sameAuthority permits omission of the configured scheme's default port.
+// Compare the remaining authority verbatim (ignoring case), rather than parsing
+// a Host override as a URL: userinfo, paths, or other suffixes must not disappear
+// during normalization. Nondefault ports and IPv6 brackets remain significant.
+func (c *NativeClient) sameAuthority(host string) bool {
+	defaultPort := ":80"
+	if c.baseURL.Scheme == "https" {
+		defaultPort = ":443"
+	}
+	return strings.EqualFold(strings.TrimSuffix(host, defaultPort), strings.TrimSuffix(c.baseURL.Host, defaultPort))
+}
+
 func (c *NativeClient) checkURL(u *url.URL) error {
-	if u == nil || u.User != nil || u.Scheme != c.baseURL.Scheme || !strings.EqualFold(u.Host, c.baseURL.Host) {
+	if u == nil || u.User != nil || u.Scheme != c.baseURL.Scheme || !c.sameAuthority(u.Host) {
 		return fmt.Errorf("mistral native request must use the configured origin")
 	}
 	return nil
@@ -136,7 +148,7 @@ func (c *NativeClient) Do(req *http.Request) (*http.Response, error) {
 	if err := c.checkURL(copy.URL); err != nil {
 		return nil, err
 	}
-	if copy.Host != "" && !strings.EqualFold(copy.Host, c.baseURL.Host) {
+	if copy.Host != "" && !c.sameAuthority(copy.Host) {
 		return nil, fmt.Errorf("mistral native request changes host")
 	}
 	if copy.Header == nil {
