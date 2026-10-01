@@ -922,12 +922,9 @@ func TestModelTokenizerUsesLocalTokenizerWhenEncodingIsKnown(t *testing.T) {
 	}
 }
 
-func TestModelDescriptorAdvertisesKnownLocalTokenizer(t *testing.T) {
+func TestModelDescriptorAdvertisesPortableCapabilities(t *testing.T) {
 	d := openAIDescriptor(GPT41)
-	if d.Tokenizer.Available != ai.FeatureSupportSupported || d.Tokenizer.Fidelity != ai.TokenizerFidelityEstimated {
-		t.Fatalf("tokenizer descriptor = %#v, want supported/estimated", d.Tokenizer)
-	}
-	if d.NativeMessages != ai.FeatureSupportSupported || d.NativeTools != ai.FeatureSupportSupported || d.Multimodal != ai.FeatureSupportUnsupported || d.Usage != ai.FeatureSupportSupported || d.FinishReason != ai.FeatureSupportSupported || d.StreamingUsage != ai.FeatureSupportSupported {
+	if d.NativeMessages != ai.FeatureSupportSupported || d.NativeTools != ai.FeatureSupportSupported || d.Usage != ai.FeatureSupportSupported || d.FinishReason != ai.FeatureSupportSupported || d.StreamingUsage != ai.FeatureSupportSupported {
 		t.Fatalf("capability descriptor = %#v", d)
 	}
 }

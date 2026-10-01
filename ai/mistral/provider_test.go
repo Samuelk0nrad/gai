@@ -78,10 +78,10 @@ func TestProviderCatalogCachesExplicitCapabilitiesForLocalValidation(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(descriptors) != 1 || descriptors[0].ToolCalling != ai.FeatureSupportUnsupported {
+	if len(descriptors) != 1 || descriptors[0].NativeTools != ai.FeatureSupportUnsupported {
 		t.Fatalf("descriptors = %#v", descriptors)
 	}
-	descriptors[0].ToolCalling = ai.FeatureSupportSupported
+	descriptors[0].NativeTools = ai.FeatureSupportSupported
 
 	model, err := p.Model("no-tools")
 	if err != nil {
@@ -97,7 +97,7 @@ func TestProviderCatalogCachesExplicitCapabilitiesForLocalValidation(t *testing.
 		t.Fatalf("descriptor validation made a discovery request; hits = %d", hits)
 	}
 	again, err := p.ListModelDescriptors(context.Background())
-	if err != nil || again[0].ToolCalling != ai.FeatureSupportUnsupported || hits != 1 {
+	if err != nil || again[0].NativeTools != ai.FeatureSupportUnsupported || hits != 1 {
 		t.Fatalf("cached snapshot = %#v, err = %v, hits = %d", again, err, hits)
 	}
 }

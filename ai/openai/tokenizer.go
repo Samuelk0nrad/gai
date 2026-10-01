@@ -137,11 +137,6 @@ func openAIEncodingForModel(model string) (tiktoken.Encoding, bool) {
 	return "", false
 }
 
-func isTokenizerAvailableForModel(model string) bool {
-	_, ok := openAIEncodingForModel(model)
-	return ok
-}
-
 // IsTokenizerUnavailable reports whether err identifies an unsupported local
 // OpenAI model-to-encoding mapping.
 func IsTokenizerUnavailable(err error) bool {

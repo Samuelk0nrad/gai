@@ -21,8 +21,8 @@
 // provider state.
 //
 // Message.Validate checks tagged payloads and role constraints. Request
-// validation additionally matches tool results to preceding call IDs and names;
-// repeated calls to the same named tool must retain distinct IDs. Media and
+// validation matches tool results to preceding calls by ID and name. IDs must
+// be unique among outstanding calls and may be reused after completion. Media and
 // unknown namespaced extensions can be persisted even when a selected adapter
 // cannot replay them. RenderMessages preserves supported roles, part order,
 // and tool identity, and returns an UnsupportedContentError for media or opaque
@@ -32,6 +32,22 @@
 // views directly from it. Token carries exactly one canonical Part, error, or
 // completion payload. Type(), Text(), and ToolCall() derive stream views. Errors
 // and completion accounting remain execution metadata outside messages.
+//
+// # Portable and native capabilities
+//
+// The shared request supports portable messages, function tools, response formats,
+// reasoning, and normalized output/usage. Concrete provider packages expose
+// TypedModel constructors and typed request options; OpenAI, Anthropic, and Gemini
+// also expose configured SDKClient access for full native request/response types.
+// Mistral exposes a NativeClient HTTP escape hatch. Native calls do not pass
+// through GAI preflight, normalization, observations, or loop retry policies.
+//
+// ModelDescriptor describes portable adapter capabilities, not a native feature
+// catalog. Unknown facts do not reject requests. NativeTools controls explicit
+// native tool definitions; canonical history can also be rendered as text.
+// Token counting fidelity belongs to TokenCounter. Catalog caches, descriptor
+// merging, and discovery locks are internal implementation
+// details; ModelRepository remains an optional public application utility.
 //
 // # Local text counting
 //

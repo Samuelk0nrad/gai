@@ -19,9 +19,10 @@ import (
 const mistralTracerName = "github.com/lace-ai/gai/ai/mistral"
 
 type Model struct {
-	name   string
-	client *Provider
-	debug  gai.ObservationSink
+	name        string
+	client      *Provider
+	debug       gai.ObservationSink
+	chatOptions ChatCompletionOptions
 }
 
 var _ ai.Model = (*Model)(nil)
@@ -53,12 +54,10 @@ func (m *Model) Descriptor() ai.ModelDescriptor {
 func mistralAdapterDescriptor(model string) ai.ModelDescriptor {
 	return ai.ModelDescriptor{Model: model, NativeMessages: ai.FeatureSupportSupported, NativeTools: ai.FeatureSupportSupported,
 		ToolChoiceModes: []ai.ToolChoiceMode{ai.ToolChoiceAuto, ai.ToolChoiceNone, ai.ToolChoiceRequired},
-		Multimodal:      ai.FeatureSupportUnsupported,
 		Usage:           ai.FeatureSupportSupported, FinishReason: ai.FeatureSupportSupported, StreamingUsage: ai.FeatureSupportSupported,
-		ToolCalling: ai.FeatureSupportSupported,
-		JSONOutput:  ai.FeatureSupportSupported, JSONSchemaOutput: ai.FeatureSupportSupported,
+		JSONOutput: ai.FeatureSupportSupported, JSONSchemaOutput: ai.FeatureSupportSupported,
 		Reasoning: ai.FeatureSupportUnsupported, ReasoningEffort: ai.FeatureSupportUnsupported,
-		Tokenizer: ai.TokenizerDescriptor{Available: ai.FeatureSupportSupported, Fidelity: ai.TokenizerFidelityEstimated}}
+	}
 }
 
 func (m *Model) Close() error {
@@ -66,6 +65,7 @@ func (m *Model) Close() error {
 }
 
 type chatCompletionRequest struct {
+	ChatCompletionOptions
 	Model          string               `json:"model"`
 	Messages       []chatMessageRequest `json:"messages"`
 	MaxTokens      *int                 `json:"max_tokens,omitempty"`
@@ -552,7 +552,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			return
 		}
 
-		payload, err := buildChatCompletionRequest(req, m.name, true)
+		payload, err := m.chatCompletionRequest(req, true)
 		if err != nil {
 			streamErr = err
 			if !emit(ai.Token{Err: err}) {
@@ -941,7 +941,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	if err := ai.ValidateModelRequest(m, req); err != nil {
 		return nil, err
 	}
-	payload, err := buildChatCompletionRequest(req, m.name, false)
+	payload, err := m.chatCompletionRequest(req, false)
 	if err != nil {
 		return nil, err
 	}
