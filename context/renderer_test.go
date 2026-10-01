@@ -31,7 +31,7 @@ func (p renderTestPart) Name() string {
 	return p.name
 }
 
-func (p renderTestPart) Tokens(ctx context.Context, tokenizer ai.Tokenizer) (int, error) {
+func (p renderTestPart) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
 	return 0, nil
 }
 
@@ -656,7 +656,7 @@ func (p failingRenderPart) Name() string {
 	return "failing"
 }
 
-func (p failingRenderPart) Tokens(ctx context.Context, tokenizer ai.Tokenizer) (int, error) {
+func (p failingRenderPart) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
 	return 0, nil
 }
 
@@ -672,7 +672,7 @@ func (p *historyPartAdapter) Name() string {
 	return "history"
 }
 
-func (p *historyPartAdapter) Tokens(ctx context.Context, tokenizer ai.Tokenizer) (int, error) {
+func (p *historyPartAdapter) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
 	return 0, nil
 }
 

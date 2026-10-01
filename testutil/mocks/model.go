@@ -14,10 +14,10 @@ type MockModelResponse struct {
 }
 
 type MockModel struct {
-	ModelName      string
-	Count          int
-	Responses      []MockModelResponse
-	TokenizerValue ai.Tokenizer
+	ModelName         string
+	Count             int
+	Responses         []MockModelResponse
+	TokenCounterValue ai.TokenCounter
 }
 
 func (m *MockModel) Name() string {
@@ -65,35 +65,37 @@ func (m *MockModel) Close() error {
 	return nil
 }
 
-func (m *MockModel) Tokenizer() ai.Tokenizer {
-	if m.TokenizerValue != nil {
-		return m.TokenizerValue
+func (m *MockModel) TokenCounter() ai.TokenCounter {
+	if m.TokenCounterValue != nil {
+		return m.TokenCounterValue
 	}
-	return &MockTokenizer{}
+	return &MockTokenCounter{}
 }
 
-type MockTokenizer struct {
+type MockTokenCounter struct {
 	IDValue    string
 	Count      int
 	CountCalls int
 	Err        error
 }
 
-func (t *MockTokenizer) ID() string {
+func (*MockTokenCounter) Fidelity() ai.TokenCountFidelity { return ai.TokenCountEstimated }
+
+func (t *MockTokenCounter) ID() string {
 	if t.IDValue != "" {
 		return t.IDValue
 	}
-	return "mock.tokenizer"
+	return "mock.counter"
 }
 
-func (t *MockTokenizer) Tokenize(ctx context.Context, text string) ([]string, error) {
+func (t *MockTokenCounter) Tokenize(ctx context.Context, text string) ([]string, error) {
 	if t.Err != nil {
 		return nil, t.Err
 	}
 	return strings.Fields(text), nil
 }
 
-func (t *MockTokenizer) CountTokens(ctx context.Context, text string) (int, error) {
+func (t *MockTokenCounter) CountTokens(ctx context.Context, text string) (int, error) {
 	t.CountCalls++
 	if t.Err != nil {
 		return 0, t.Err

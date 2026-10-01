@@ -2,23 +2,38 @@ package ai
 
 import "context"
 
-// Model is a text-generation model exposed by an AI provider.
+// Model is the minimal streaming capability used by the agent and loop.
+// Diagnostic names, synchronous generation, counting, and descriptors are
+// optional capabilities. Resource ownership stays with the caller; callers
+// may close models implementing io.Closer after all runs have finished.
 //
 // Implementations must close the channel returned by GenerateStream when the
 // request finishes or its context is canceled. Cancellation may be represented
 // by closing the channel without emitting an error token.
 type Model interface {
-	// Name returns the provider-specific model identifier.
-	Name() string
-	// Generate executes a request and returns its complete response.
-	Generate(ctx context.Context, req AIRequest) (*AIResponse, error)
 	// GenerateStream executes a request and emits response tokens incrementally.
 	// Implementations should use SendToken so cancellation cannot block a sender.
 	GenerateStream(ctx context.Context, req AIRequest) <-chan Token
-	// Close releases resources owned by the model.
-	Close() error
-	// Tokenizer returns the tokenizer associated with the model.
-	Tokenizer() Tokenizer
+}
+
+// ModelGenerator is the optional synchronous generation capability. Concrete
+// models may expose it directly; the loop only requires GenerateStream.
+type ModelGenerator interface {
+	Generate(context.Context, AIRequest) (*AIResponse, error)
+}
+
+// ModelNamer optionally supplies the provider-specific name used in diagnostics.
+type ModelNamer interface {
+	Name() string
+}
+
+// ModelName returns an optional diagnostic name, or an empty string when the
+// model does not expose one. Naming is never required to execute a model.
+func ModelName(model Model) string {
+	if namer, ok := model.(ModelNamer); ok {
+		return namer.Name()
+	}
+	return ""
 }
 
 // NativeToolModel is optionally implemented by legacy models that send tool

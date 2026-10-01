@@ -55,8 +55,8 @@ func (m *limitMutatingModel) GenerateStream(ctx context.Context, request ai.AIRe
 	m.once.Do(m.mutate)
 	return m.delegate.GenerateStream(ctx, request)
 }
-func (m *limitMutatingModel) Close() error            { return m.delegate.Close() }
-func (m *limitMutatingModel) Tokenizer() ai.Tokenizer { return m.delegate.Tokenizer() }
+func (m *limitMutatingModel) Close() error                  { return m.delegate.Close() }
+func (m *limitMutatingModel) TokenCounter() ai.TokenCounter { return m.delegate.TokenCounter() }
 
 func (blockingAfterTokenModel) Name() string { return "blocking-after-token-model" }
 func (blockingAfterTokenModel) Generate(context.Context, ai.AIRequest) (*ai.AIResponse, error) {
@@ -71,8 +71,8 @@ func (blockingAfterTokenModel) GenerateStream(ctx context.Context, _ ai.AIReques
 	}()
 	return tokens
 }
-func (blockingAfterTokenModel) Close() error            { return nil }
-func (blockingAfterTokenModel) Tokenizer() ai.Tokenizer { return &mocks.MockTokenizer{} }
+func (blockingAfterTokenModel) Close() error                  { return nil }
+func (blockingAfterTokenModel) TokenCounter() ai.TokenCounter { return &mocks.MockTokenCounter{} }
 
 func (attemptTimeoutModel) Name() string { return "attempt-timeout-model" }
 func (attemptTimeoutModel) Generate(context.Context, ai.AIRequest) (*ai.AIResponse, error) {
@@ -87,8 +87,8 @@ func (attemptTimeoutModel) GenerateStream(ctx context.Context, _ ai.AIRequest) <
 	}()
 	return tokens
 }
-func (attemptTimeoutModel) Close() error            { return nil }
-func (attemptTimeoutModel) Tokenizer() ai.Tokenizer { return &mocks.MockTokenizer{} }
+func (attemptTimeoutModel) Close() error                  { return nil }
+func (attemptTimeoutModel) TokenCounter() ai.TokenCounter { return &mocks.MockTokenCounter{} }
 
 func eventTypes(events []loop.Event) []loop.EventType {
 	types := make([]loop.EventType, len(events))

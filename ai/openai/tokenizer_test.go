@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/lace-ai/gai/ai"
+	tiktoken "github.com/tiktoken-go/tokenizer"
 )
 
 func TestNewTokenizerResolvesKnownOpenAIModels(t *testing.T) {
@@ -17,13 +18,13 @@ func TestNewTokenizerResolvesKnownOpenAIModels(t *testing.T) {
 		text   string
 		want   int
 	}{
-		{model: "gpt-5", wantID: "openai.tiktoken-go/v0.8.1:o200k_base", text: "hello", want: 1},
-		{model: "gpt-5.1", wantID: "openai.tiktoken-go/v0.8.1:o200k_base", text: "hello", want: 1},
-		{model: "gpt-5.1-codex", wantID: "openai.tiktoken-go/v0.8.1:o200k_base", text: "hello", want: 1},
-		{model: "o1", wantID: "openai.tiktoken-go/v0.8.1:o200k_base", text: "hello", want: 1},
-		{model: GPT41, wantID: "openai.tiktoken-go/v0.8.1:o200k_base", text: "hello", want: 1},
-		{model: GPT4oMini, wantID: "openai.tiktoken-go/v0.8.1:o200k_base", text: "hello", want: 1},
-		{model: "gpt-4-0125-preview", wantID: "openai.tiktoken-go/v0.8.1:cl100k_base", text: `{"tool":"weather","city":"München"}`, want: 10},
+		{model: "gpt-5", wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:o200k_base", text: "hello", want: 1},
+		{model: "gpt-5.1", wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:o200k_base", text: "hello", want: 1},
+		{model: "gpt-5.1-codex", wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:o200k_base", text: "hello", want: 1},
+		{model: "o1", wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:o200k_base", text: "hello", want: 1},
+		{model: GPT41, wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:o200k_base", text: "hello", want: 1},
+		{model: GPT4oMini, wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:o200k_base", text: "hello", want: 1},
+		{model: "gpt-4-0125-preview", wantID: "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:cl100k_base", text: `{"tool":"weather","city":"München"}`, want: 10},
 	}
 	for _, tt := range tests {
 		t.Run(tt.model, func(t *testing.T) {
@@ -141,5 +142,61 @@ func TestTokenizerCountsRealisticToolSchemaJSONFixtures(t *testing.T) {
 				t.Fatalf("len(Tokenize()) = %d, want CountTokens result %d", len(first), count)
 			}
 		})
+	}
+}
+
+func TestAutomaticCounterMatchesLocalEncodingAndPreservesFailures(t *testing.T) {
+	counter := (&Model{name: GPT41}).TokenCounter()
+	if counter.Fidelity() != ai.TokenCountEstimated {
+		t.Fatalf("fidelity = %v", counter.Fidelity())
+	}
+	for _, fixture := range realisticToolSchemaJSONFixtures {
+		count, err := counter.CountTokens(t.Context(), fixture.json)
+		if err != nil || count != fixture.want {
+			t.Fatalf("counter %s = %d, %v; want %d", fixture.name, count, err, fixture.want)
+		}
+	}
+	if got := (&Model{name: "unknown-model"}).TokenCounter(); got != nil {
+		t.Fatalf("unknown model counter = %T", got)
+	}
+	broken := &modelTokenCounter{encoding: "unknown-encoding"}
+	if _, err := broken.CountTokens(t.Context(), "text"); err == nil {
+		t.Fatal("invalid encoding was silently estimated")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := counter.CountTokens(ctx, "text"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled count = %v", err)
+	}
+}
+
+// These reference encodings independently catch the fallback's former Unicode
+// undercount. The estimator remains a heuristic, not a bound for all inputs.
+func TestGenericEstimatorCoversMultilingualReferenceCounts(t *testing.T) {
+	fixtures := []string{
+		"这是一个用于测试多语言令牌计数的中文句子。",
+		"これは多言語のトークン数を確認するための日本語の文章です。",
+		"다국어 토큰 수를 확인하기 위한 한국어 문장입니다.",
+		"🙂🚀👨‍👩‍👧‍👦🎉",
+		"Please summarize 中文内容、日本語、한국어 and 🙂.",
+	}
+	for _, encoding := range []tiktoken.Encoding{tiktoken.Cl100kBase, tiktoken.O200kBase} {
+		reference, err := tiktoken.Get(encoding)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, text := range fixtures {
+			exact, err := reference.Count(text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			estimate, err := (ai.TextTokenEstimator{}).CountTokens(t.Context(), text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if estimate < exact {
+				t.Fatalf("%s: estimate %d below reference %d for %q", encoding, estimate, exact, text)
+			}
+		}
 	}
 }

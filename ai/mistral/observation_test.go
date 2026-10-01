@@ -46,7 +46,7 @@ func TestRequestObservationsEmitWithoutContentCapture(t *testing.T) {
 			if streaming {
 				for range model.GenerateStream(t.Context(), ai.AIRequest{Prompt: "secret prompt"}) {
 				}
-			} else if _, err := model.Generate(t.Context(), ai.AIRequest{Prompt: "secret prompt"}); err != nil {
+			} else if _, err := any(model).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "secret prompt"}); err != nil {
 				t.Fatal(err)
 			}
 

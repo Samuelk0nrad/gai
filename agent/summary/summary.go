@@ -30,7 +30,7 @@ type Config struct {
 	Tools             []loop.Tool
 	MaxLoopIterations int
 	MaxTokens         int
-	Tokenizer         ai.Tokenizer
+	TokenCounter      ai.TokenCounter
 	RetryPolicy       *loop.RetryPolicy
 }
 
@@ -68,9 +68,9 @@ func WithRetryPolicy(policy loop.RetryPolicy) Option {
 	}
 }
 
-func WithTokenizer(tokenizer ai.Tokenizer) Option {
+func WithTokenCounter(counter ai.TokenCounter) Option {
 	return func(config *Config) {
-		config.Tokenizer = tokenizer
+		config.TokenCounter = counter
 	}
 }
 
@@ -94,11 +94,11 @@ func Definition(model ai.Model, opts ...Option) agent.Definition {
 				Renderer:           &gaictx.XMLRenderer{},
 				SystemInstructions: []gaictx.Part{gaictx.NewTextPart(systemPrompt)},
 				TokenBudget:        -1,
-				Tokenizer:          config.Tokenizer,
+				TokenCounter:       config.TokenCounter,
 			}), nil
 		},
-		Tokenizer:   config.Tokenizer,
-		RetryPolicy: config.RetryPolicy,
+		TokenCounter: config.TokenCounter,
+		RetryPolicy:  config.RetryPolicy,
 		Limits: agent.Limits{
 			MaxLoopIterations: config.MaxLoopIterations,
 			MaxTokens:         config.MaxTokens,

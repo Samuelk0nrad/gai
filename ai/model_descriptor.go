@@ -26,7 +26,9 @@ const (
 	TokenizerFidelityEstimated
 )
 
-// TokenizerDescriptor describes a model tokenizer without constructing it.
+// TokenizerDescriptor describes the legacy concrete tokenizer without
+// constructing it. It does not describe the automatic local TokenCounter; use
+// TokenCounter.Fidelity for that algorithm.
 type TokenizerDescriptor struct {
 	Available FeatureSupport
 	Fidelity  TokenizerFidelity

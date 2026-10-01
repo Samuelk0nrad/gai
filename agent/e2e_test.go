@@ -61,8 +61,8 @@ func (m *scriptedWorkflowModel) Close() error {
 	return nil
 }
 
-func (m *scriptedWorkflowModel) Tokenizer() ai.Tokenizer {
-	return &mocks.MockTokenizer{}
+func (m *scriptedWorkflowModel) TokenCounter() ai.TokenCounter {
+	return &mocks.MockTokenCounter{}
 }
 
 func (m *scriptedWorkflowModel) Requests() []ai.AIRequest {

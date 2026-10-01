@@ -9,21 +9,19 @@ import (
 // Part is a token-countable unit that can produce a renderer-neutral node.
 type Part interface {
 	Name() string
-	Tokens(ctx context.Context, tokenizer ai.Tokenizer) (int, error)
+	Tokens(ctx context.Context, counter ai.TokenCounter) (int, error)
 	Render(ctx context.Context) (RenderNode, error)
 }
 
 // TextPart is a plain-text prompt part.
 type TextPart struct {
 	Content string
-	tokens  map[string]int
 }
 
-// NewTextPart creates a text part with an empty token-count cache.
+// NewTextPart creates a plain-text part. Counting does not mutate the part.
 func NewTextPart(content string) TextPart {
 	return TextPart{
 		Content: content,
-		tokens:  make(map[string]int),
 	}
 }
 
@@ -31,19 +29,11 @@ func (t TextPart) Name() string {
 	return "text"
 }
 
-func (t TextPart) Tokens(ctx context.Context, tokenizer ai.Tokenizer) (int, error) {
-	if t.tokens == nil {
-		t.tokens = make(map[string]int)
+func (t TextPart) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
+	if counter == nil {
+		return 0, ErrTokenCounterNotFound
 	}
-	if count, exists := t.tokens[tokenizer.ID()]; exists {
-		return count, nil
-	}
-	count, err := tokenizer.CountTokens(ctx, t.Content)
-	if err != nil {
-		return 0, err
-	}
-	t.tokens[tokenizer.ID()] = count
-	return count, nil
+	return counter.CountTokens(ctx, t.Content)
 }
 
 func (t TextPart) Render(ctx context.Context) (RenderNode, error) {
@@ -54,7 +44,6 @@ func (t TextPart) Render(ctx context.Context) (RenderNode, error) {
 type MessagePart struct {
 	Role    Role
 	Content Content
-	tokens  map[string]int
 }
 
 // NewMessagePart creates a role-aware message part.
@@ -62,7 +51,6 @@ func NewMessagePart(role Role, content Content) MessagePart {
 	return MessagePart{
 		Role:    role,
 		Content: content,
-		tokens:  make(map[string]int),
 	}
 }
 
@@ -70,23 +58,15 @@ func (m MessagePart) Name() string {
 	return "message"
 }
 
-func (m MessagePart) Tokens(ctx context.Context, tokenizer ai.Tokenizer) (int, error) {
-	if m.tokens == nil {
-		m.tokens = make(map[string]int)
-	}
-	if count, exists := m.tokens[tokenizer.ID()]; exists {
-		return count, nil
+func (m MessagePart) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
+	if counter == nil {
+		return 0, ErrTokenCounterNotFound
 	}
 	content := ""
 	if m.Content != nil {
 		content = m.Content.String()
 	}
-	count, err := tokenizer.CountTokens(ctx, content)
-	if err != nil {
-		return 0, err
-	}
-	m.tokens[tokenizer.ID()] = count
-	return count, nil
+	return counter.CountTokens(ctx, content)
 }
 
 func (m MessagePart) Render(ctx context.Context) (RenderNode, error) {
@@ -131,10 +111,10 @@ func (i SystemPart) Name() string {
 	return "system"
 }
 
-func (i SystemPart) Tokens(ctx context.Context, tokenizer ai.Tokenizer) (int, error) {
+func (i SystemPart) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
 	count := 0
 	for _, part := range i.Instructions {
-		tokens, err := part.Tokens(ctx, tokenizer)
+		tokens, err := part.Tokens(ctx, counter)
 		if err != nil {
 			return 0, err
 		}

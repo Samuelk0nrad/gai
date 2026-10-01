@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/lace-ai/gai"
+	"github.com/lace-ai/gai/ai"
 	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/internal/observe"
 	"go.opentelemetry.io/otel/attribute"
@@ -92,7 +93,7 @@ func newRunCreationObserver(ctx context.Context, agent *Agent, input RunInput) (
 // Resolved observes only validated effective dependencies, never an unresolved
 // definition model (which may be absent or replaced by this run).
 func (o *runCreationObserver) Resolved(execution resolvedExecution) {
-	o.modelName = execution.model.Name()
+	o.modelName = ai.ModelName(execution.model)
 	o.toolCount = len(execution.tools)
 	o.maxTokens = execution.limits.MaxTokens
 	o.operation.Set(

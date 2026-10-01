@@ -17,7 +17,7 @@ type promptContextBuildStats struct {
 	RemainingTokens        int
 	ContextPartCount       int
 	IncludedSourceCount    int
-	TokenizerPresent       bool
+	TokenCounterPresent    bool
 }
 
 type promptRenderStats struct {
@@ -52,7 +52,7 @@ func newPromptBuilderContextObserver(ctx context.Context, b *Builder) (context.C
 		attribute.Int("context.system_instruction_count", len(b.SystemInstructions)),
 		attribute.Int("context.token_budget", b.TokenBudget),
 		attribute.Int("context.output_token_reserve", b.OutputTokenReserve),
-		attribute.Bool("context.tokenizer_present", b.tokenizer != nil),
+		attribute.Bool("context.counter_present", b.counter != nil),
 	)
 	return ctx, &promptBuilderObserver{debug: b.debugSink, operation: operation}
 }
@@ -129,7 +129,7 @@ func (o *promptBuilderObserver) BuildStarted(ctx context.Context, stats promptCo
 		"token_budget":             stats.TokenBudget,
 		"output_token_reserve":     stats.OutputTokenReserve,
 		"remaining_tokens":         stats.RemainingTokens,
-		"tokenizer_present":        stats.TokenizerPresent,
+		"counter_present":          stats.TokenCounterPresent,
 	}, nil)
 }
 

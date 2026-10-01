@@ -10,7 +10,7 @@ import (
 	tiktoken "github.com/tiktoken-go/tokenizer"
 )
 
-const tokenizerIDPrefix = "openai.tiktoken-go/v0.8.1:"
+const tokenizerIDPrefix = "openai.tiktoken-go/v0.8.1:blocks-10000-runes-v1:"
 
 // TokenizerUnavailableError reports that no local tokenizer mapping is known
 // for a model. It intentionally does not guess an encoding for unknown models.
@@ -26,10 +26,12 @@ func (e *TokenizerUnavailableError) Unwrap() error { return ai.ErrTokenizerUnsup
 
 // NewTokenizer returns a local tokenizer for a supported OpenAI model.
 //
-// Counts are exact for the selected text encoding, but do not include OpenAI
-// request framing, messages, tools, or billing overhead. It performs no
-// provider network I/O. Unknown models return a TokenizerUnavailableError so a
-// caller can choose its own fallback; they are never assigned a guessed codec.
+// CountTokens processes at most 10,000 Unicode code points per block and checks
+// cancellation between blocks. Block boundaries can change the count compared
+// with tokenizing the whole text, so counts have estimated fidelity. They exclude
+// request framing and billing overhead. Tokenize still encodes the whole text.
+// It performs no provider network I/O. Unknown models return a
+// TokenizerUnavailableError; they are never assigned a guessed codec.
 func NewTokenizer(model string) (ai.Tokenizer, error) {
 	model = strings.TrimSpace(model)
 	encoding, ok := openAIEncodingForModel(model)
@@ -43,28 +45,57 @@ func NewTokenizer(model string) (ai.Tokenizer, error) {
 	return &Tokenizer{codec: codec, encoding: encoding}, nil
 }
 
-// Tokenizer is a local text-encoding tokenizer backed by tiktoken-go.
-// Its API is deliberately limited to ai.Tokenizer so it can be adapted to the
-// count-only TokenCounter contract planned in #144 without exposing a second
-// provider-specific abstraction.
+// Tokenizer is a local text-encoding tokenizer backed by tiktoken-go. It also
+// implements the count-only runtime capability, without network I/O.
 type Tokenizer struct {
 	codec    tiktoken.Codec
 	encoding tiktoken.Encoding
 }
 
 var _ ai.Tokenizer = (*Tokenizer)(nil)
+var _ ai.TokenCounter = (*Tokenizer)(nil)
 
-func (t *Tokenizer) ID() string { return tokenizerIDPrefix + string(t.encoding) }
+func (*Tokenizer) Fidelity() ai.TokenCountFidelity { return ai.TokenCountEstimated }
 
-func (t *Tokenizer) CountTokens(ctx context.Context, text string) (int, error) {
+// TokenCounter returns a local block counter for a known encoding. Unknown models
+// return nil so runtime budgeting selects the generic estimator. Encoding
+// initialization errors are returned by CountTokens rather than hidden behind
+// an estimate.
+func (m *Model) TokenCounter() ai.TokenCounter {
+	encoding, ok := openAIEncodingForModel(strings.TrimSpace(m.name))
+	if !ok {
+		return nil
+	}
+	return &modelTokenCounter{encoding: encoding}
+}
+
+type modelTokenCounter struct {
+	encoding tiktoken.Encoding
+}
+
+func (c *modelTokenCounter) ID() string                    { return tokenizerIDPrefix + string(c.encoding) }
+func (*modelTokenCounter) Fidelity() ai.TokenCountFidelity { return ai.TokenCountEstimated }
+func (c *modelTokenCounter) CountTokens(ctx context.Context, text string) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	count, err := t.codec.Count(text)
-	if err != nil {
-		return 0, fmt.Errorf("count OpenAI tokens: %w", err)
+	if text == "" {
+		return 0, nil
 	}
-	return count, nil
+	codec, err := localTokenCodec(ctx, c.encoding)
+	if err != nil {
+		return 0, fmt.Errorf("load OpenAI counter %q: %w", c.encoding, err)
+	}
+	return countTokenBlocks(ctx, codec, text)
+}
+
+func (t *Tokenizer) ID() string { return tokenizerIDPrefix + string(t.encoding) }
+
+// CountTokens counts blocks of at most 10,000 Unicode code points using the
+// upstream codec. Cancellation takes effect after the current block finishes.
+// For longer text its result can differ from len(Tokenize(ctx, text)).
+func (t *Tokenizer) CountTokens(ctx context.Context, text string) (int, error) {
+	return countTokenBlocks(ctx, t.codec, text)
 }
 
 func (t *Tokenizer) Tokenize(ctx context.Context, text string) ([]string, error) {

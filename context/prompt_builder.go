@@ -22,9 +22,9 @@ type ContextSource interface {
 	Function(ctx context.Context, TokenBudget int) (Part, error)
 }
 
-// TokenizerSetter is implemented by components that accept tokenizer injection.
-type TokenizerSetter interface {
-	SetTokenizer(tokenizer ai.Tokenizer)
+// TokenCounterSetter is implemented by components that accept counter injection.
+type TokenCounterSetter interface {
+	SetTokenCounter(counter ai.TokenCounter)
 }
 
 // PromptBuilder is the prompt-construction contract consumed by agent loops.
@@ -56,7 +56,7 @@ type TokenBudget interface {
 	SetTokenLimit(limit int) error
 	SetOutputTokenReserve(reserve int) error
 	GetRemainingTokens() (int, error)
-	Tokenizer() ai.Tokenizer
+	TokenCounter() ai.TokenCounter
 }
 
 // Definition configures a Builder.
@@ -74,8 +74,9 @@ type Definition struct {
 	TokenBudget int
 	// OutputTokenReserve is withheld from the prompt budget for model output.
 	OutputTokenReserve int
-	// Tokenizer counts parts and is propagated to compatible context sources.
-	Tokenizer ai.Tokenizer
+	// TokenCounter counts parts locally and is propagated to compatible context
+	// sources. Nil selects ai.TextTokenEstimator.
+	TokenCounter ai.TokenCounter
 	// ObservationSink receives prompt-building diagnostics.
 	ObservationSink gai.ObservationSink
 }
@@ -92,12 +93,17 @@ type Builder struct {
 	defaultRenderer    *XMLRenderer
 	debugSink          gai.ObservationSink
 	input              PromptInput
-	tokenizer          ai.Tokenizer
+	counter            ai.TokenCounter
 	OutputTokenReserve int
 }
 
-// New creates a prompt builder from def.
+// New creates a prompt builder from def. A nil TokenCounter selects the
+// generic local estimator. Agent may replace it with an effective model counter.
 func New(def Definition) *Builder {
+	counter := def.TokenCounter
+	if counter == nil {
+		counter = ai.TextTokenEstimator{}
+	}
 	renderer := def.Renderer
 	var defaultRenderer *XMLRenderer
 	if renderer == nil {
@@ -118,7 +124,7 @@ func New(def Definition) *Builder {
 		defaultRenderer:    defaultRenderer,
 		debugSink:          def.ObservationSink,
 		input:              def.PromptInput.Clone(),
-		tokenizer:          def.Tokenizer,
+		counter:            counter,
 	}
 }
 
@@ -138,8 +144,8 @@ func (b *Builder) SetObservationSink(debugSink gai.ObservationSink) {
 }
 
 func (b *Builder) AppendContextSource(ctx context.Context, source ContextSource) error {
-	if setter, ok := source.(TokenizerSetter); ok && b.tokenizer != nil {
-		setter.SetTokenizer(b.tokenizer)
+	if setter, ok := source.(TokenCounterSetter); ok && b.counter != nil {
+		setter.SetTokenCounter(b.counter)
 	}
 	b.ContextSources = append(b.ContextSources, source)
 	return nil
@@ -147,8 +153,8 @@ func (b *Builder) AppendContextSource(ctx context.Context, source ContextSource)
 
 // PrependContextSource adds source before all existing context sources.
 func (b *Builder) PrependContextSource(ctx context.Context, source ContextSource) error {
-	if setter, ok := source.(TokenizerSetter); ok && b.tokenizer != nil {
-		setter.SetTokenizer(b.tokenizer)
+	if setter, ok := source.(TokenCounterSetter); ok && b.counter != nil {
+		setter.SetTokenCounter(b.counter)
 	}
 	b.ContextSources = append([]ContextSource{source}, b.ContextSources...)
 	return nil
@@ -164,8 +170,8 @@ func (b *Builder) ReplaceContextSource(ctx context.Context, name string, source 
 	if name == "" || source == nil {
 		return ErrPromptSource
 	}
-	if setter, ok := source.(TokenizerSetter); ok && b.tokenizer != nil {
-		setter.SetTokenizer(b.tokenizer)
+	if setter, ok := source.(TokenCounterSetter); ok && b.counter != nil {
+		setter.SetTokenCounter(b.counter)
 	}
 
 	sources := make([]ContextSource, 0, len(b.ContextSources))
@@ -250,7 +256,7 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 		SystemInstructionCount: len(b.SystemInstructions),
 		TokenBudget:            b.TokenBudget,
 		OutputTokenReserve:     b.OutputTokenReserve,
-		TokenizerPresent:       b.tokenizer != nil,
+		TokenCounterPresent:    b.counter != nil,
 	}
 	defer func() {
 		stats.ContextPartCount = len(contextParts)
@@ -261,7 +267,10 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 	}
 
 	if b.TokenBudget > 0 {
-		stats.SystemTokens = b.SystemInstructionsTokens(ctx)
+		stats.SystemTokens, err = b.SystemInstructionsTokens(ctx)
+		if err != nil {
+			return nil, err
+		}
 		stats.RemainingTokens = b.TokenBudget - b.OutputTokenReserve - stats.SystemTokens
 	} else {
 		obs.TokenBudgetSkipped(ctx)
@@ -277,8 +286,8 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 			obs.SourceSkipped(ctx, "<nil>")
 			continue
 		}
-		if setter, ok := source.(TokenizerSetter); ok && b.tokenizer != nil {
-			setter.SetTokenizer(b.tokenizer)
+		if setter, ok := source.(TokenCounterSetter); ok && b.counter != nil {
+			setter.SetTokenCounter(b.counter)
 		}
 		part, err := source.Function(ctx, stats.RemainingTokens)
 		if err != nil {
@@ -291,17 +300,21 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 		if part != nil {
 			contextParts = append(contextParts, part)
 			stats.IncludedSourceCount++
-			tokens, ok := b.partTokens(ctx, part, map[string]any{
-				"source": source.Name(),
-				"part":   part.Name(),
-			})
-			if ok && b.TokenBudget > 0 {
-				stats.RemainingTokens -= tokens
+			var tokenStats promptPartTokenStats
+			if b.TokenBudget > 0 {
+				tokens, err := b.partTokens(ctx, part, map[string]any{
+					"source": source.Name(),
+					"part":   part.Name(),
+				})
+				if err != nil {
+					return nil, err
+				}
+				tokenStats = promptPartTokenStats{Tokens: tokens, TokensCounted: b.counter != nil}
+				if tokenStats.TokensCounted {
+					stats.RemainingTokens -= tokens
+				}
 			}
-			obs.SourceIncluded(ctx, source.Name(), part.Name(), promptPartTokenStats{
-				Tokens:        tokens,
-				TokensCounted: ok,
-			}, stats.RemainingTokens)
+			obs.SourceIncluded(ctx, source.Name(), part.Name(), tokenStats, stats.RemainingTokens)
 		}
 	}
 	for _, part := range b.input.Context {
@@ -312,11 +325,17 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 			continue
 		}
 		contextParts = append(contextParts, part)
-		tokens, ok := b.partTokens(ctx, part, map[string]any{
+		if b.TokenBudget <= 0 {
+			continue
+		}
+		tokens, err := b.partTokens(ctx, part, map[string]any{
 			"source": "prompt_input",
 			"part":   part.Name(),
 		})
-		if ok && b.TokenBudget > 0 {
+		if err != nil {
+			return nil, err
+		}
+		if b.counter != nil {
 			stats.RemainingTokens -= tokens
 		}
 	}
@@ -419,12 +438,16 @@ func (b *Builder) SetInput(input PromptInput) {
 	b.input = input.Clone()
 }
 
-func (b *Builder) Tokenizer() ai.Tokenizer {
-	return b.tokenizer
+func (b *Builder) TokenCounter() ai.TokenCounter {
+	return b.counter
 }
 
-func (b *Builder) SetTokenizer(tokenizer ai.Tokenizer) {
-	b.tokenizer = tokenizer
+// SetTokenCounter replaces the local counter; nil selects the generic estimator.
+func (b *Builder) SetTokenCounter(counter ai.TokenCounter) {
+	if counter == nil {
+		counter = ai.TextTokenEstimator{}
+	}
+	b.counter = counter
 }
 
 func (b *Builder) SetOutputTokenReserve(reserve int) error {
@@ -435,45 +458,51 @@ func (b *Builder) SetOutputTokenReserve(reserve int) error {
 	return nil
 }
 
-func (b *Builder) SystemInstructionsTokens(ctx context.Context) int {
+// SystemInstructionsTokens counts system parts without hiding counter errors.
+func (b *Builder) SystemInstructionsTokens(ctx context.Context) (int, error) {
 	count := 0
-	if b.tokenizer == nil {
+	if b.counter == nil {
 		if len(b.SystemInstructions) > 0 {
 			newPromptBuilderDebugObserver(b).TokenCountSkipped(ctx, map[string]any{
-				"reason": "tokenizer_missing",
+				"reason": "counter_missing",
 				"scope":  "system_instructions",
 				"parts":  len(b.SystemInstructions),
 			})
 		}
-		return count
+		return count, nil
 	}
 	for _, part := range b.SystemInstructions {
-		tokens, ok := b.partTokens(ctx, part, map[string]any{
+		tokens, err := b.partTokens(ctx, part, map[string]any{
 			"scope": "system_instructions",
 			"part":  part.Name(),
 		})
-		if !ok {
-			continue
+		if err != nil {
+			return 0, err
 		}
 		count += tokens
 	}
-	return count
+	return count, nil
 }
 
-func (b *Builder) partTokens(ctx context.Context, part Part, fields map[string]any) (int, bool) {
+func (b *Builder) partTokens(ctx context.Context, part Part, fields map[string]any) (int, error) {
 	obs := newPromptBuilderDebugObserver(b)
-	if b.tokenizer == nil {
+	if b.counter == nil {
 		obs.TokenCountSkipped(ctx, mergeDebugFields(fields, map[string]any{
-			"reason": "tokenizer_missing",
+			"reason": "counter_missing",
 		}))
-		return 0, false
+		return 0, nil
 	}
-	tokens, err := part.Tokens(ctx, b.tokenizer)
+	tokens, err := part.Tokens(ctx, b.counter)
 	if err != nil {
 		obs.TokenCountFailed(ctx, fields, err)
-		return 0, false
+		return 0, err
 	}
-	return tokens, true
+	if tokens < 0 {
+		err := fmt.Errorf("%w: %d", ErrInvalidTokenCount, tokens)
+		obs.TokenCountFailed(ctx, fields, err)
+		return 0, err
+	}
+	return tokens, nil
 }
 
 func mergeDebugFields(base map[string]any, extra map[string]any) map[string]any {

@@ -25,14 +25,14 @@ func executionPrompt(context.Context, agent.RunInput) (gaictx.PromptBuilder, err
 
 type executionModel struct {
 	*scriptedWorkflowModel
-	name      string
-	tokenizer ai.Tokenizer
-	native    bool
+	name    string
+	counter ai.TokenCounter
+	native  bool
 }
 
-func (m *executionModel) Name() string            { return m.name }
-func (m *executionModel) Tokenizer() ai.Tokenizer { return m.tokenizer }
-func (m *executionModel) NativeTools() bool       { return m.native }
+func (m *executionModel) Name() string                  { return m.name }
+func (m *executionModel) TokenCounter() ai.TokenCounter { return m.counter }
+func (m *executionModel) NativeTools() bool             { return m.native }
 
 func TestExecutionInheritsReplacesAndResetsValues(t *testing.T) {
 	reasoning := ai.ReasoningConfig{Enabled: true, BudgetTokens: 12, Effort: ai.ReasoningEffortHigh}
@@ -94,7 +94,7 @@ func TestExecutionModelSelectsTransportAndObservations(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := &executionModel{scriptedWorkflowModel: &scriptedWorkflowModel{}, name: "base", native: !tc.native}
-			selected := &executionModel{scriptedWorkflowModel: &scriptedWorkflowModel{}, name: "selected", native: tc.native, tokenizer: &mocks.MockTokenizer{}}
+			selected := &executionModel{scriptedWorkflowModel: &scriptedWorkflowModel{}, name: "selected", native: tc.native, counter: &mocks.MockTokenCounter{}}
 			sink := &agentObservationSink{}
 			var builder *gaictx.Builder
 			a := agent.New(agent.Definition{
@@ -127,8 +127,8 @@ func TestExecutionModelSelectsTransportAndObservations(t *testing.T) {
 			if builder.HasContextSource("tool_definitions") == tc.native {
 				t.Fatal("tool protocol does not match effective model")
 			}
-			if builder.Tokenizer() != selected.tokenizer {
-				t.Fatal("tokenizer does not match effective model")
+			if builder.TokenCounter() != selected.counter {
+				t.Fatal("counter does not match effective model")
 			}
 			if got := consumeWorkflow(t, workflow); len(got.errs) != 0 {
 				t.Fatal(got.errs)
@@ -149,54 +149,54 @@ func TestExecutionModelSelectsTransportAndObservations(t *testing.T) {
 	}
 }
 
-func TestExecutionTokenizerSelectionAndExplicitClear(t *testing.T) {
-	inherited, custom, automatic := &mocks.MockTokenizer{}, &mocks.MockTokenizer{}, &mocks.MockTokenizer{}
+func TestExecutionTokenCounterSelectionAndExplicitClear(t *testing.T) {
+	inherited, custom, automatic := &mocks.MockTokenCounter{}, &mocks.MockTokenCounter{}, &mocks.MockTokenCounter{}
 	for _, tc := range []struct {
 		name        string
-		override    agent.Optional[ai.Tokenizer]
-		model, want ai.Tokenizer
+		override    agent.Optional[ai.TokenCounter]
+		model, want ai.TokenCounter
 	}{
-		{"inherit", agent.Optional[ai.Tokenizer]{}, automatic, inherited},
-		{"ignored value", agent.Optional[ai.Tokenizer]{Value: custom}, automatic, inherited},
-		{"replace", agent.Optional[ai.Tokenizer]{Set: true, Value: custom}, automatic, custom},
-		{"clear custom", agent.Optional[ai.Tokenizer]{Set: true}, automatic, automatic},
-		{"clear stale builder", agent.Optional[ai.Tokenizer]{Set: true}, nil, nil},
+		{"inherit", agent.Optional[ai.TokenCounter]{}, automatic, inherited},
+		{"ignored value", agent.Optional[ai.TokenCounter]{Value: custom}, automatic, inherited},
+		{"replace", agent.Optional[ai.TokenCounter]{Set: true, Value: custom}, automatic, custom},
+		{"clear custom", agent.Optional[ai.TokenCounter]{Set: true}, automatic, automatic},
+		{"clear stale builder", agent.Optional[ai.TokenCounter]{Set: true}, nil, ai.TextTokenEstimator{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			builder := &testPromptBuilder{tokenizer: custom}
+			builder := &testPromptBuilder{counter: custom}
 			a := agent.New(agent.Definition{
-				Model: &executionModel{scriptedWorkflowModel: &scriptedWorkflowModel{}, tokenizer: tc.model}, Tokenizer: inherited,
+				Model: &executionModel{scriptedWorkflowModel: &scriptedWorkflowModel{}, counter: tc.model}, TokenCounter: inherited,
 				Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return builder, nil },
 			})
-			_, err := a.NewRun(t.Context(), agent.RunInput{Execution: &agent.ExecutionOverrides{Tokenizer: tc.override}})
-			if err != nil || builder.tokenizer != tc.want {
-				t.Fatalf("tokenizer = %v, want %v; error = %v", builder.tokenizer, tc.want, err)
+			_, err := a.NewRun(t.Context(), agent.RunInput{Execution: &agent.ExecutionOverrides{TokenCounter: tc.override}})
+			if err != nil || builder.counter != tc.want {
+				t.Fatalf("counter = %v, want %v; error = %v", builder.counter, tc.want, err)
 			}
 		})
 	}
 }
 
-func TestExecutionOpaqueBuilderRequiresExplicitTokenizerSupport(t *testing.T) {
+func TestExecutionOpaqueBuilderRequiresExplicitTokenCounterSupport(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		tokenizer ai.Tokenizer
+		counter   ai.TokenCounter
 		overrides *agent.ExecutionOverrides
 		wantError bool
 	}{
 		{"ordinary inheritance", nil, nil, false},
-		{"definition custom", &mocks.MockTokenizer{}, nil, true},
-		{"explicit clear", nil, &agent.ExecutionOverrides{Tokenizer: agent.Optional[ai.Tokenizer]{Set: true}}, true},
+		{"definition custom", &mocks.MockTokenCounter{}, nil, true},
+		{"explicit clear", nil, &agent.ExecutionOverrides{TokenCounter: agent.Optional[ai.TokenCounter]{Set: true}}, true},
 		{"model switch", nil, &agent.ExecutionOverrides{Model: &scriptedWorkflowModel{}}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a := agent.New(agent.Definition{Model: &scriptedWorkflowModel{}, Tokenizer: tc.tokenizer,
+			a := agent.New(agent.Definition{Model: &scriptedWorkflowModel{}, TokenCounter: tc.counter,
 				Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
 					return &unclonablePromptBuilder{}, nil
 				},
 			})
 			_, err := a.NewRun(t.Context(), agent.RunInput{Execution: tc.overrides})
-			if errors.Is(err, agent.ErrTokenizerNotConfigurable) != tc.wantError || (!tc.wantError && err != nil) {
-				t.Fatalf("NewRun error = %v, want tokenizer error %v", err, tc.wantError)
+			if errors.Is(err, agent.ErrTokenCounterNotConfigurable) != tc.wantError || (!tc.wantError && err != nil) {
+				t.Fatalf("NewRun error = %v, want counter error %v", err, tc.wantError)
 			}
 		})
 	}
@@ -211,7 +211,7 @@ func (p *executionProcessor) Process(_ ai.ToolCall, res *loop.ToolResponse) erro
 
 func TestExecutionRejectsInvalidResolvedValuesBeforePrompt(t *testing.T) {
 	var nilModel *executionModel
-	var nilTokenizer *mocks.MockTokenizer
+	var nilTokenCounter *mocks.MockTokenCounter
 	var nilProcessor *executionProcessor
 	for _, tc := range []struct {
 		name      string
@@ -220,8 +220,8 @@ func TestExecutionRejectsInvalidResolvedValuesBeforePrompt(t *testing.T) {
 		{"negative tokens", &agent.ExecutionOverrides{Limits: agent.LimitsOverrides{MaxTokens: executionPtr(-1)}}},
 		{"negative iterations", &agent.ExecutionOverrides{Limits: agent.LimitsOverrides{MaxLoopIterations: executionPtr(-1)}}},
 		{"typed nil model", &agent.ExecutionOverrides{Model: nilModel}},
-		{"typed nil tokenizer", &agent.ExecutionOverrides{Tokenizer: agent.Optional[ai.Tokenizer]{Set: true, Value: nilTokenizer}}},
-		{"typed nil model tokenizer", &agent.ExecutionOverrides{Model: &executionModel{scriptedWorkflowModel: &scriptedWorkflowModel{}, tokenizer: nilTokenizer}}},
+		{"typed nil counter", &agent.ExecutionOverrides{TokenCounter: agent.Optional[ai.TokenCounter]{Set: true, Value: nilTokenCounter}}},
+		{"typed nil model counter", &agent.ExecutionOverrides{Model: &executionModel{scriptedWorkflowModel: &scriptedWorkflowModel{}, counter: nilTokenCounter}}},
 		{"typed nil processor", &agent.ExecutionOverrides{ToolResponseProcessor: agent.Optional[loop.ToolResponseProcessor]{Set: true, Value: nilProcessor}}},
 		{"bad retry", &agent.ExecutionOverrides{RetryPolicy: agent.Optional[*loop.RetryPolicy]{Set: true, Value: &loop.RetryPolicy{MaxRetries: -1}}}},
 		{"bad format", &agent.ExecutionOverrides{ResponseFormat: &ai.ResponseFormat{Type: ai.ResponseFormatJSONSchema}}},

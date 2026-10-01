@@ -3,9 +3,11 @@ package context
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/lace-ai/gai"
@@ -33,17 +35,19 @@ func (emptyConversation) Messages() []Message {
 	return nil
 }
 
-type debugTestTokenizer struct{}
+type debugTestTokenCounter struct{}
 
-func (debugTestTokenizer) ID() string {
+func (debugTestTokenCounter) Fidelity() ai.TokenCountFidelity { return ai.TokenCountEstimated }
+
+func (debugTestTokenCounter) ID() string {
 	return "debug.test"
 }
 
-func (debugTestTokenizer) Tokenize(ctx context.Context, text string) ([]string, error) {
+func (debugTestTokenCounter) Tokenize(ctx context.Context, text string) ([]string, error) {
 	return strings.Fields(text), nil
 }
 
-func (debugTestTokenizer) CountTokens(ctx context.Context, text string) (int, error) {
+func (debugTestTokenCounter) CountTokens(ctx context.Context, text string) (int, error) {
 	return len(strings.Fields(text)), nil
 }
 
@@ -69,8 +73,8 @@ func TestNewPromptBuilderFromDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildContext failed: %v", err)
 	}
-	if source.budget != 12 {
-		t.Fatalf("expected source token budget 12, got %d", source.budget)
+	if source.budget != 10 {
+		t.Fatalf("expected source token budget 10 after estimating system instructions, got %d", source.budget)
 	}
 
 	prompt, err := builder.BuildPrompt(context.Background(), emptyConversation{})
@@ -240,7 +244,7 @@ func (failingPart) Name() string {
 	return "failing"
 }
 
-func (failingPart) Tokens(ctx context.Context, tokenizer ai.Tokenizer) (int, error) {
+func (failingPart) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
 	return 0, errors.New("token count failed")
 }
 
@@ -260,7 +264,7 @@ func TestPromptBuilderEmitsExistingEventsWithoutSensitiveFieldsByDefault(t *test
 		TokenBudget:        10,
 		ObservationSink:    sink,
 	})
-	builder.SetTokenizer(debugTestTokenizer{})
+	builder.SetTokenCounter(debugTestTokenCounter{})
 
 	if _, err := builder.BuildContext(context.Background()); err != nil {
 		t.Fatalf("BuildContext failed: %v", err)
@@ -384,9 +388,11 @@ func TestPromptBuilderKeepsTokenErrorEvents(t *testing.T) {
 		SystemInstructions: []Part{failingPart{}},
 		ObservationSink:    sink,
 	})
-	builder.SetTokenizer(debugTestTokenizer{})
+	builder.SetTokenCounter(debugTestTokenCounter{})
 
-	builder.SystemInstructionsTokens(context.Background())
+	if _, err := builder.SystemInstructionsTokens(context.Background()); err == nil {
+		t.Fatal("expected token count error to reach the caller")
+	}
 
 	names := make([]string, 0, len(sink.events))
 	for _, event := range sink.events {
@@ -412,5 +418,126 @@ func TestPromptBuilderReturnsCancellationBeforeBuilding(t *testing.T) {
 	}
 	if _, err := builder.BuildPrompt(ctx, emptyConversation{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("BuildPrompt error = %v, want context.Canceled", err)
+	}
+}
+
+type failingCountSource struct{}
+
+func (failingCountSource) Name() string                                { return "failing" }
+func (failingCountSource) Function(context.Context, int) (Part, error) { return failingPart{}, nil }
+
+func TestBuildContextReturnsCountingErrorsFromEveryPartOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		def  Definition
+	}{
+		{"system", Definition{TokenBudget: 100, SystemInstructions: []Part{failingPart{}}}},
+		{"source", Definition{TokenBudget: 100, ContextSources: []ContextSource{failingCountSource{}}}},
+		{"input", Definition{TokenBudget: 100, PromptInput: PromptInput{Context: []Part{failingPart{}}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := New(tc.def)
+			if _, err := builder.BuildContext(t.Context()); err == nil {
+				t.Fatal("counting failure was ignored")
+			}
+		})
+	}
+}
+
+func TestBuilderClearingCounterRestoresLocalEstimator(t *testing.T) {
+	builder := New(Definition{TokenCounter: debugTestTokenCounter{}})
+	builder.SetTokenCounter(nil)
+	if _, ok := builder.TokenCounter().(ai.TextTokenEstimator); !ok {
+		t.Fatalf("counter = %T", builder.TokenCounter())
+	}
+}
+
+// Fresh builders may share immutable prompt parts through definitions or inputs.
+func TestConcurrentBuildersCanShareImmutablePromptParts(t *testing.T) {
+	named, err := NewNamedPart("context", strings.Repeat("input ", 2000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	system := NewTextPart(strings.Repeat("instructions ", 2000))
+	message := NewMessagePart(RoleUser, NewTextContent("shared message"))
+	input := PromptInput{Context: []Part{named, message}}
+	var group sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 16; i++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			builder := New(Definition{TokenBudget: 100000, SystemInstructions: []Part{system}, PromptInput: input.Clone()})
+			if _, err := builder.BuildContext(t.Context()); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	close(start)
+	group.Wait()
+}
+
+type budgetCountingPart struct {
+	calls int
+}
+
+var errBudgetTestCount = errors.New("budget test count failed")
+
+func (*budgetCountingPart) Name() string { return "text" }
+func (p *budgetCountingPart) Tokens(context.Context, ai.TokenCounter) (int, error) {
+	p.calls++
+	return 0, errBudgetTestCount
+}
+func (*budgetCountingPart) Render(context.Context) (RenderNode, error) {
+	return RenderNode{Type: "text", Value: "renderable context"}, nil
+}
+
+type budgetPartSource struct {
+	part Part
+	err  error
+}
+
+func (budgetPartSource) Name() string                                  { return "context" }
+func (s budgetPartSource) Function(context.Context, int) (Part, error) { return s.part, s.err }
+
+func TestBuildContextSkipsUnusedCountsWhenBudgetDisabled(t *testing.T) {
+	for _, budget := range []int{0, -1} {
+		t.Run(fmt.Sprint(budget), func(t *testing.T) {
+			part := &budgetCountingPart{}
+			sink := &debugEventSink{}
+			builder := New(Definition{
+				TokenBudget:        budget,
+				SystemInstructions: []Part{part},
+				ContextSources:     []ContextSource{budgetPartSource{part: part}},
+				PromptInput:        PromptInput{Context: []Part{part}},
+				ObservationSink:    sink,
+			})
+			parts, err := builder.BuildContext(t.Context())
+			if err != nil || len(parts) != 2 || part.calls != 0 {
+				t.Fatalf("BuildContext = %v, %v; count calls = %d", parts, err, part.calls)
+			}
+			prompt, err := builder.BuildPrompt(t.Context(), nil)
+			if err != nil || strings.Count(prompt, "renderable context") != 3 {
+				t.Fatalf("BuildPrompt = %q, %v", prompt, err)
+			}
+			sawSource := false
+			for _, event := range sink.events {
+				if event.Name == "prompt_builder_source_included" {
+					sawSource = true
+					if event.Fields["tokens_counted"] != false || event.Fields["tokens"] != 0 {
+						t.Fatalf("uncounted source observation = %v", event.Fields)
+					}
+				}
+			}
+			if !sawSource {
+				t.Fatal("missing source-included observation")
+			}
+			sourceErr := errors.New("source failure")
+			builder.ContextSources = []ContextSource{budgetPartSource{err: sourceErr}}
+			if _, err := builder.BuildContext(t.Context()); !errors.Is(err, sourceErr) {
+				t.Fatalf("source failure = %v, want %v", err, sourceErr)
+			}
+		})
 	}
 }

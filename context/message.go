@@ -39,51 +39,51 @@ type Message struct {
 	TurnID    string
 	Role      Role
 	Content   Content
-	// TokenCount key: tokenizer.ID, value: token count for content
+	// TokenCount key: counter.ID, value: token count for content
 	TokenCount map[string]int
 }
 
 // TurnTokenStore persists calculated token counts for a turn.
 type TurnTokenStore interface {
-	UpdateTurnTokens(ctx context.Context, turnID string, tokenizer string, tokens int) error
+	UpdateTurnTokens(ctx context.Context, turnID string, counter string, tokens int) error
 }
 
 // Tokenize returns the turn token count, using cached message or turn counts
 // when available and optionally persisting a newly calculated value.
-func (t *Turn) Tokenize(ctx context.Context, tokenizer ai.Tokenizer, store TurnTokenStore) (int, error) {
+func (t *Turn) Tokenize(ctx context.Context, counter ai.TokenCounter, store TurnTokenStore) (int, error) {
 	if t == nil {
 		return 0, ErrMessageNotFound
 	}
-	if tokenizer == nil {
-		return 0, ErrTokenizerNotFound
+	if counter == nil {
+		return 0, ErrTokenCounterNotFound
 	}
-	tokenizerID := tokenizer.ID()
-	if count, ok := t.TokenCount[tokenizerID]; ok && count >= 0 {
+	counterID := counter.ID()
+	if count, ok := t.TokenCount[counterID]; ok && count >= 0 {
 		return count, nil
 	} else if ok {
-		delete(t.TokenCount, tokenizerID)
+		delete(t.TokenCount, counterID)
 	}
 
 	messages := t.messages()
-	if count, ok := messagesTokenCount(messages, tokenizerID); ok {
-		return t.saveTokens(ctx, store, tokenizerID, count)
+	if count, ok := messagesTokenCount(messages, counterID); ok {
+		return t.saveTokens(ctx, store, counterID, count)
 	}
 
-	count, err := tokenizer.CountTokens(ctx, combinedMessageContent(messages))
+	count, err := counter.CountTokens(ctx, combinedMessageContent(messages))
 	if err != nil {
 		return 0, err
 	}
-	_, err = t.saveTokens(ctx, store, tokenizerID, count)
+	_, err = t.saveTokens(ctx, store, counterID, count)
 	if err != nil {
 		if gai.ObservationEnabled(ctx, t.debugSink) {
 			gai.EmitObservation(ctx, t.debugSink, gai.Observation{
 				Name:   "turn_token_save_failed",
 				Source: "context:Turn.Tokenize",
 				Fields: map[string]any{
-					"turn_id":      t.ID,
-					"turn_count":   t.Count,
-					"tokenizer_id": tokenizerID,
-					"token_count":  count,
+					"turn_id":     t.ID,
+					"turn_count":  t.Count,
+					"counter_id":  counterID,
+					"token_count": count,
 				},
 				Err: err,
 			})
@@ -97,15 +97,15 @@ func (t *Turn) SetObservationSink(sink gai.ObservationSink) {
 	t.debugSink = sink
 }
 
-func (t *Turn) saveTokens(ctx context.Context, store TurnTokenStore, tokenizerID string, count int) (int, error) {
+func (t *Turn) saveTokens(ctx context.Context, store TurnTokenStore, counterID string, count int) (int, error) {
 	if t.TokenCount == nil {
 		t.TokenCount = make(map[string]int)
 	}
-	t.TokenCount[tokenizerID] = count
+	t.TokenCount[counterID] = count
 	if store == nil || t.ID == "" {
 		return count, nil
 	}
-	if err := store.UpdateTurnTokens(ctx, t.ID, tokenizerID, count); err != nil {
+	if err := store.UpdateTurnTokens(ctx, t.ID, counterID, count); err != nil {
 		return 0, err
 	}
 	return count, nil
@@ -123,10 +123,10 @@ func (t *Turn) messages() []Message {
 	return messages
 }
 
-func messagesTokenCount(messages []Message, tokenizerID string) (int, bool) {
+func messagesTokenCount(messages []Message, counterID string) (int, bool) {
 	total := 0
 	for _, message := range messages {
-		count, ok := message.TokenCount[tokenizerID]
+		count, ok := message.TokenCount[counterID]
 		if !ok || count < 0 {
 			return 0, false
 		}
@@ -158,28 +158,28 @@ func IsValidRole(role Role) bool {
 	}
 }
 
-// Tokens returns the message token count for tokenizer, caching the result.
-func (m Message) Tokens(ctx context.Context, tokenizer ai.Tokenizer) (int, error) {
-	if tokenizer == nil {
-		return 0, ErrTokenizerNotFound
+// Tokens returns the message token count for counter, caching the result.
+func (m Message) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
+	if counter == nil {
+		return 0, ErrTokenCounterNotFound
 	}
-	tokenizerID := tokenizer.ID()
-	if count, ok := m.TokenCount[tokenizerID]; ok && count >= 0 {
+	counterID := counter.ID()
+	if count, ok := m.TokenCount[counterID]; ok && count >= 0 {
 		return count, nil
 	} else if ok {
-		delete(m.TokenCount, tokenizerID)
+		delete(m.TokenCount, counterID)
 	}
 	content := ""
 	if m.Content != nil {
 		content = m.Content.String()
 	}
-	count, err := tokenizer.CountTokens(ctx, content)
+	count, err := counter.CountTokens(ctx, content)
 	if err != nil {
 		return 0, err
 	}
 	if m.TokenCount == nil {
 		m.TokenCount = make(map[string]int)
 	}
-	m.TokenCount[tokenizerID] = count
+	m.TokenCount[counterID] = count
 	return count, nil
 }

@@ -32,8 +32,8 @@ type HistorySource struct {
 	historyStateStore HistoryStore
 	sessionID         string
 
-	debug     gai.ObservationSink
-	tokenizer ai.Tokenizer
+	debug   gai.ObservationSink
+	counter ai.TokenCounter
 
 	summarizer       *summary.Summarizer
 	summarize        bool
@@ -100,8 +100,8 @@ func (p *HistorySource) Name() string {
 	return "history"
 }
 
-func (s *HistorySource) SetTokenizer(tokenizer ai.Tokenizer) {
-	s.tokenizer = tokenizer
+func (s *HistorySource) SetTokenCounter(counter ai.TokenCounter) {
+	s.counter = counter
 }
 
 func (s *HistorySource) ObservationSink(debug gai.ObservationSink, conv gaictx.Conversation) {
@@ -118,12 +118,12 @@ func (s *HistorySource) Function(ctx context.Context, tokenBudget int) (result g
 		obs.StoreMissing(ctx)
 		return nil, gaictx.ErrSessionStoreNotFound
 	}
-	if s.tokenizer == nil {
-		obs.TokenizerMissing(ctx)
-		return nil, gaictx.ErrTokenizerNotFound
+	if s.counter == nil {
+		obs.TokenCounterMissing(ctx)
+		return nil, gaictx.ErrTokenCounterNotFound
 	}
-	tokenizerID := s.tokenizer.ID()
-	obs.SetTokenizerID(tokenizerID)
+	counterID := s.counter.ID()
+	obs.SetTokenCounterID(counterID)
 	lastHistoryState, err := s.historyStateStore.GetLastHistoryState(ctx, s.sessionID)
 	if err != nil {
 		obs.StateLoadFailed(ctx, err)
@@ -152,7 +152,7 @@ func (s *HistorySource) Function(ctx context.Context, tokenBudget int) (result g
 			messageCount = 0
 			includedTurnCount = 0
 
-			buildBudgetReached, err := s.buildPart(ctx, state, tokenBudget, s.tokenizer, &part, obs, &tokenCount, &turnCount, &messageCount, &includedTurnCount, &summaryIncluded)
+			buildBudgetReached, err := s.buildPart(ctx, state, tokenBudget, s.counter, &part, obs, &tokenCount, &turnCount, &messageCount, &includedTurnCount, &summaryIncluded)
 			if err != nil {
 				return nil, err
 			}
@@ -185,7 +185,7 @@ func (s *HistorySource) Function(ctx context.Context, tokenBudget int) (result g
 			break
 		}
 	}
-	part.saveTokens(tokenizerID, tokenCount)
+	part.saveTokens(counterID, tokenCount)
 	obs.BuildFinished(ctx, &part, tokenCount, turnCount, includedTurnCount, messageCount)
 	result = &part
 	return result, nil
@@ -195,7 +195,7 @@ func (s *HistorySource) buildPart(
 	ctx context.Context,
 	state *HistoryState,
 	tokenBudget int,
-	tokenizer ai.Tokenizer,
+	counter ai.TokenCounter,
 	part *Part,
 	obs *historyObserver,
 	tokenCount,
@@ -212,7 +212,7 @@ func (s *HistorySource) buildPart(
 			Value: state.Summary.Content,
 		}
 		part.Contents = append(part.Contents, summaryContent)
-		summaryTokenCount, err := state.Summary.TokenCount(tokenizer)
+		summaryTokenCount, err := state.Summary.TokenCount(counter)
 		if err != nil {
 			obs.SummaryTokenCountFailed(ctx, state.Summary, err)
 			return false, err
@@ -232,7 +232,7 @@ func (s *HistorySource) buildPart(
 	for i := len(state.Turns) - 1; i >= 0; i-- {
 		turn := &state.Turns[i]
 		*turnCount++
-		tokens, err := turn.Tokenize(ctx, s.tokenizer, s.historyStateStore)
+		tokens, err := turn.Tokenize(ctx, s.counter, s.historyStateStore)
 		if err != nil {
 			turnCopy := *turn
 			obs.TurnTokenizeFailed(ctx, &turnCopy, err)

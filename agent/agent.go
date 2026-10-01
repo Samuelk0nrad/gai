@@ -88,8 +88,9 @@ type Definition struct {
 	RetryPolicy *loop.RetryPolicy
 	// Reasoning configures model reasoning/thinking behavior for every model call.
 	Reasoning ai.ReasoningConfig
-	// Tokenizer overrides Model.Tokenizer when it is non-nil.
-	Tokenizer ai.Tokenizer
+	// TokenCounter supplies a local-only text counter. Nil selects the optional
+	// model counter, then ai.TextTokenEstimator if no model counter is available.
+	TokenCounter ai.TokenCounter
 	// ToolResponseProcessor can transform tool responses before they enter the transcript.
 	ToolResponseProcessor loop.ToolResponseProcessor
 	// ObservationSink receives agent and workflow lifecycle events.
@@ -104,7 +105,7 @@ type Agent struct {
 }
 
 // New snapshots the definition's mutable configuration. Models, tools,
-// tokenizers, processors, and callbacks remain caller-owned shared dependencies.
+// counters, processors, and callbacks remain caller-owned shared dependencies.
 // The effective configuration is validated by NewRun.
 func New(def Definition) *Agent {
 	return &Agent{def: cloneDefinition(def)}
@@ -257,10 +258,10 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 			}
 		}
 	}
-	if setter, ok := promptBuilder.(gaictx.TokenizerSetter); ok {
-		setter.SetTokenizer(execution.tokenizer)
-	} else if execution.requireTokenizerSetter {
-		return nil, ErrTokenizerNotConfigurable
+	if setter, ok := promptBuilder.(gaictx.TokenCounterSetter); ok {
+		setter.SetTokenCounter(execution.counter)
+	} else if execution.requireTokenCounterSetter {
+		return nil, ErrTokenCounterNotConfigurable
 	}
 
 	l := loop.New(execution.model, execution.tools, promptBuilder, execution.toolResponseProcessor)

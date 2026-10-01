@@ -37,7 +37,7 @@ func TestGenerateEmitsRequestObservationWithoutContentCapture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := model.Generate(t.Context(), ai.AIRequest{Prompt: "secret prompt"}); err != nil {
+	if _, err := any(model).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "secret prompt"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -85,7 +85,7 @@ func TestGenerateEmitsRequestAndContentToOTelWithoutSink(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{Prompt: gai.CaptureEnabled})
-	if _, err := model.Generate(ctx, ai.AIRequest{Prompt: "allowed prompt"}); err != nil {
+	if _, err := any(model).(ai.ModelGenerator).Generate(ctx, ai.AIRequest{Prompt: "allowed prompt"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -125,7 +125,7 @@ func TestGenerateOmitsMixedProviderEnvelopesFromCapturedObservations(t *testing.
 		Prompt:     gai.CaptureEnabled,
 		Completion: gai.CaptureEnabled,
 	})
-	if _, err := model.Generate(ctx, ai.AIRequest{
+	if _, err := any(model).(ai.ModelGenerator).Generate(ctx, ai.AIRequest{
 		Prompt: "prompt secret",
 		Messages: []ai.RequestMessage{
 			{Role: ai.RequestMessageRoleAssistant, ToolCalls: []ai.RequestToolCall{{ID: "call_1", Name: "search", Arguments: []byte(`{"query":"prior tool-input secret"}`)}}},

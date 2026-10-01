@@ -14,12 +14,12 @@ var (
 	ErrPromptFileType  = errors.New("prompt file must be .md or .txt")
 	ErrPromptMissing   = errors.New("prompt file is missing")
 
-	ErrPromptBuilderNil  = errors.New("prompt builder is nil")
-	ErrPromptEntryID     = errors.New("prompt entry ID error")
-	ErrPromptSource      = errors.New("prompt source error")
-	ErrPromptBudget      = errors.New("prompt budget exceeded")
-	ErrPromptPartName    = errors.New("invalid prompt part name")
-	ErrTokenizerNotFound = errors.New("tokenizer not found")
+	ErrPromptBuilderNil     = errors.New("prompt builder is nil")
+	ErrPromptEntryID        = errors.New("prompt entry ID error")
+	ErrPromptSource         = errors.New("prompt source error")
+	ErrPromptBudget         = errors.New("prompt budget exceeded")
+	ErrPromptPartName       = errors.New("invalid prompt part name")
+	ErrTokenCounterNotFound = errors.New("counter not found")
 
 	ErrMessageNotFound    = errors.New("message not found")
 	ErrContentUnmarshal   = errors.New("failed to unmarshal content type")

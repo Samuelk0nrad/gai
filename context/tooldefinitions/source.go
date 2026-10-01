@@ -224,8 +224,8 @@ func (p *part) Name() string {
 	return "tool_definitions"
 }
 
-func (p *part) Tokens(ctx context.Context, tokenizer ai.Tokenizer) (int, error) {
-	return p.text.Tokens(ctx, tokenizer)
+func (p *part) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
+	return p.text.Tokens(ctx, counter)
 }
 
 func (p *part) Render(ctx context.Context) (gaictx.RenderNode, error) {

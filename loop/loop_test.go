@@ -308,8 +308,8 @@ func (m *scriptedStreamModel) Close() error {
 	return nil
 }
 
-func (m *scriptedStreamModel) Tokenizer() ai.Tokenizer {
-	return &mocks.MockTokenizer{}
+func (m *scriptedStreamModel) TokenCounter() ai.TokenCounter {
+	return &mocks.MockTokenCounter{}
 }
 
 func (m *scriptedStreamModel) Requests() []ai.AIRequest {
@@ -352,8 +352,8 @@ func (m *cancelAfterTokenModel) Close() error {
 	return nil
 }
 
-func (m *cancelAfterTokenModel) Tokenizer() ai.Tokenizer {
-	return &mocks.MockTokenizer{}
+func (m *cancelAfterTokenModel) TokenCounter() ai.TokenCounter {
+	return &mocks.MockTokenCounter{}
 }
 
 func (m *retryCancellationModel) Name() string { return "retry-cancellation-model" }
@@ -380,8 +380,8 @@ func (m *retryCancellationModel) GenerateStream(ctx context.Context, _ ai.AIRequ
 
 func (m *retryCancellationModel) Close() error { return nil }
 
-func (m *retryCancellationModel) Tokenizer() ai.Tokenizer {
-	return &mocks.MockTokenizer{}
+func (m *retryCancellationModel) TokenCounter() ai.TokenCounter {
+	return &mocks.MockTokenCounter{}
 }
 
 func collectLoopEvents(t *testing.T, l *loop.Loop, ctx context.Context) []loop.Event {

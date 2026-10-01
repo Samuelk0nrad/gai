@@ -27,23 +27,23 @@ func TestWriteTurnHandlesNilMessageContent(t *testing.T) {
 func TestSummaryTokenCountRecountsNegativeCachedValue(t *testing.T) {
 	t.Parallel()
 
-	tokenizer := &mocks.MockTokenizer{Count: 5}
+	counter := &mocks.MockTokenCounter{Count: 5}
 	summary := &Summary{
 		Content:    gaictx.NewTextContent("older turns"),
-		tokenCount: map[string]int{"mock.tokenizer": -1},
+		tokenCount: map[string]int{"mock.counter": -1},
 	}
 
-	tokens, err := summary.TokenCount(tokenizer)
+	tokens, err := summary.TokenCount(counter)
 	if err != nil {
 		t.Fatalf("TokenCount failed: %v", err)
 	}
 	if tokens != 5 {
-		t.Fatalf("expected tokenizer to recount invalid cached value, got %d", tokens)
+		t.Fatalf("expected counter to recount invalid cached value, got %d", tokens)
 	}
-	if tokenizer.CountCalls != 1 {
-		t.Fatalf("expected one tokenizer call, got %d", tokenizer.CountCalls)
+	if counter.CountCalls != 1 {
+		t.Fatalf("expected one counter call, got %d", counter.CountCalls)
 	}
-	if summary.tokenCount["mock.tokenizer"] != 5 {
+	if summary.tokenCount["mock.counter"] != 5 {
 		t.Fatalf("expected cache to be updated, got %+v", summary.tokenCount)
 	}
 }
@@ -52,14 +52,14 @@ func TestSummarySetTokenCountStoresAndClearsCache(t *testing.T) {
 	t.Parallel()
 
 	summary := &Summary{}
-	summary.SetTokenCount("mock.tokenizer", 7)
+	summary.SetTokenCount("mock.counter", 7)
 
-	if summary.tokenCount["mock.tokenizer"] != 7 {
+	if summary.tokenCount["mock.counter"] != 7 {
 		t.Fatalf("expected cache to store token count, got %+v", summary.tokenCount)
 	}
 
-	summary.SetTokenCount("mock.tokenizer", -1)
-	if _, ok := summary.tokenCount["mock.tokenizer"]; ok {
+	summary.SetTokenCount("mock.counter", -1)
+	if _, ok := summary.tokenCount["mock.counter"]; ok {
 		t.Fatalf("expected negative token count to clear cache entry, got %+v", summary.tokenCount)
 	}
 }
@@ -69,22 +69,22 @@ func TestSummarySetTokenCountsReplacesCache(t *testing.T) {
 
 	summary := &Summary{
 		tokenCount: map[string]int{
-			"old.tokenizer": 9,
+			"old.counter": 9,
 		},
 	}
 
 	summary.SetTokenCounts(map[string]int{
-		"mock.tokenizer": 7,
-		"bad.tokenizer":  -1,
+		"mock.counter": 7,
+		"bad.counter":  -1,
 	})
 
-	if _, ok := summary.tokenCount["old.tokenizer"]; ok {
+	if _, ok := summary.tokenCount["old.counter"]; ok {
 		t.Fatalf("expected old cache entry to be replaced, got %+v", summary.tokenCount)
 	}
-	if summary.tokenCount["mock.tokenizer"] != 7 {
+	if summary.tokenCount["mock.counter"] != 7 {
 		t.Fatalf("expected new cache entry to be stored, got %+v", summary.tokenCount)
 	}
-	if _, ok := summary.tokenCount["bad.tokenizer"]; ok {
+	if _, ok := summary.tokenCount["bad.counter"]; ok {
 		t.Fatalf("expected negative cache entry to be omitted, got %+v", summary.tokenCount)
 	}
 }
