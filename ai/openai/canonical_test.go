@@ -3,7 +3,6 @@ package openai
 import (
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/lace-ai/gai/ai"
@@ -11,7 +10,7 @@ import (
 
 func TestCanonicalChatRolesParallelCallsAndGoogleSignature(t *testing.T) {
 	signature, _ := json.Marshal([]byte("opaque"))
-	req := ai.AIRequest{Prompt: "obsolete", Messages: []ai.Message{
+	req := ai.AIRequest{Messages: []ai.Message{
 		ai.TextMessage(ai.RoleSystem, "instructions"),
 		ai.TextMessage(ai.RoleUser, "question"),
 		{Role: ai.RoleAssistant, Parts: []ai.ContentPart{
@@ -44,7 +43,7 @@ func TestCanonicalChatRolesParallelCallsAndGoogleSignature(t *testing.T) {
 	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Messages) != 3 || body.Messages[0].Role != "system" || body.Messages[0].Content != "instructions" || len(body.Messages[2].ToolCalls) != 2 || string(body.Messages[2].ToolCalls[0].ExtraContent.Google.Signature) != "opaque" || strings.Contains(string(raw), "obsolete") {
+	if len(body.Messages) != 3 || body.Messages[0].Role != "system" || body.Messages[0].Content != "instructions" || len(body.Messages[2].ToolCalls) != 2 || string(body.Messages[2].ToolCalls[0].ExtraContent.Google.Signature) != "opaque" {
 		t.Fatalf("canonical request: %s", raw)
 	}
 }
@@ -84,5 +83,20 @@ func TestResponsesPreservesInterleavedTextCallsAndReasoningWithoutCalls(t *testi
 	input, err = mapResponsesMessages([]ai.Message{{Role: ai.RoleAssistant, Parts: []ai.ContentPart{reasoning, {Kind: ai.ContentText, Text: "done"}}}})
 	if err != nil || len(input) != 2 {
 		t.Fatalf("reasoning without tool: %v %v", input, err)
+	}
+}
+
+func TestResponsesRejectsCallAttachedReasoningState(t *testing.T) {
+	part := reasoningExtension(json.RawMessage(`{"type":"reasoning","id":"rs1","encrypted_content":"opaque","summary":[]}`))
+	call := &ai.ToolCall{ID: "call_1", Type: "function", Name: "lookup", Args: json.RawMessage(`{}`), Extensions: part.Extensions}
+	_, err := mapResponsesMessages([]ai.Message{{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentToolCall, ToolCall: call}}}})
+	if !errors.Is(err, ai.ErrUnsupportedCapability) {
+		t.Fatalf("call-attached reasoning error = %v", err)
+	}
+	// Its canonical ordered representation still maps independently of a call.
+	call.Extensions = nil
+	input, err := mapResponsesMessages([]ai.Message{{Role: ai.RoleAssistant, Parts: []ai.ContentPart{part, {Kind: ai.ContentToolCall, ToolCall: call}}}})
+	if err != nil || len(input) != 2 {
+		t.Fatalf("ordered reasoning input = %#v, error = %v", input, err)
 	}
 }

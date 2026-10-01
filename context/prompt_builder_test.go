@@ -77,9 +77,9 @@ func TestNewPromptBuilderFromDefinition(t *testing.T) {
 		t.Fatalf("expected source token budget 10 after estimating system instructions, got %d", source.budget)
 	}
 
-	prompt, err := builder.BuildPrompt(context.Background(), emptyConversation{})
+	prompt, err := renderBuilderRequest(builder, context.Background(), emptyConversation{})
 	if err != nil {
-		t.Fatalf("BuildPrompt failed: %v", err)
+		t.Fatalf("render request failed: %v", err)
 	}
 
 	systemIndex := strings.Index(prompt, "system")
@@ -108,9 +108,6 @@ func TestBuildRequestPreservesRolesAndCanonicalConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.Prompt != "" {
-		t.Fatalf("request retains second source of truth: %q", request.Prompt)
-	}
 	if len(request.Messages) != 3 {
 		t.Fatalf("messages = %#v", request.Messages)
 	}
@@ -122,7 +119,7 @@ func TestBuildRequestPreservesRolesAndCanonicalConversation(t *testing.T) {
 	if !strings.Contains(request.Messages[0].Text(), "system") || request.Messages[1].Text() != "question" || request.Messages[2].Text() != "answer" {
 		t.Fatalf("messages = %#v", request.Messages)
 	}
-	prompt, err := builder.BuildPrompt(t.Context(), messageConversation{messages: []ai.Message{ai.TextMessage(ai.RoleAssistant, "answer")}})
+	prompt, err := renderBuilderRequest(builder, t.Context(), messageConversation{messages: []ai.Message{ai.TextMessage(ai.RoleAssistant, "answer")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +129,7 @@ func TestBuildRequestPreservesRolesAndCanonicalConversation(t *testing.T) {
 	}
 }
 
-func TestBuildPromptRendersStructuredConversationContent(t *testing.T) {
+func TestRenderRequestPreservesStructuredConversationContent(t *testing.T) {
 	t.Parallel()
 
 	builder := New(Definition{
@@ -140,23 +137,23 @@ func TestBuildPromptRendersStructuredConversationContent(t *testing.T) {
 		PromptInput:        PromptInput{User: ai.TextParts("find docs")},
 	})
 
-	prompt, err := builder.BuildPrompt(context.Background(), messageConversation{
+	prompt, err := renderBuilderRequest(builder, context.Background(), messageConversation{
 		messages: []ai.Message{
 			{
-				Role: RoleAssistant, Parts: []ai.ContentPart{
+				Role: ai.RoleAssistant, Parts: []ai.ContentPart{
 					{Kind: ai.ContentToolCall,
 						ToolCall: &ai.ToolCall{ID: "call_search",
 							Type: "function", Name: "search", Args: []byte(`{"q":"lace"}`)}}},
 			},
 			{
-				Role: RoleTool, Parts: []ai.ContentPart{
+				Role: ai.RoleTool, Parts: []ai.ContentPart{
 					{Kind: ai.ContentToolResult,
 						ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "search", Parts: ai.TextParts("found <docs>")}}},
 			},
 		},
 	})
 	if err != nil {
-		t.Fatalf("BuildPrompt failed: %v", err)
+		t.Fatalf("render request failed: %v", err)
 	}
 
 	expected := []string{
@@ -191,7 +188,7 @@ func TestBuildPromptRendersStructuredConversationContent(t *testing.T) {
 	}
 }
 
-func TestBuildPromptOrdersInputContextBeforeUserAndConversation(t *testing.T) {
+func TestRenderRequestOrdersInputContextBeforeUserAndConversation(t *testing.T) {
 	t.Parallel()
 
 	observation, err := NewJSONPart("memory_observation", map[string]string{"fact": "stable"})
@@ -211,9 +208,9 @@ func TestBuildPromptOrdersInputContextBeforeUserAndConversation(t *testing.T) {
 	if _, err := builder.BuildContext(t.Context()); err != nil {
 		t.Fatalf("BuildContext failed: %v", err)
 	}
-	prompt, err := builder.BuildPrompt(t.Context(), messageConversation{messages: []ai.Message{{Role: RoleAssistant, Parts: ai.TextParts("assistant delta")}}})
+	prompt, err := renderBuilderRequest(builder, t.Context(), messageConversation{messages: []ai.Message{{Role: ai.RoleAssistant, Parts: ai.TextParts("assistant delta")}}})
 	if err != nil {
-		t.Fatalf("BuildPrompt failed: %v", err)
+		t.Fatalf("render request failed: %v", err)
 	}
 
 	ordered := []string{"system", "configured context", "memory_observation", "current user", "assistant delta"}
@@ -266,8 +263,8 @@ func TestPromptBuilderEmitsExistingEventsWithoutSensitiveFieldsByDefault(t *test
 	if _, err := builder.BuildContext(context.Background()); err != nil {
 		t.Fatalf("BuildContext failed: %v", err)
 	}
-	if _, err := builder.BuildPrompt(context.Background(), emptyConversation{}); err != nil {
-		t.Fatalf("BuildPrompt failed: %v", err)
+	if _, err := renderBuilderRequest(builder, context.Background(), emptyConversation{}); err != nil {
+		t.Fatalf("render request failed: %v", err)
 	}
 
 	var names []string
@@ -284,7 +281,6 @@ func TestPromptBuilderEmitsExistingEventsWithoutSensitiveFieldsByDefault(t *test
 		"renderer_render_started",
 		"renderer_part_rendered",
 		"renderer_render_finished",
-		"prompt_builder_render_finished",
 	}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("unexpected event names: got %v want %v", names, want)
@@ -296,35 +292,6 @@ func TestPromptBuilderEmitsExistingEventsWithoutSensitiveFieldsByDefault(t *test
 	}
 	if _, ok := renderEvent.Fields["prompt_structure"]; ok {
 		t.Fatalf("expected prompt_structure field to be omitted without sensitive debug")
-	}
-}
-
-func TestPromptBuilderEmitsSensitiveRenderFieldsWhenEnabled(t *testing.T) {
-	t.Parallel()
-
-	sink := &debugEventSink{}
-	builder := New(Definition{
-		SystemInstructions: []Part{NewTextPart(strings.Repeat("system ", 900))},
-		PromptInput:        PromptInput{User: ai.TextParts("find docs")},
-		ObservationSink:    sink,
-	})
-
-	ctx := gai.WithContentCapturePolicy(context.Background(), gai.ContentCapturePolicy{Prompt: gai.CaptureEnabled, Completion: gai.CaptureEnabled, Memory: gai.CaptureEnabled})
-	if _, err := builder.BuildPrompt(ctx, messageConversation{
-		messages: []ai.Message{{Role: RoleAssistant, Parts: ai.TextParts("assistant reply")}},
-	}); err != nil {
-		t.Fatalf("BuildPrompt failed: %v", err)
-	}
-
-	renderEvent := sink.events[len(sink.events)-1]
-	if got := renderEvent.Name; got != "prompt_builder_render_finished" {
-		t.Fatalf("expected final render event, got %q", got)
-	}
-	if _, ok := renderEvent.Fields["prompt"].(string); !ok {
-		t.Fatalf("expected policy-captured prompt, got %#v", renderEvent.Fields["prompt"])
-	}
-	if renderEvent.Fields["prompt_content_kind"] != "prompt" {
-		t.Fatalf("expected prompt capture metadata, got %#v", renderEvent.Fields)
 	}
 }
 
@@ -341,13 +308,13 @@ func TestPromptBuilderSetObservationSinkUpdatesDefaultRenderer(t *testing.T) {
 		})
 		builder.SetObservationSink(replacement)
 
-		if _, err := builder.BuildPrompt(ctx, emptyConversation{}); err != nil {
-			t.Fatalf("BuildPrompt failed: %v", err)
+		if _, err := renderBuilderRequest(builder, ctx, emptyConversation{}); err != nil {
+			t.Fatalf("render request failed: %v", err)
 		}
 		if len(original.events) != 0 {
 			t.Fatalf("original sink received events after replacement: %#v", original.events)
 		}
-		assertPromptBuilderAndRendererEvents(t, replacement.events)
+		assertRendererEvents(t, replacement.events)
 	})
 
 	t.Run("nil", func(t *testing.T) {
@@ -359,8 +326,8 @@ func TestPromptBuilderSetObservationSinkUpdatesDefaultRenderer(t *testing.T) {
 		})
 		builder.SetObservationSink(nil)
 
-		if _, err := builder.BuildPrompt(ctx, emptyConversation{}); err != nil {
-			t.Fatalf("BuildPrompt failed: %v", err)
+		if _, err := renderBuilderRequest(builder, ctx, emptyConversation{}); err != nil {
+			t.Fatalf("render request failed: %v", err)
 		}
 		if len(original.events) != 0 {
 			t.Fatalf("original sink received events after removal: %#v", original.events)
@@ -368,16 +335,14 @@ func TestPromptBuilderSetObservationSinkUpdatesDefaultRenderer(t *testing.T) {
 	})
 }
 
-func assertPromptBuilderAndRendererEvents(t *testing.T, events []gai.Observation) {
+func assertRendererEvents(t *testing.T, events []gai.Observation) {
 	t.Helper()
-	var sawBuilder, sawRenderer bool
 	for _, event := range events {
-		sawBuilder = sawBuilder || event.Name == "prompt_builder_render_finished"
-		sawRenderer = sawRenderer || event.Name == "renderer_render_finished"
+		if event.Name == "renderer_render_finished" {
+			return
+		}
 	}
-	if !sawBuilder || !sawRenderer {
-		t.Fatalf("expected prompt builder and renderer events, got %#v", events)
-	}
+	t.Fatalf("expected context renderer events, got %#v", events)
 }
 
 func TestPromptBuilderKeepsTokenErrorEvents(t *testing.T) {
@@ -416,8 +381,8 @@ func TestPromptBuilderReturnsCancellationBeforeBuilding(t *testing.T) {
 	if _, err := builder.BuildContext(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("BuildContext error = %v, want context.Canceled", err)
 	}
-	if _, err := builder.BuildPrompt(ctx, emptyConversation{}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("BuildPrompt error = %v, want context.Canceled", err)
+	if _, err := renderBuilderRequest(builder, ctx, emptyConversation{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("render request error = %v, want context.Canceled", err)
 	}
 }
 
@@ -459,7 +424,7 @@ func TestConcurrentBuildersCanShareImmutablePromptParts(t *testing.T) {
 		t.Fatal(err)
 	}
 	system := NewTextPart(strings.Repeat("instructions ", 2000))
-	message := NewMessagePart(ai.Message{Role: RoleUser, Parts: ai.TextParts("shared message")})
+	message := NewMessagePart(ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("shared message")})
 	input := PromptInput{Context: []Part{named, message}}
 	var group sync.WaitGroup
 	start := make(chan struct{})
@@ -517,9 +482,9 @@ func TestBuildContextSkipsUnusedCountsWhenBudgetDisabled(t *testing.T) {
 			if err != nil || len(parts) != 2 || part.calls != 0 {
 				t.Fatalf("BuildContext = %v, %v; count calls = %d", parts, err, part.calls)
 			}
-			prompt, err := builder.BuildPrompt(t.Context(), nil)
+			prompt, err := renderBuilderRequest(builder, t.Context(), nil)
 			if err != nil || strings.Count(prompt, "renderable context") != 3 {
-				t.Fatalf("BuildPrompt = %q, %v", prompt, err)
+				t.Fatalf("render request = %q, %v", prompt, err)
 			}
 			sawSource := false
 			for _, event := range sink.events {
@@ -559,7 +524,7 @@ func TestBuildRequestPreservesOpaqueConversationAndOwnsPayloads(t *testing.T) {
 	if string(message.Parts[0].ToolCall.Args) != `{"q":"x"}` || string(message.Parts[0].ToolCall.Extensions[0].Data) != `"opaque"` {
 		t.Fatal("request aliases conversation")
 	}
-	if _, err := builder.BuildPrompt(t.Context(), conv); err == nil {
+	if _, err := renderBuilderRequest(builder, t.Context(), conv); err == nil {
 		t.Fatal("fallback discarded required provider extension")
 	}
 }
@@ -577,5 +542,29 @@ func TestBuildRequestPreservesRepeatedIdenticalUserMessages(t *testing.T) {
 	// The builder preserves every caller-supplied conversation entry.
 	if len(request.Messages) != 4 || request.Messages[0].Text() != "question" || request.Messages[1].Text() != "question" || request.Messages[3].Text() != "follow-up" {
 		t.Fatalf("builder dropped a caller-supplied user message: %#v", request.Messages)
+	}
+}
+
+func renderBuilderRequest(builder *Builder, ctx context.Context, conv Conversation) (string, error) {
+	request, err := builder.BuildRequest(ctx, conv)
+	if err != nil {
+		return "", err
+	}
+	return ai.RenderMessages(ctx, request.Messages)
+}
+
+func TestBuildRequestRejectsEmptyConversation(t *testing.T) {
+	t.Parallel()
+	builder := New(Definition{})
+	if _, err := builder.BuildRequest(t.Context(), nil); err == nil {
+		t.Fatal("empty builder created a request without canonical messages")
+	}
+	if _, err := builder.BuildRequest(t.Context(), emptyConversation{}); err == nil {
+		t.Fatal("empty conversation created a request without canonical messages")
+	}
+	builder.SetInput(PromptInput{User: ai.TextParts("")})
+	request, err := builder.BuildRequest(t.Context(), nil)
+	if err != nil || len(request.Messages) != 1 {
+		t.Fatalf("explicit empty text should remain a canonical message: %#v, %v", request, err)
 	}
 }

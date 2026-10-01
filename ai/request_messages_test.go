@@ -69,7 +69,6 @@ func TestAIRequestRejectsInvalidToolReferences(t *testing.T) {
 func TestAIRequestCopyIsolatesAllMutableFields(t *testing.T) {
 	ext := ai.Extension{Namespace: "future", Type: "state", Data: json.RawMessage(`{"v":1}`), Required: true}
 	call := canonicalCall("first")
-	call.ToolCall.ThoughtSignature = []byte{1, 2, 3}
 	call.ToolCall.Extensions = []ai.Extension{ext}
 	call.Extensions = []ai.Extension{ext}
 	result := canonicalResult("first", "search")
@@ -78,7 +77,7 @@ func TestAIRequestCopyIsolatesAllMutableFields(t *testing.T) {
 		{Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: "image/png", Data: []byte{4, 5, 6}}, Extensions: []ai.Extension{ext}},
 	}
 	req := ai.AIRequest{
-		Prompt: "legacy", MaxTokens: 128,
+		MaxTokens: 128,
 		Messages: []ai.Message{
 			{Role: ai.RoleAssistant, Parts: []ai.ContentPart{call}, Extensions: []ai.Extension{ext}},
 			{Role: ai.RoleTool, Parts: []ai.ContentPart{result}},
@@ -105,7 +104,6 @@ func TestAIRequestCopyIsolatesAllMutableFields(t *testing.T) {
 	copy.Messages[0].Parts[0].Extensions[0].Data[5] = '9'
 	copy.Messages[0].Parts[0].ToolCall.ID = "changed"
 	copy.Messages[0].Parts[0].ToolCall.Args[6] = 'y'
-	copy.Messages[0].Parts[0].ToolCall.ThoughtSignature[0] = 9
 	copy.Messages[0].Parts[0].ToolCall.Extensions[0].Data[5] = '9'
 	copy.Messages[1].Parts[0].ToolResult.IsError = true
 	copy.Messages[1].Parts[0].ToolResult.Parts[0].JSON[6] = 'f'
@@ -122,31 +120,5 @@ func TestAIRequestCopyIsolatesAllMutableFields(t *testing.T) {
 	}
 	if string(before) != string(after) {
 		t.Fatalf("mutating copied request changed original:\nbefore %s\nafter %s", before, after)
-	}
-}
-
-func TestAIRequestNormalizedUsesAuthoritativeMessages(t *testing.T) {
-	req := ai.AIRequest{Prompt: "stale flattened prompt", Messages: []ai.Message{ai.TextMessage(ai.RoleSystem, "instructions"), ai.TextMessage(ai.RoleUser, "question")}, MaxTokens: 42}
-	got, err := req.Normalized()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Prompt != "" || got.MaxTokens != 42 || !reflect.DeepEqual(got.Messages, req.Messages) {
-		t.Fatalf("normalized request = %#v", got)
-	}
-	got.Messages[1].Parts[0].Text = "changed"
-	if req.Messages[1].Text() != "question" || req.Prompt != "stale flattened prompt" {
-		t.Fatal("normalization modified input")
-	}
-}
-
-func TestAIRequestNormalizedLiftsLegacyPrompt(t *testing.T) {
-	got, err := (ai.AIRequest{Prompt: "legacy", MaxTokens: 42}).Normalized()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []ai.Message{ai.TextMessage(ai.RoleUser, "legacy")}
-	if got.Prompt != "" || got.MaxTokens != 42 || !reflect.DeepEqual(got.Messages, want) {
-		t.Fatalf("normalized request = %#v", got)
 	}
 }

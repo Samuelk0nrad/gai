@@ -43,7 +43,7 @@ func (m *Model) generateResponses(ctx context.Context, req ai.AIRequest) (result
 		generationResult.ResponseModel = string(response.Model)
 		generationResult.RequestID = response.ID
 		generationResult.FinishReason = string(response.Status)
-		generationResult.ToolCallCount = len(result.ToolCalls)
+		generationResult.ToolCallCount = len(result.ToolCalls())
 		if response.JSON.Usage.Valid() {
 			usage := ai.Usage{
 				InputTokens: result.InputTokens, OutputTokens: result.OutputTokens,
@@ -58,7 +58,7 @@ func (m *Model) generateResponses(ctx context.Context, req ai.AIRequest) (result
 func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token, req ai.AIRequest) {
 	params, err := buildResponsesParams(m.name, req)
 	if err != nil {
-		ai.SendToken(ctx, out, ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+		ai.SendToken(ctx, out, ai.Token{Err: err})
 		return
 	}
 	ctx, observation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "openai", Model: m.name, Streaming: true, Sink: m.provider.debug})
@@ -70,7 +70,7 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 		observation.Finish(generationResult)
 	}()
 	emit := func(token ai.Token) bool {
-		if token.Type == ai.TokenTypeErr && token.Err != nil {
+		if token.Type() == ai.TokenTypeErr && token.Err != nil {
 			streamErr = token.Err
 		}
 		observation.ObserveToken(token)
@@ -94,7 +94,7 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 		event := stream.Current()
 		switch event.Type {
 		case "response.output_text.delta", "response.refusal.delta":
-			if text := event.Delta.OfString; text != "" && !emit(ai.Token{Type: ai.TokenTypeText, Data: []byte(text), Text: text}) {
+			if text := event.Delta.OfString; text != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: text}}) {
 				return
 			}
 		case "response.completed":
@@ -110,13 +110,13 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 					ReasoningTokens: int(response.Usage.OutputTokensDetails.ReasoningTokens), CachedTokens: int(response.Usage.InputTokensDetails.CachedTokens),
 				}
 			}
-			if !emit(ai.Token{Type: ai.TokenTypeCompletion, Completion: &completion}) {
+			if !emit(ai.Token{Completion: &completion}) {
 				return
 			}
 		case "response.output_item.done":
 			if event.Item.Type == "reasoning" {
 				part := reasoningExtension(json.RawMessage(event.Item.RawJSON()))
-				if !emit(ai.Token{Type: ai.TokenTypePart, Part: &part}) {
+				if !emit(ai.Token{Part: &part}) {
 					return
 				}
 				continue
@@ -128,17 +128,17 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 			if !json.Valid(args) {
 				err := fmt.Errorf("invalid JSON arguments for tool %q", event.Item.Name)
 				streamErr = err
-				emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+				emit(ai.Token{Err: err})
 				return
 			}
 			call := &ai.ToolCall{ID: event.Item.CallID, Type: "function", Name: event.Item.Name, Args: args}
-			if !emit(ai.Token{Type: ai.TokenTypeToolCall, Data: []byte(args), ToolCall: call}) {
+			if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: call}}) {
 				return
 			}
 		case "error":
 			err := fmt.Errorf("OpenAI Responses API: %s", event.Message)
 			streamErr = err
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			emit(ai.Token{Err: err})
 			return
 		case "response.failed":
 			response := event.Response
@@ -154,13 +154,13 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 				err = ai.ClassifyProviderError(err, 0, string(response.Error.Code), response.ID, nil)
 			}
 			streamErr = err
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			emit(ai.Token{Err: err})
 			return
 		}
 	}
 	if err := stream.Err(); err != nil {
 		streamErr = classifyProviderError(err)
-		emit(ai.Token{Type: ai.TokenTypeErr, Err: streamErr, Text: streamErr.Error()})
+		emit(ai.Token{Err: streamErr})
 	}
 }
 
@@ -170,7 +170,8 @@ func buildResponsesParams(model string, req ai.AIRequest) (responses.ResponseNew
 		Store:   param.NewOpt(false),
 		Include: []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
 	}
-	req, err := req.Normalized()
+	req = req.Copy()
+	err := req.Validate()
 	if err != nil {
 		return responses.ResponseNewParams{}, err
 	}
@@ -251,11 +252,7 @@ func mapResponsesMessages(messages []ai.Message) (responses.ResponseInputParam, 
 		if err := rejectRequiredExtensions(message.Extensions); err != nil {
 			return nil, err
 		}
-		seenSignatures := map[string]struct{}{}
 		appendReasoning := func(data json.RawMessage) error {
-			if _, seen := seenSignatures[string(data)]; seen {
-				return nil
-			}
 			var items []responses.ResponseReasoningItem
 			if err := json.Unmarshal(data, &items); err != nil {
 				return fmt.Errorf("decode OpenAI reasoning items: %w", err)
@@ -267,7 +264,6 @@ func mapResponsesMessages(messages []ai.Message) (responses.ResponseInputParam, 
 				params := item.ToParam()
 				input = append(input, responses.ResponseInputItemUnionParam{OfReasoning: &params})
 			}
-			seenSignatures[string(data)] = struct{}{}
 			return nil
 		}
 		for _, part := range message.Parts {
@@ -296,19 +292,8 @@ func mapResponsesMessages(messages []ai.Message) (responses.ResponseInputParam, 
 				}
 			case ai.ContentToolCall:
 				call := part.ToolCall
-				for _, ext := range call.Extensions {
-					if ext.Namespace == "openai" && ext.Type == "responses_reasoning" {
-						if err := appendReasoning(ext.Data); err != nil {
-							return nil, err
-						}
-					} else if ext.Required {
-						return nil, fmt.Errorf("%w: OpenAI Responses call extension %s/%s", ai.ErrUnsupportedCapability, ext.Namespace, ext.Type)
-					}
-				}
-				if len(call.ThoughtSignature) > 0 {
-					if err := appendReasoning(call.ThoughtSignature); err != nil {
-						return nil, err
-					}
+				if err := rejectRequiredExtensions(call.Extensions); err != nil {
+					return nil, err
 				}
 				input = append(input, responses.ResponseInputItemParamOfFunctionCall(string(call.Args), call.ID, call.Name))
 			case ai.ContentToolResult:

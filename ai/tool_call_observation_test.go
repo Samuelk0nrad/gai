@@ -22,12 +22,12 @@ func TestToolCallStreamObservationConsolidatesCompletedOutcome(t *testing.T) {
 		observations = append(observations, observation)
 	})
 	in := make(chan Token, 2)
-	in <- Token{Type: TokenTypeText, Data: []byte(`{"type":"function","name":"echo","arguments":{"value":"secret"}}`)}
-	in <- Token{Type: TokenTypeText, Data: []byte(`{"kind":"secret"}`)}
+	in <- Token{Part: &ContentPart{Kind: ContentText, Text: `{"type":"function","name":"echo","arguments":{"value":"secret"}}`}}
+	in <- Token{Part: &ContentPart{Kind: ContentText, Text: `{"kind":"secret"}`}}
 	close(in)
 
 	output := drainToolCallStream(DetectToolCallsInStream(t.Context(), in, sink))
-	if len(output) != 2 || output[0].Type != TokenTypeToolCall || output[1].Type != TokenTypeText {
+	if len(output) != 2 || output[0].Type() != TokenTypeToolCall || output[1].Type() != TokenTypeText {
 		t.Fatalf("output = %#v, want tool call followed by replayed text", output)
 	}
 	if len(observations) != 1 {
@@ -145,8 +145,8 @@ func TestToolCallStreamObservationCapturesOnlyPolicyEnabledContent(t *testing.T)
 		},
 	})
 	in := make(chan Token, 2)
-	in <- Token{Type: TokenTypeText, Data: []byte(`{"type":"function","name":"echo","arguments":{"value":"secret"}}`)}
-	in <- Token{Type: TokenTypeText, Data: []byte(`{"kind":"secret"}`)}
+	in <- Token{Part: &ContentPart{Kind: ContentText, Text: `{"type":"function","name":"echo","arguments":{"value":"secret"}}`}}
+	in <- Token{Part: &ContentPart{Kind: ContentText, Text: `{"kind":"secret"}`}}
 	close(in)
 
 	drainToolCallStream(DetectToolCallsInStream(ctx, in, sink))
@@ -172,12 +172,12 @@ func TestToolCallStreamObservationReportsEOFPendingCandidate(t *testing.T) {
 	})
 	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{Completion: gai.CaptureEnabled})
 	in := make(chan Token, 1)
-	in <- Token{Type: TokenTypeText, Data: []byte(`{"type":"function","name":"echo"`)}
+	in <- Token{Part: &ContentPart{Kind: ContentText, Text: `{"type":"function","name":"echo"`}}
 	close(in)
 
 	output := drainToolCallStream(DetectToolCallsInStream(ctx, in, sink))
 
-	if len(output) != 1 || string(output[0].Data) != `{"type":"function","name":"echo"` {
+	if len(output) != 1 || output[0].Text() != `{"type":"function","name":"echo"` {
 		t.Fatalf("output = %#v, want unresolved candidate replayed", output)
 	}
 	if observation.Fields["outcome"] != "completed" || observation.Fields["eof_pending"] != true {
@@ -198,13 +198,13 @@ func TestToolCallStreamObservationReportsPendingCandidateBeforeCompletion(t *tes
 	})
 	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{Completion: gai.CaptureEnabled})
 	in := make(chan Token, 2)
-	in <- Token{Type: TokenTypeText, Data: []byte(`{"type":"function","name":"echo"`)}
-	in <- Token{Type: TokenTypeCompletion, Completion: &Completion{}}
+	in <- Token{Part: &ContentPart{Kind: ContentText, Text: `{"type":"function","name":"echo"`}}
+	in <- Token{Completion: &Completion{}}
 	close(in)
 
 	output := drainToolCallStream(DetectToolCallsInStream(ctx, in, sink))
 
-	if len(output) != 2 || output[0].Type != TokenTypeText || output[1].Type != TokenTypeCompletion {
+	if len(output) != 2 || output[0].Type() != TokenTypeText || output[1].Type() != TokenTypeCompletion {
 		t.Fatalf("output = %#v, want unresolved candidate followed by completion", output)
 	}
 	if observation.Fields["eof_pending"] != true {
@@ -225,13 +225,13 @@ func TestToolCallStreamObservationRejectsCandidateInterruptedByNativeToolCall(t 
 	})
 	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{Completion: gai.CaptureEnabled})
 	in := make(chan Token, 2)
-	in <- Token{Type: TokenTypeText, Data: []byte(`{"type":"function","name":"partial"`)}
-	in <- Token{Type: TokenTypeToolCall, ToolCall: &ToolCall{Name: "native"}}
+	in <- Token{Part: &ContentPart{Kind: ContentText, Text: `{"type":"function","name":"partial"`}}
+	in <- Token{Part: &ContentPart{Kind: ContentToolCall, ToolCall: &ToolCall{ID: "native", Type: "function", Name: "native", Args: []byte(`{}`)}}}
 	close(in)
 
 	output := drainToolCallStream(DetectToolCallsInStream(ctx, in, sink))
 
-	if len(output) != 2 || output[0].Type != TokenTypeText || output[1].Type != TokenTypeToolCall || output[1].ToolCall == nil || output[1].ToolCall.Name != "native" {
+	if len(output) != 2 || output[0].Type() != TokenTypeText || output[1].Type() != TokenTypeToolCall || output[1].ToolCall() == nil || output[1].ToolCall().Name != "native" {
 		t.Fatalf("output = %#v, want unresolved candidate followed by native tool call", output)
 	}
 	if observation.Fields["eof_pending"] != false {
@@ -252,14 +252,14 @@ func TestToolCallStreamObservationRejectsCandidateAtErrorWithoutReportingEOF(t *
 	})
 	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{Completion: gai.CaptureEnabled})
 	in := make(chan Token, 3)
-	in <- Token{Type: TokenTypeText, Data: []byte(`{"type":"function","name":"echo"`)}
-	in <- Token{Type: TokenTypeErr, Err: context.Canceled}
-	in <- Token{Type: TokenTypeText, Data: []byte(`{"type":"function","name":"after_error"}`)}
+	in <- Token{Part: &ContentPart{Kind: ContentText, Text: `{"type":"function","name":"echo"`}}
+	in <- Token{Err: context.Canceled}
+	in <- Token{Part: &ContentPart{Kind: ContentText, Text: `{"type":"function","name":"after_error"}`}}
 	close(in)
 
 	output := drainToolCallStream(DetectToolCallsInStream(ctx, in, sink))
 
-	if len(output) != 3 || output[0].Type != TokenTypeText || output[1].Type != TokenTypeErr || output[2].Type != TokenTypeToolCall || output[2].ToolCall == nil || output[2].ToolCall.Name != "after_error" {
+	if len(output) != 3 || output[0].Type() != TokenTypeText || output[1].Type() != TokenTypeErr || output[2].Type() != TokenTypeToolCall || output[2].ToolCall() == nil || output[2].ToolCall().Name != "after_error" {
 		t.Fatalf("output = %#v, want unresolved candidate, error, and following tool call", output)
 	}
 	if observation.Fields["eof_pending"] != false {
@@ -305,7 +305,7 @@ func TestToolCallStreamObservationReportsPendingCandidateAtCancellation(t *testi
 	ctx = gai.WithContentCapturePolicy(ctx, gai.ContentCapturePolicy{Completion: gai.CaptureEnabled})
 	in := make(chan Token)
 	out := DetectToolCallsInStream(ctx, in, sink)
-	in <- Token{Type: TokenTypeText, Data: []byte(`{"type":"function","name":"echo"`)}
+	in <- Token{Part: &ContentPart{Kind: ContentText, Text: `{"type":"function","name":"echo"`}}
 	cancel()
 
 	output := drainToolCallStream(out)

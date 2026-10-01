@@ -15,13 +15,11 @@ import (
 	"github.com/lace-ai/gai/loop"
 )
 
-func TestLoopCanonicalJSONPartCannotExecuteStaleLegacyToolCall(t *testing.T) {
+func TestLoopCanonicalJSONPartPreservesPayloadWithoutCallingTools(t *testing.T) {
 	tool := &countingTool{}
 	model := &scriptedStreamModel{sequences: [][]ai.Token{{{
-		Type:     ai.TokenTypeToolCall,
-		Part:     &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(`{"ok":true}`)},
-		ToolCall: &ai.ToolCall{ID: "stale", Type: "function", Name: tool.Name(), Args: json.RawMessage(`{"text":"must not run"}`)},
-		Text:     "stale text", Data: []byte("stale data"),
+
+		Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(`{"ok":true}`)},
 	}}}}
 	l := loop.New(model, []loop.Tool{tool}, testPromptBuilder(), nil)
 	l.MaxLoopIterations = 1
@@ -30,14 +28,14 @@ func TestLoopCanonicalJSONPartCannotExecuteStaleLegacyToolCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	if tool.calls.Load() != 0 {
-		t.Fatal("canonical JSON was executed as a stale legacy tool call")
+		t.Fatal("canonical JSON was incorrectly executed as a tool call")
 	}
 	for _, event := range events {
 		if event.Type == loop.EventToolStart || event.Type == loop.EventToolResult {
 			t.Fatalf("unexpected tool event: %#v", event)
 		}
-		if event.Token != nil && (event.Token.ToolCall != nil || event.Token.Text != `{"ok":true}` || len(event.Token.Data) != 0 || event.Token.Type != ai.TokenTypeText) {
-			t.Fatalf("stale compatibility fields escaped: %#v", event.Token)
+		if event.Token != nil && (event.Token.ToolCall() != nil || event.Token.Text() != `{"ok":true}` || event.Token.Type() != ai.TokenTypeText) {
+			t.Fatalf("JSON projection disagrees with canonical part: %#v", event.Token)
 		}
 	}
 	messages := l.Messages()
@@ -83,8 +81,7 @@ func (tool *canonicalParallelTool) Function(ctx context.Context, call *ai.ToolCa
 func canonicalLoopCall(id, text string) ai.ContentPart {
 	return ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{
 		ID: id, Type: "function", Name: "echo", Args: json.RawMessage(`{"text":"` + text + `"}`),
-		ThoughtSignature: []byte("signature-" + id),
-		Extensions:       []ai.Extension{{Namespace: "future", Type: "state", Data: json.RawMessage(`"opaque"`)}},
+		Extensions: []ai.Extension{{Namespace: "future", Type: "state", Data: json.RawMessage(`"opaque"`)}},
 	}}
 }
 
@@ -96,9 +93,6 @@ func mutateCanonicalCall(call *ai.ToolCall) {
 	call.Name = "mutated"
 	if len(call.Args) > 9 {
 		call.Args[9] = 'X'
-	}
-	if len(call.ThoughtSignature) > 0 {
-		call.ThoughtSignature[0] = 'X'
 	}
 	for i := range call.Extensions {
 		if len(call.Extensions[i].Data) > 1 {
@@ -135,16 +129,16 @@ func TestLoopCanonicalMixedPartsSurviveRetryParallelToolsAndEventMutation(t *tes
 	first, second, rejected := canonicalLoopCall("first", "first"), canonicalLoopCall("second", "second"), canonicalLoopCall("rejected", "rejected")
 	reasoning := ai.ContentPart{Kind: ai.ContentReasoning, Text: "consider ", Extensions: []ai.Extension{{Namespace: "anthropic", Type: "signature", Data: json.RawMessage(`"reasoning-state"`), Required: true}}}
 	model := &scriptedStreamModel{sequences: [][]ai.Token{
-		{{Type: ai.TokenTypePart, Part: &rejected}, {Type: ai.TokenTypeErr, Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient}}},
+		{{Part: &rejected}, {Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient}}},
 		{
-			{Type: ai.TokenTypePart, Part: &reasoning},
-			{Type: ai.TokenTypeText, Text: "before"},
-			{Type: ai.TokenTypePart, Part: &first},
-			{Type: ai.TokenTypeText, Text: "between"},
-			{Type: ai.TokenTypePart, Part: &second},
-			{Type: ai.TokenTypeText, Text: "after"},
+			{Part: &reasoning},
+			{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "before"}},
+			{Part: &first},
+			{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "between"}},
+			{Part: &second},
+			{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "after"}},
 		},
-		{{Type: ai.TokenTypeText, Text: "done"}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}},
 	}}
 	wantAssistant := ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{
 		reasoning, {Kind: ai.ContentText, Text: "before"}, first, {Kind: ai.ContentText, Text: "between"}, second, {Kind: ai.ContentText, Text: "after"},
@@ -177,7 +171,7 @@ func TestLoopCanonicalMixedPartsSurviveRetryParallelToolsAndEventMutation(t *tes
 			accepted++
 		}
 		if event.Token != nil {
-			mutateCanonicalCall(event.Token.ToolCall)
+			mutateCanonicalCall(event.Token.ToolCall())
 			if event.Token.Part != nil {
 				event.Token.Part.Text = "mutated"
 				mutateCanonicalParts([]ai.ContentPart{*event.Token.Part})
@@ -258,7 +252,7 @@ func TestLoopCanonicalEmptyUserSliceDoesNotCreateInvalidStoredInput(t *testing.T
 		SystemInstructions: []gaictx.Part{gaictx.NewTextPart("context only")},
 		PromptInput:        gaictx.PromptInput{User: []ai.ContentPart{}},
 	})
-	model := &scriptedStreamModel{sequences: [][]ai.Token{{{Type: ai.TokenTypeText, Text: "answer"}}}}
+	model := &scriptedStreamModel{sequences: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "answer"}}}}}
 	l := loop.New(model, nil, builder, nil)
 	events := collectLoopEvents(t, l, t.Context())
 	if err := loopError(events); err != nil {

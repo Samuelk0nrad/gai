@@ -17,13 +17,7 @@ import (
 type readOnlyPromptBuilder struct{ input gaictx.PromptInput }
 
 func (*readOnlyPromptBuilder) BuildContext(context.Context) ([]gaictx.Part, error) { return nil, nil }
-func (b *readOnlyPromptBuilder) BuildPrompt(context.Context, gaictx.Conversation) (string, error) {
-	if b.input.User == nil {
-		return "", nil
-	}
-	return (ai.Message{Parts: b.input.User}).Text(), nil
-}
-func (b *readOnlyPromptBuilder) Input() gaictx.PromptInput { return b.input.Clone() }
+func (b *readOnlyPromptBuilder) Input() gaictx.PromptInput                         { return b.input.Clone() }
 
 // inputOnlyPromptBuilder adds run input configuration without source mutation.
 type inputOnlyPromptBuilder struct{ readOnlyPromptBuilder }
@@ -58,7 +52,7 @@ func TestAgentAcceptsInputOnlyPromptBuilder(t *testing.T) {
 	t.Parallel()
 	for _, native := range []bool{false, true} {
 		t.Run(map[bool]string{false: "no tools", true: "native tools"}[native], func(t *testing.T) {
-			model := &scriptedWorkflowModel{scripts: [][]ai.Token{{{Type: ai.TokenTypeText, Data: []byte("answer")}}}}
+			model := &scriptedWorkflowModel{scripts: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "answer"}}}}}
 			builder := &inputOnlyPromptBuilder{}
 			definition := agent.Definition{
 				Model:  model,
@@ -124,7 +118,7 @@ func TestAgentModelOverrideToNativeRemovesStaleTextToolDefinitions(t *testing.T)
 		t.Fatal(err)
 	}
 	builder := gaictx.New(gaictx.Definition{ContextSources: []gaictx.ContextSource{source}})
-	model := &scriptedWorkflowModel{scripts: [][]ai.Token{{{Type: ai.TokenTypeText, Data: []byte("answer")}}}}
+	model := &scriptedWorkflowModel{scripts: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "answer"}}}}}
 	assistant := agent.New(agent.Definition{
 		Model:  &scriptedWorkflowModel{},
 		Tools:  []loop.Tool{tool},
@@ -143,7 +137,7 @@ func TestAgentModelOverrideToNativeRemovesStaleTextToolDefinitions(t *testing.T)
 		t.Fatalf("workflow errors: %v", consumed.errs)
 	}
 	requests := model.Requests()
-	if len(requests) != 1 || len(requests[0].Tools) != 1 || strings.Contains(requests[0].Prompt, "tool_definitions") || strings.Contains(requests[0].Prompt, "standalone JSON") {
+	if len(requests) != 1 || len(requests[0].Tools) != 1 || strings.Contains(requestText(requests[0]), "tool_definitions") || strings.Contains(requestText(requests[0]), "standalone JSON") {
 		t.Fatalf("native request retained text protocol or omitted tools: %#v", requests)
 	}
 }

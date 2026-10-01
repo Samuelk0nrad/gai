@@ -3,7 +3,6 @@ package context_test
 import (
 	"encoding/json"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/lace-ai/gai/ai"
@@ -62,23 +61,19 @@ func TestStoredMessageRoundTripPreservesToolResultErrorsAndMedia(t *testing.T) {
 	}
 }
 
-func TestStoredMessageMigratesLegacyTextAndRejectsMissingToolIDs(t *testing.T) {
+func TestStoredMessageRejectsOldAndUnversionedFormats(t *testing.T) {
 	t.Parallel()
-	var got gaictx.StoredMessage
-	err := json.Unmarshal([]byte(`{"ID":"old-id","SessionID":"session","TurnID":"turn","Role":"user","Content":{"Text":"hello"},"TokenCount":{"old-counter":3}}`), &got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.SchemaVersion != gaictx.MessageSchemaVersion || got.ID != "old-id" || got.SessionID != "session" || got.TurnID != "turn" || got.Message.Text() != "hello" || got.TokenCount["old-counter"] != 3 {
-		t.Fatalf("legacy metadata/content lost: %#v", got)
-	}
 	for _, payload := range []string{
+		`{"ID":"old-id","Role":"user","Content":{"Text":"hello"}}`,
 		`{"Role":"assistant","Content":{"ToolName":"search","Args":"{}"}}`,
 		`{"Role":"tool","Content":{"ToolName":"search","Result":"ok"}}`,
-		`{"Role":"tool","Content":{"ToolName":"search","Err":"failed"}}`,
+		`{"message":{"role":"user","parts":[{"kind":"text","text":"hello"}]}}`,
+		`{"schema_version":0,"message":{"role":"user","parts":[{"kind":"text","text":"hello"}]}}`,
+		`{"schema_version":1,"Role":"user","Content":{"Text":"hello"}}`,
 	} {
-		if err := json.Unmarshal([]byte(payload), &got); err == nil || !strings.Contains(err.Error(), "authoritative tool call IDs") {
-			t.Fatalf("ambiguous legacy payload accepted: %s (%v)", payload, err)
+		var got gaictx.StoredMessage
+		if err := json.Unmarshal([]byte(payload), &got); err == nil {
+			t.Fatalf("noncanonical stored message accepted: %s", payload)
 		}
 	}
 }
@@ -94,5 +89,24 @@ func TestStoredMessageRejectsUnsupportedVersionAndInvalidCanonicalContent(t *tes
 		if err := json.Unmarshal([]byte(payload), &got); err == nil {
 			t.Fatalf("invalid envelope accepted: %s", payload)
 		}
+	}
+}
+
+func TestStoredMessageWriterEmitsCurrentSchema(t *testing.T) {
+	t.Parallel()
+	message := gaictx.StoredMessage{Message: ai.TextMessage(ai.RoleUser, "hello")}
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got gaictx.StoredMessage
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.SchemaVersion != gaictx.MessageSchemaVersion || !reflect.DeepEqual(got.Message, message.Message) {
+		t.Fatalf("new message was not written in the canonical schema: %s", encoded)
+	}
+	if message.SchemaVersion != 0 {
+		t.Fatal("serialization mutated the caller's storage envelope")
 	}
 }

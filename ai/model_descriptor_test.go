@@ -11,7 +11,7 @@ func TestModelDescriptorZeroValueIsUnknownAndPermitsRequests(t *testing.T) {
 	if FeatureSupportUnknown != 0 {
 		t.Fatalf("FeatureSupportUnknown = %d, want zero", FeatureSupportUnknown)
 	}
-	if err := (ModelDescriptor{}).ValidateRequest(AIRequest{Reasoning: ReasoningConfig{Effort: ReasoningEffortHigh}}); err != nil {
+	if err := (ModelDescriptor{}).ValidateRequest(AIRequest{Messages: []Message{TextMessage(RoleUser, "question")}, Reasoning: ReasoningConfig{Effort: ReasoningEffortHigh}}); err != nil {
 		t.Fatalf("zero descriptor rejected unknown capability: %v", err)
 	}
 }
@@ -176,7 +176,7 @@ func TestContextMutexHonorsCanceledContext(t *testing.T) {
 }
 
 func TestModelDescriptorRejectsUnsupportedWithTypedError(t *testing.T) {
-	err := (ModelDescriptor{Model: "test", ReasoningEffort: FeatureSupportUnsupported}).ValidateRequest(AIRequest{Reasoning: ReasoningConfig{Effort: ReasoningEffortHigh}})
+	err := (ModelDescriptor{Model: "test", ReasoningEffort: FeatureSupportUnsupported}).ValidateRequest(AIRequest{Messages: []Message{TextMessage(RoleUser, "question")}, Reasoning: ReasoningConfig{Effort: ReasoningEffortHigh}})
 	if !errors.Is(err, ErrUnsupportedCapability) {
 		t.Fatalf("error = %v, want ErrUnsupportedCapability", err)
 	}
@@ -188,7 +188,7 @@ func TestModelDescriptorRejectsUnsupportedWithTypedError(t *testing.T) {
 
 func TestModelDescriptorRejectsUnadvertisedReasoningEffort(t *testing.T) {
 	d := ModelDescriptor{Model: "test", ReasoningEffort: FeatureSupportSupported, ReasoningEfforts: []ReasoningEffort{ReasoningEffortLow, ReasoningEffortHigh}}
-	err := d.ValidateRequest(AIRequest{Reasoning: ReasoningConfig{Effort: ReasoningEffortMedium}})
+	err := d.ValidateRequest(AIRequest{Messages: []Message{TextMessage(RoleUser, "question")}, Reasoning: ReasoningConfig{Effort: ReasoningEffortMedium}})
 	if !errors.Is(err, ErrUnsupportedCapability) {
 		t.Fatalf("error = %v, want unsupported capability", err)
 	}
@@ -199,7 +199,7 @@ func TestModelDescriptorRejectsUnsupportedNativeCapabilities(t *testing.T) {
 	if messageErr != nil {
 		t.Fatalf("canonical text must not require native messages: %v", messageErr)
 	}
-	toolErr := (ModelDescriptor{Model: "test", NativeTools: FeatureSupportUnsupported}).ValidateRequest(AIRequest{Tools: []ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: []byte(`{"type":"object"}`)}}})
+	toolErr := (ModelDescriptor{Model: "test", NativeTools: FeatureSupportUnsupported}).ValidateRequest(AIRequest{Messages: []Message{TextMessage(RoleUser, "question")}, Tools: []ToolDefinition{{Type: "function", Name: "search", Description: "Search", Parameters: []byte(`{"type":"object"}`)}}})
 	if !errors.Is(toolErr, ErrUnsupportedCapability) {
 		t.Fatalf("native tool error = %v, want unsupported capability", toolErr)
 	}
@@ -225,16 +225,12 @@ func TestModelDescriptorPermitsSemanticToolHistoryWithoutNativeTools(t *testing.
 
 }
 
-func TestValidateModelRequestSupportsLegacyModel(t *testing.T) {
-	if err := ValidateModelRequest(legacyModel{}, AIRequest{Reasoning: ReasoningConfig{Effort: ReasoningEffortHigh}}); err != nil {
-		t.Fatalf("legacy model request rejected: %v", err)
+func TestValidateModelRequestSupportsMinimalModel(t *testing.T) {
+	if err := ValidateModelRequest(minimalModel{}, AIRequest{Messages: []Message{TextMessage(RoleUser, "question")}, Reasoning: ReasoningConfig{Effort: ReasoningEffortHigh}}); err != nil {
+		t.Fatalf("minimal model request rejected: %v", err)
 	}
 }
 
-type legacyModel struct{}
+type minimalModel struct{}
 
-func (legacyModel) Name() string                                             { return "legacy" }
-func (legacyModel) Generate(context.Context, AIRequest) (*AIResponse, error) { return nil, nil }
-func (legacyModel) GenerateStream(context.Context, AIRequest) <-chan Token   { return nil }
-func (legacyModel) Close() error                                             { return nil }
-func (legacyModel) Tokenizer() Tokenizer                                     { return nil }
+func (minimalModel) GenerateStream(context.Context, AIRequest) <-chan Token { return nil }

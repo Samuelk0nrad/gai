@@ -9,7 +9,7 @@ import (
 )
 
 func TestCanonicalMistralKeepsSystemAndParallelToolCalls(t *testing.T) {
-	params, err := buildChatCompletionRequest(ai.AIRequest{Prompt: "obsolete", Messages: []ai.Message{
+	params, err := buildChatCompletionRequest(ai.AIRequest{Messages: []ai.Message{
 		ai.TextMessage(ai.RoleSystem, "rules"),
 		{Role: ai.RoleAssistant, Parts: []ai.ContentPart{
 			{Kind: ai.ContentText, Text: "checking"},

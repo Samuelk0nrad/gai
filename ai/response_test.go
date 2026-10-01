@@ -38,7 +38,7 @@ func TestSendTokenStopsWhenContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if ai.SendToken(ctx, make(chan ai.Token), ai.Token{Type: ai.TokenTypeText, Text: "ignored"}) {
+	if ai.SendToken(ctx, make(chan ai.Token), ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "ignored"}}) {
 		t.Fatal("expected canceled send to return false")
 	}
 }
@@ -46,27 +46,26 @@ func TestSendTokenStopsWhenContextCanceled(t *testing.T) {
 func TestAIResponseAppendTokenSeparatesThoughtsAndToolCalls(t *testing.T) {
 	var response ai.AIResponse
 
-	response.AppendToken(ai.Token{Type: ai.TokenTypeText, Text: "answer", TokenUsage: 2})
-	response.AppendToken(ai.Token{Type: ai.TokenTypeThought, Text: "reasoning", TokenUsage: 3})
+	response.AppendToken(ai.Token{TokenUsage: 2, Part: &ai.ContentPart{Kind: ai.ContentText, Text: "answer"}})
+	response.AppendToken(ai.Token{TokenUsage: 3, Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: "reasoning"}})
 	response.AppendToken(ai.Token{
-		Type: ai.TokenTypeToolCall,
-		ToolCall: &ai.ToolCall{
+
+		TokenUsage: 1, Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{
 			ID:   "call-1",
 			Type: "function",
 			Name: "search",
 			Args: json.RawMessage(`{"query":"x"}`),
-		},
-		TokenUsage: 1,
+		}},
 	})
 
-	if response.Text != "answer" {
-		t.Fatalf("expected visible text only, got %q", response.Text)
+	if response.Text() != "answer" {
+		t.Fatalf("expected visible text only, got %q", response.Text())
 	}
-	if response.Reasoning != "reasoning" {
-		t.Fatalf("expected reasoning to be separated, got %q", response.Reasoning)
+	if response.Reasoning() != "reasoning" {
+		t.Fatalf("expected reasoning to be separated, got %q", response.Reasoning())
 	}
-	if len(response.ToolCalls) != 1 || response.ToolCalls[0].Name != "search" {
-		t.Fatalf("expected tool call to be recorded, got %#v", response.ToolCalls)
+	if len(response.ToolCalls()) != 1 || response.ToolCalls()[0].Name != "search" {
+		t.Fatalf("expected tool call to be recorded, got %#v", response.ToolCalls())
 	}
 	if response.OutputTokens != 6 {
 		t.Fatalf("unexpected output tokens: %d", response.OutputTokens)
@@ -79,11 +78,11 @@ func TestAIResponseAppendTokenSeparatesThoughtsAndToolCalls(t *testing.T) {
 func TestAIResponseAppendTokenCompletionUsesLatestUsage(t *testing.T) {
 	var response ai.AIResponse
 
-	response.AppendToken(ai.Token{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{
+	response.AppendToken(ai.Token{Completion: &ai.Completion{
 		UsageReported: true,
 		Usage:         ai.Usage{InputTokens: 10, OutputTokens: 4, ReasoningTokens: 2},
 	}})
-	response.AppendToken(ai.Token{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{
+	response.AppendToken(ai.Token{Completion: &ai.Completion{
 		UsageReported: true,
 		Usage:         ai.Usage{InputTokens: 12, OutputTokens: 6, ReasoningTokens: 3},
 	}})
@@ -96,7 +95,7 @@ func TestAIResponseAppendTokenCompletionUsesLatestUsage(t *testing.T) {
 func TestAIResponseAppendTokenCompletionPreservesUnreportedUsage(t *testing.T) {
 	response := ai.AIResponse{InputTokens: 10, OutputTokens: 4, ReasoningTokens: 2}
 
-	response.AppendToken(ai.Token{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{
+	response.AppendToken(ai.Token{Completion: &ai.Completion{
 		FinishReason: "stop",
 		Raw:          json.RawMessage(`{"id":"response-1"}`),
 	}})
@@ -112,7 +111,7 @@ func TestAIResponseAppendTokenCompletionPreservesUnreportedUsage(t *testing.T) {
 func TestAIResponseAppendTokenCompletionAcceptsReportedZeroUsage(t *testing.T) {
 	response := ai.AIResponse{InputTokens: 10, OutputTokens: 4, ReasoningTokens: 2}
 
-	response.AppendToken(ai.Token{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{UsageReported: true}})
+	response.AppendToken(ai.Token{Completion: &ai.Completion{UsageReported: true}})
 
 	if response.InputTokens != 0 || response.OutputTokens != 0 || response.ReasoningTokens != 0 {
 		t.Fatalf("reported zero usage should replace accumulated values, got %#v", response)
@@ -147,9 +146,9 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Detects leading tool call and passes through remainder",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte(" \n\t{")},
-				{Type: ai.TokenTypeText, Data: []byte(`"id":"call-1","type":"function","name":"echo","arguments":{"x":1}}`)},
-				{Type: ai.TokenTypeText, Data: []byte(" trailing text")},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: " \n\t{"}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `"id":"call-1","type":"function","name":"echo","arguments":{"x":1}}`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: " trailing text"}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeToolCall, toolType: "function", toolName: "echo", toolArgsJSON: `{"x":1}`},
@@ -159,8 +158,8 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Passes through non-JSON leading text",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte("hello")},
-				{Type: ai.TokenTypeText, Data: []byte(" world")},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "hello"}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: " world"}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeText, data: "hello", checkData: true},
@@ -170,23 +169,23 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Replays pending when non-text arrives before decision",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte("  ")},
-				{Type: ai.TokenTypeErr, Data: []byte("boom")},
-				{Type: ai.TokenTypeText, Data: []byte("after")},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "  "}},
+				{Err: errors.New("boom")},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "after"}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeText, data: "  ", checkData: true},
-				{typ: ai.TokenTypeErr, data: "boom", checkData: true},
+				{typ: ai.TokenTypeErr},
 				{typ: ai.TokenTypeText, data: "after", checkData: true},
 			},
 		},
 		{
 			name: "Replays pending when non-JSON text arrives before decision",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte("Test\n\n{")},
-				{Type: ai.TokenTypeText, Data: []byte(`"id":"call-1","type":"function","name":"echo","arguments":`)},
-				{Type: ai.TokenTypeText, Data: []byte(`{"x":1}}\n\n trailing text `)},
-				{Type: ai.TokenTypeText, Data: []byte(`{"kind":1} tail`)},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "Test\n\n{"}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `"id":"call-1","type":"function","name":"echo","arguments":`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"x":1}}\n\n trailing text `}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"kind":1} tail`}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeText, data: "Test\n\n", checkData: true},
@@ -197,7 +196,7 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Validates that JSON must be a tool call, not just any JSON",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte(`{"kind":1} tail`)},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"kind":1} tail`}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeText, data: `{"kind":1} tail`},
@@ -206,8 +205,8 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Replays when JSON is not a valid tool call",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-1","type":"not-function","name":"echo"}`)},
-				{Type: ai.TokenTypeText, Data: []byte("tail")},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"id":"call-1","type":"not-function","name":"echo"}`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "tail"}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeText, data: `{"id":"call-1","type":"not-function","name":"echo"}`, checkData: true},
@@ -217,7 +216,7 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Replays unclosed JSON at end of stream",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-1","type":"function","name":"echo"`)},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"id":"call-1","type":"function","name":"echo"`}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeText, data: `{"id":"call-1","type":"function","name":"echo"`, checkData: true},
@@ -226,8 +225,8 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Handles braces inside strings",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-2","type":"function","name":"echo","arguments":{"msg":"{\\\"a\\\":1}"`)},
-				{Type: ai.TokenTypeText, Data: []byte(`,"items":[1,2,3]}}`)},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"id":"call-2","type":"function","name":"echo","arguments":{"msg":"{\\\"a\\\":1}"`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `,"items":[1,2,3]}}`}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeToolCall, toolType: "function", toolName: "echo", toolArgsJSON: `{"items":[1,2,3],"msg":"{\\\"a\\\":1}"}`},
@@ -236,7 +235,7 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Defaults missing arguments to empty object",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-3","type":"function","name":"echo"}`)},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"id":"call-3","type":"function","name":"echo"}`}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeToolCall, toolType: "function", toolName: "echo", toolArgsJSON: `{}`},
@@ -245,7 +244,7 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Detects tool call and preserves trailing text in same token",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-10","type":"function","name":"echo","arguments":{"x":1}} trailing`)},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"id":"call-10","type":"function","name":"echo","arguments":{"x":1}} trailing`}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeToolCall, toolType: "function", toolName: "echo", toolArgsJSON: `{"x":1}`},
@@ -255,7 +254,7 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Detects adjacent tool calls in same token",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-11","type":"function","name":"echo","arguments":{"x":1}}{"id":"call-12","type":"function","name":"echo","arguments":{"y":2}} tail`)},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"id":"call-11","type":"function","name":"echo","arguments":{"x":1}}{"id":"call-12","type":"function","name":"echo","arguments":{"y":2}} tail`}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeToolCall, toolType: "function", toolName: "echo", toolArgsJSON: `{"x":1}`},
@@ -266,8 +265,8 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Detects adjacent tool calls across token boundary",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-11","type":"function","name":"echo","arguments":{"x":1}}`)},
-				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-12","type":"function","name":"echo","arguments":{"y":2}} tail`)},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"id":"call-11","type":"function","name":"echo","arguments":{"x":1}}`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"id":"call-12","type":"function","name":"echo","arguments":{"y":2}} tail`}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeToolCall, toolType: "function", toolName: "echo", toolArgsJSON: `{"x":1}`},
@@ -278,10 +277,10 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Detects multiple tool calls separated by blank lines",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte("intro\n\n")},
-				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-13","type":"function","name":"echo","arguments":{"x":1}}`)},
-				{Type: ai.TokenTypeText, Data: []byte("\n\n")},
-				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-14","type":"function","name":"echo","arguments":{"y":2}} tail`)},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "intro\n\n"}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"id":"call-13","type":"function","name":"echo","arguments":{"x":1}}`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "\n\n"}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"id":"call-14","type":"function","name":"echo","arguments":{"y":2}} tail`}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeText, data: "intro\n\n", checkData: true},
@@ -293,15 +292,15 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Detects tool call from production-like chunked JSON",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte("\n")},
-				{Type: ai.TokenTypeText, Data: []byte("\n")},
-				{Type: ai.TokenTypeText, Data: []byte(`{"id":"`)},
-				{Type: ai.TokenTypeText, Data: []byte(`echo","`)},
-				{Type: ai.TokenTypeText, Data: []byte(`type":"function","`)},
-				{Type: ai.TokenTypeText, Data: []byte(`name":"echo","`)},
-				{Type: ai.TokenTypeText, Data: []byte(`arguments":{"`)},
-				{Type: ai.TokenTypeText, Data: []byte(`text":"try`)},
-				{Type: ai.TokenTypeText, Data: []byte(` the echo tool"}}`)},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "\n"}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "\n"}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"id":"`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `echo","`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `type":"function","`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `name":"echo","`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `arguments":{"`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `text":"try`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: ` the echo tool"}}`}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeToolCall, toolType: "function", toolName: "echo", toolArgsJSON: `{"text":"try the echo tool"}`},
@@ -310,9 +309,9 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Does not detect tool call when text prefix exists",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte("Sure, I can help. ")},
-				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-9","type":"function","name":"echo","arguments":{"x":1}}`)},
-				{Type: ai.TokenTypeText, Data: []byte(" done")},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "Sure, I can help. "}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"id":"call-9","type":"function","name":"echo","arguments":{"x":1}}`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: " done"}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeText, data: "Sure, I can help. ", checkData: true},
@@ -323,8 +322,8 @@ func TestDetectToolCallsInStream(t *testing.T) {
 		{
 			name: "Preserves non-tool JSON object",
 			input: []ai.Token{
-				{Type: ai.TokenTypeText, Data: []byte(`{"kind":"event","value":123}`)},
-				{Type: ai.TokenTypeText, Data: []byte(" tail")},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"kind":"event","value":123}`}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: " tail"}},
 			},
 			output: []expectedWrapToken{
 				{typ: ai.TokenTypeText, data: `{"kind":"event","value":123}`, checkData: true},
@@ -352,29 +351,29 @@ func TestDetectToolCallsInStream(t *testing.T) {
 
 			for i, expected := range expectedOut {
 				got := out[i]
-				if got.Type != expected.typ {
-					t.Fatalf("token %d unexpected type: got=%q want=%q", i, got.Type, expected.typ)
+				if got.Type() != expected.typ {
+					t.Fatalf("token %d unexpected type: got=%q want=%q", i, got.Type(), expected.typ)
 				}
 
-				if expected.checkData && string(got.Data) != expected.data {
-					t.Fatalf("token %d unexpected data: got=%q want=%q", i, string(got.Data), expected.data)
+				if expected.checkData && got.Text() != expected.data {
+					t.Fatalf("token %d unexpected data: got=%q want=%q", i, got.Text(), expected.data)
 				}
 
 				if expected.typ == ai.TokenTypeToolCall {
-					if got.ToolCall == nil {
+					if got.ToolCall() == nil {
 						t.Fatalf("token %d expected tool call metadata, got nil", i)
 					}
-					if got.ToolCall.ID == "" {
+					if got.ToolCall().ID == "" {
 						t.Fatalf("token %d unexpected empty tool call id", i)
 					}
-					if got.ToolCall.Type != expected.toolType {
-						t.Fatalf("token %d unexpected tool call type: got=%q want=%q", i, got.ToolCall.Type, expected.toolType)
+					if got.ToolCall().Type != expected.toolType {
+						t.Fatalf("token %d unexpected tool call type: got=%q want=%q", i, got.ToolCall().Type, expected.toolType)
 					}
-					if got.ToolCall.Name != expected.toolName {
-						t.Fatalf("token %d unexpected tool call name: got=%q want=%q", i, got.ToolCall.Name, expected.toolName)
+					if got.ToolCall().Name != expected.toolName {
+						t.Fatalf("token %d unexpected tool call name: got=%q want=%q", i, got.ToolCall().Name, expected.toolName)
 					}
-					if normalizeJSON(got.ToolCall.Args) != expected.toolArgsJSON {
-						t.Fatalf("token %d unexpected tool call arguments: got=%s want=%s", i, string(got.ToolCall.Args), expected.toolArgsJSON)
+					if normalizeJSON(got.ToolCall().Args) != expected.toolArgsJSON {
+						t.Fatalf("token %d unexpected tool call arguments: got=%s want=%s", i, string(got.ToolCall().Args), expected.toolArgsJSON)
 					}
 				}
 			}
@@ -385,11 +384,11 @@ func TestDetectToolCallsInStream(t *testing.T) {
 func normalizeTokens(tokens []ai.Token) []ai.Token {
 	var out []ai.Token
 	for _, tok := range tokens {
-		if tok.Type == ai.TokenTypeText && len(out) > 0 && out[len(out)-1].Type == ai.TokenTypeText {
-			out[len(out)-1].Data = append(out[len(out)-1].Data, tok.Data...)
+		if tok.Type() == ai.TokenTypeText && len(out) > 0 && out[len(out)-1].Type() == ai.TokenTypeText {
+			out[len(out)-1].Part.Text += tok.Text()
 			continue
 		}
-		out = append(out, tok)
+		out = append(out, tok.Clone())
 	}
 	return out
 }
@@ -430,19 +429,19 @@ func normalizeJSON(v []byte) string {
 
 func TestAIResponseCanonicalDeltasPreserveOrderAndMetadata(t *testing.T) {
 	var response ai.AIResponse
-	response.AppendToken(ai.Token{Type: ai.TokenTypeThought, Text: "consider "})
-	response.AppendToken(ai.Token{Type: ai.TokenTypeThought, Text: "options"})
+	response.AppendToken(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: "consider "}})
+	response.AppendToken(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: "options"}})
 	signature := ai.ContentPart{Kind: ai.ContentReasoning, Extensions: []ai.Extension{{
 		Namespace: "anthropic", Type: "signature", Data: json.RawMessage(`"opaque-state"`), Required: true,
 	}}}
-	response.AppendToken(ai.Token{Type: ai.TokenTypePart, Part: &signature})
-	response.AppendToken(ai.Token{Type: ai.TokenTypeText, Text: "before "})
-	response.AppendToken(ai.Token{Type: ai.TokenTypeText, Data: []byte("call")})
+	response.AppendToken(ai.Token{Part: &signature})
+	response.AppendToken(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "before "}})
+	response.AppendToken(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "call"}})
 	call := canonicalCall("first")
-	response.AppendToken(ai.Token{Type: ai.TokenTypePart, Part: &call, Text: "ignored compatibility text"})
-	response.AppendToken(ai.Token{Type: ai.TokenTypeText, Text: "after"})
-	response.AppendToken(ai.Token{Type: ai.TokenTypeErr, Err: errors.New("transport failed"), Data: []byte("not conversation")})
-	response.AppendToken(ai.Token{Type: ai.TokenTypeCompletion, Data: []byte("not conversation"), Completion: &ai.Completion{FinishReason: "tool_calls"}})
+	response.AppendToken(ai.Token{Part: &call})
+	response.AppendToken(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "after"}})
+	response.AppendToken(ai.Token{Err: errors.New("transport failed")})
+	response.AppendToken(ai.Token{Completion: &ai.Completion{FinishReason: "tool_calls"}})
 
 	parts := response.Message.Parts
 	if response.Message.Role != ai.RoleAssistant || len(parts) != 4 {
@@ -454,13 +453,13 @@ func TestAIResponseCanonicalDeltasPreserveOrderAndMetadata(t *testing.T) {
 	if parts[1].Kind != ai.ContentText || parts[1].Text != "before call" || parts[2].Kind != ai.ContentToolCall || parts[2].ToolCall.ID != "first" || parts[3].Text != "after" {
 		t.Fatalf("semantic part order changed: %#v", parts)
 	}
-	if response.Text != "before callafter" || response.Reasoning != "consider options" || len(response.ToolCalls) != 1 || response.FinishReason != "tool_calls" {
-		t.Fatalf("compatibility projections disagree with canonical message: %#v", response)
+	if response.Text() != "before callafter" || response.Reasoning() != "consider options" || len(response.ToolCalls()) != 1 || response.FinishReason != "tool_calls" {
+		t.Fatalf("derived views disagree with canonical message: %#v", response)
 	}
 	// Stream producers and event observers may reuse their buffers or edit views.
 	signature.Extensions[0].Data[1] = 'X'
 	call.ToolCall.Args[6] = 'y'
-	response.ToolCalls[0].Args[6] = 'z'
+	response.ToolCalls()[0].Args[6] = 'z'
 	if string(parts[0].Extensions[0].Data) != `"opaque-state"` || string(parts[2].ToolCall.Args) != `{"q":"x"}` {
 		t.Fatal("stream input or convenience view aliases canonical message")
 	}
@@ -468,7 +467,7 @@ func TestAIResponseCanonicalDeltasPreserveOrderAndMetadata(t *testing.T) {
 
 func TestAIResponseCanonicalReasoningDeltaCountsUsage(t *testing.T) {
 	var response ai.AIResponse
-	response.AppendToken(ai.Token{Type: ai.TokenTypePart, Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: "think"}, TokenUsage: 3})
+	response.AppendToken(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: "think"}, TokenUsage: 3})
 	if response.OutputTokens != 3 || response.ReasoningTokens != 3 {
 		t.Fatalf("canonical reasoning delta usage = output %d, reasoning %d; want 3, 3", response.OutputTokens, response.ReasoningTokens)
 	}
@@ -482,9 +481,9 @@ func TestAIResponseSetMessageReplacesAndSnapshotsProjections(t *testing.T) {
 		{Kind: ai.ContentJSON, JSON: json.RawMessage(`{"ok":true}`)},
 		call,
 	}}
-	response := ai.AIResponse{Text: "stale", Reasoning: "stale", ToolCalls: []ai.ToolCall{{Name: "stale"}}, InputTokens: 12, OutputTokens: 8}
+	response := ai.AIResponse{InputTokens: 12, OutputTokens: 8, Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentReasoning, Text: "stale"}, {Kind: ai.ContentText, Text: "stale"}, {Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{Name: "stale"}}}}}
 	response.SetMessage(message)
-	if response.Text != `answer{"ok":true}` || response.Reasoning != "think" || len(response.ToolCalls) != 1 || response.ToolCalls[0].ID != "first" {
+	if response.Text() != `answer{"ok":true}` || response.Reasoning() != "think" || len(response.ToolCalls()) != 1 || response.ToolCalls()[0].ID != "first" {
 		t.Fatalf("SetMessage projections = %#v", response)
 	}
 	if response.InputTokens != 12 || response.OutputTokens != 8 {
@@ -493,7 +492,7 @@ func TestAIResponseSetMessageReplacesAndSnapshotsProjections(t *testing.T) {
 	message.Parts[0].Text = "changed"
 	message.Parts[2].JSON[2] = 'X'
 	message.Parts[3].ToolCall.Args[6] = 'y'
-	response.ToolCalls[0].Args[6] = 'z'
+	response.ToolCalls()[0].Args[6] = 'z'
 	if response.Message.Reasoning() != "think" || response.Message.Text() != `answer{"ok":true}` || string(response.Message.Parts[3].ToolCall.Args) != `{"q":"x"}` {
 		t.Fatal("SetMessage did not isolate canonical message from source or convenience view")
 	}
@@ -502,41 +501,111 @@ func TestAIResponseSetMessageReplacesAndSnapshotsProjections(t *testing.T) {
 func TestDetectToolCallsPreservesAuthoritativeCanonicalPart(t *testing.T) {
 	part := ai.ContentPart{Kind: ai.ContentText, Text: "canonical output", Extensions: []ai.Extension{{Namespace: "provider", Type: "continuity", Data: json.RawMessage(`"opaque"`)}}}
 	in := make(chan ai.Token, 1)
-	in <- ai.Token{Type: ai.TokenTypeText, Part: &part, Text: "stale view", Data: []byte(`{"type":"function","name":"unintended","arguments":{}}`)}
+	in <- ai.Token{Part: &part}
 	close(in)
 	out := collectTokens(ai.DetectToolCallsInStream(t.Context(), in, nil))
-	if len(out) != 1 || out[0].Part == nil || out[0].Part.Text != "canonical output" || len(out[0].Part.Extensions) != 1 || out[0].ToolCall != nil {
-		t.Fatalf("canonical part was discarded or parsed as a legacy tool call: %#v", out)
+	if len(out) != 1 || out[0].Part == nil || out[0].Part.Text != "canonical output" || len(out[0].Part.Extensions) != 1 || out[0].ToolCall() != nil {
+		t.Fatalf("canonical part was discarded or parsed as a tool call: %#v", out)
 	}
 }
 
-func TestTokenCloneIsolatesSemanticAndCompletionPayloads(t *testing.T) {
+func TestTokenCloneIsolatesPayloads(t *testing.T) {
 	part := canonicalCall("first")
 	part.ToolCall.Extensions = []ai.Extension{{Namespace: "provider", Type: "state", Data: json.RawMessage(`"opaque"`)}}
-	token := ai.Token{Type: ai.TokenTypePart, Data: []byte("raw"), Part: &part, ToolCall: part.ToolCall, Completion: &ai.Completion{Raw: json.RawMessage(`{"id":1}`), Usage: ai.Usage{InputTokens: 12}}}
+	token := ai.Token{Part: &part}
 	copy := token.Clone()
-	copy.Data[0] = 'X'
 	copy.Part.ToolCall.ID = "changed"
 	copy.Part.ToolCall.Args[6] = 'y'
 	copy.Part.ToolCall.Extensions[0].Data[1] = 'X'
-	copy.ToolCall.Name = "changed"
-	copy.ToolCall.Args[6] = 'z'
+	view := token.ToolCall()
+	view.Name = "changed"
+	view.Args[6] = 'z'
+	if token.Part.ToolCall.ID != "first" || token.ToolCall().Name != "search" || string(token.Part.ToolCall.Args) != `{"q":"x"}` || string(token.Part.ToolCall.Extensions[0].Data) != `"opaque"` {
+		t.Fatal("cloned call or derived view aliases source")
+	}
+	completion := ai.Token{Completion: &ai.Completion{Raw: json.RawMessage(`{"id":1}`), Usage: ai.Usage{InputTokens: 12}}}
+	copy = completion.Clone()
 	copy.Completion.Raw[6] = '9'
 	copy.Completion.Usage.InputTokens = 99
-	if string(token.Data) != "raw" || token.Part.ToolCall.ID != "first" || token.ToolCall.Name != "search" || string(token.ToolCall.Args) != `{"q":"x"}` || string(token.Part.ToolCall.Extensions[0].Data) != `"opaque"` || string(token.Completion.Raw) != `{"id":1}` || token.Completion.Usage.InputTokens != 12 {
-		t.Fatalf("cloned token aliases source payloads: %#v", token)
+	if string(completion.Completion.Raw) != `{"id":1}` || completion.Completion.Usage.InputTokens != 12 {
+		t.Fatal("cloned completion aliases source")
 	}
 }
 
-func TestDetectToolCallsUsesCanonicalTextForCompatibilityProtocol(t *testing.T) {
+func TestTokenRequiresExactlyOnePayload(t *testing.T) {
+	text := &ai.ContentPart{Kind: ai.ContentText, Text: ""}
+	for _, event := range []ai.Token{{}, {Part: text, Err: errors.New("failed")}, {Part: text, Completion: &ai.Completion{}}, {Err: errors.New("failed"), Completion: &ai.Completion{}}, {Part: &ai.ContentPart{Kind: "invalid"}}} {
+		if event.Validate() == nil {
+			t.Fatalf("invalid token accepted: %#v", event)
+		}
+	}
+	for _, event := range []ai.Token{{Part: text}, {Err: errors.New("failed")}, {Completion: &ai.Completion{}}} {
+		if err := event.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestDetectToolCallsUsesCanonicalTextProtocol(t *testing.T) {
 	in := make(chan ai.Token, 2)
 	for _, text := range []string{`{"type":"function","name":"echo",`, `"arguments":{"text":"canonical"}}`} {
 		part := ai.ContentPart{Kind: ai.ContentText, Text: text}
-		in <- ai.Token{Type: ai.TokenTypeText, Part: &part, Data: []byte("stale")}
+		in <- ai.Token{Part: &part}
 	}
 	close(in)
 	out := collectTokens(ai.DetectToolCallsInStream(t.Context(), in, nil))
-	if len(out) != 1 || out[0].ToolCall == nil || out[0].ToolCall.Name != "echo" || string(out[0].ToolCall.Args) != `{"text":"canonical"}` {
+	if len(out) != 1 || out[0].ToolCall() == nil || out[0].ToolCall().Name != "echo" || string(out[0].ToolCall().Args) != `{"text":"canonical"}` {
 		t.Fatalf("canonical text protocol lost: %#v", out)
+	}
+}
+
+func TestDetectToolCallsRejectsInvalidPayloadBeforeParsing(t *testing.T) {
+	text := &ai.ContentPart{Kind: ai.ContentText, Text: `{"type":"function","name":"echo","arguments":{}}`}
+	for _, token := range []ai.Token{{Part: text, Err: errors.New("transport")}, {Part: text, Completion: &ai.Completion{}}, {Part: &ai.ContentPart{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call", Name: "echo", Parts: ai.TextParts("result")}}}} {
+		in := make(chan ai.Token, 1)
+		in <- token
+		close(in)
+		output := collectTokens(ai.DetectToolCallsInStream(t.Context(), in, nil))
+		if len(output) != 1 || output[0].Err == nil || output[0].Part != nil {
+			t.Fatalf("malformed model event transformed instead of rejected: %#v", output)
+		}
+	}
+}
+
+func TestDetectToolCallsPreservesTextAndUsageAcrossReplacements(t *testing.T) {
+	cases := []struct {
+		name    string
+		texts   []string
+		usage   []int
+		visible string
+		calls   int
+	}{
+		{"plain text and empty delta", []string{"hello", "", " world"}, []int{2, 3, 4}, "hello world", 0},
+		{"split call and trailing text", []string{`{"type":"function","name":"echo",`, `"arguments":{}}tail`}, []int{2, 3}, "tail", 1},
+		{"prose then call", []string{"before\n\n" + `{"type":"function","name":"echo","arguments":{}}tail`}, []int{7}, "before\n\ntail", 1},
+		{"whitespace then call", []string{"\n\n", `{"type":"function","name":"echo","arguments":{}}tail`}, []int{2, 5}, "tail", 1},
+		{"rejected JSON with suffix", []string{`{"kind":1}tail`}, []int{6}, `{"kind":1}tail`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := make(chan ai.Token, len(tc.texts))
+			wantUsage := 0
+			for i, text := range tc.texts {
+				in <- ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: text}, TokenUsage: tc.usage[i]}
+				wantUsage += tc.usage[i]
+			}
+			close(in)
+			out := collectTokens(ai.DetectToolCallsInStream(t.Context(), in, nil))
+			var response ai.AIResponse
+			for _, token := range out {
+				if err := token.Validate(); err != nil {
+					t.Fatal(err)
+				}
+				response.AppendToken(token)
+			}
+			if response.Text() != tc.visible || len(response.ToolCalls()) != tc.calls || response.OutputTokens != wantUsage {
+				t.Fatalf("output text=%q calls=%d usage=%d; want %q, %d, %d", response.Text(), len(response.ToolCalls()), response.OutputTokens, tc.visible, tc.calls, wantUsage)
+			}
+		})
 	}
 }

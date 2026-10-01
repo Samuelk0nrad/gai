@@ -16,7 +16,7 @@ import (
 func workflowAgent(name, response string, middleware ...agent.Middleware) *agent.Agent {
 	return agent.New(agent.Definition{
 		Name:  name,
-		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Text: response}}}},
+		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: response}}}}}}},
 		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
 			return &testPromptBuilder{}, nil
 		},
@@ -59,9 +59,9 @@ func consumeWorkflowContext(t *testing.T, workflow *agent.Workflow, ctx context.
 			}
 			switch event.Output.Kind {
 			case agent.OutputText:
-				consumed.tokens = append(consumed.tokens, ai.Token{Type: ai.TokenTypeText, Text: event.Output.Text})
+				consumed.tokens = append(consumed.tokens, ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.Output.Text}})
 			case agent.OutputReasoning:
-				consumed.tokens = append(consumed.tokens, ai.Token{Type: ai.TokenTypeThought, Text: event.Output.Text})
+				consumed.tokens = append(consumed.tokens, ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: event.Output.Text}})
 			}
 		case agent.EventRetry, agent.EventDiscard, agent.EventIterationDone:
 			status := consumedStatus{IterationCount: event.IterationCount, AttemptID: event.AttemptID, RetryCount: event.RetryCount, PartCount: event.PartCount, Retrying: event.Type == agent.EventRetry, DiscardIteration: event.Type == agent.EventRetry || event.Type == agent.EventDiscard}
@@ -91,14 +91,10 @@ func consumeWorkflowContext(t *testing.T, workflow *agent.Workflow, ctx context.
 func tokensText(tokens []ai.Token) string {
 	var text string
 	for _, token := range tokens {
-		if token.Type != ai.TokenTypeText {
+		if token.Type() != ai.TokenTypeText {
 			continue
 		}
-		if token.Text != "" {
-			text += token.Text
-		} else {
-			text += string(token.Data)
-		}
+		text += token.Text()
 	}
 	return text
 }
@@ -125,7 +121,7 @@ func TestAgentMiddlewareOutputPolicies(t *testing.T) {
 			var postInput agent.RunInput
 			post := agent.New(agent.Definition{
 				Name:  "post",
-				Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Text: "post"}}}},
+				Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "post"}}}}}}},
 				Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
 					postInput = input
 					return &testPromptBuilder{}, nil
@@ -174,7 +170,7 @@ func TestAgentMiddlewareMapsWorkflowResult(t *testing.T) {
 	var postInput agent.RunInput
 	post := agent.New(agent.Definition{
 		Name:  "post",
-		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Text: "post"}}}},
+		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "post"}}}}}}},
 		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
 			postInput = input
 			return &testPromptBuilder{}, nil
@@ -204,7 +200,7 @@ func TestWorkflowResultSeparatesReasoningFromVisibleText(t *testing.T) {
 	main := agent.New(agent.Definition{
 		Name: "main",
 		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{
-			Res: ai.AIResponse{Text: "answer", Reasoning: "thinking", ReasoningTokens: 4},
+			Res: ai.AIResponse{ReasoningTokens: 4, Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentReasoning, Text: "thinking"}, {Kind: ai.ContentText, Text: "answer"}}}},
 		}}},
 		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
 			return &testPromptBuilder{}, nil
@@ -239,7 +235,7 @@ func TestAgentMiddlewareReceivesReasoningInMappedResult(t *testing.T) {
 	var mappedResult agent.WorkflowResult
 	post := agent.New(agent.Definition{
 		Name:  "post",
-		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Text: "post"}}}},
+		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "post"}}}}}}},
 		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
 			return &testPromptBuilder{}, nil
 		},
@@ -247,7 +243,7 @@ func TestAgentMiddlewareReceivesReasoningInMappedResult(t *testing.T) {
 	main := agent.New(agent.Definition{
 		Name: "main",
 		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{
-			Res: ai.AIResponse{Text: "answer", Reasoning: "thinking", ReasoningTokens: 4},
+			Res: ai.AIResponse{ReasoningTokens: 4, Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentReasoning, Text: "thinking"}, {Kind: ai.ContentText, Text: "answer"}}}},
 		}}},
 		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
 			return &testPromptBuilder{}, nil
@@ -283,7 +279,7 @@ func TestAgentMiddlewareRunsInOrderWithPriorStageResults(t *testing.T) {
 	secondPriorText := ""
 	first := agent.New(agent.Definition{
 		Name:  "first",
-		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Text: "memory"}}}},
+		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "memory"}}}}}}},
 		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
 			order = append(order, "first")
 			return &testPromptBuilder{}, nil
@@ -291,7 +287,7 @@ func TestAgentMiddlewareRunsInOrderWithPriorStageResults(t *testing.T) {
 	})
 	second := agent.New(agent.Definition{
 		Name:  "second",
-		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Text: "audit"}}}},
+		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "audit"}}}}}}},
 		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
 			order = append(order, "second")
 			return &testPromptBuilder{}, nil
@@ -440,7 +436,7 @@ func TestAgentMiddlewareRunPolicy(t *testing.T) {
 	postCalled := false
 	post := agent.New(agent.Definition{
 		Name:  "failure-audit",
-		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Text: "audited"}}}},
+		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "audited"}}}}}}},
 		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
 			postCalled = true
 			return &testPromptBuilder{}, nil

@@ -73,10 +73,6 @@ func (i Iteration) Clone() Iteration {
 			r := *p.Response
 			r.Message = r.Message.Clone()
 			r.Raw = append([]byte(nil), r.Raw...)
-			r.ToolCalls = append([]ai.ToolCall(nil), r.ToolCalls...)
-			for j := range r.ToolCalls {
-				r.ToolCalls[j] = r.ToolCalls[j].Clone()
-			}
 			p.Response = &r
 		}
 		if p.ToolReq != nil {
@@ -101,7 +97,7 @@ func (i Iteration) Clone() Iteration {
 
 func (i *Iteration) appendConversationToken(t ai.Token) {
 	// Accumulate before tools execute; assistant part order comes from the stream.
-	if t.Part == nil && t.Type != ai.TokenTypeText && t.Type != ai.TokenTypeThought && t.Type != ai.TokenTypeToolCall {
+	if t.Part == nil {
 		return
 	}
 	n := len(i.Conversation)
@@ -129,7 +125,7 @@ func (i *Iteration) AppendToken(t ai.Token) {
 		last = &i.Parts[len(i.Parts)-1]
 	}
 
-	switch t.Type {
+	switch t.Type() {
 	case ai.TokenTypeCompletion:
 		if t.Completion == nil {
 			return
@@ -168,16 +164,9 @@ func (i *Iteration) AppendToken(t ai.Token) {
 	case ai.TokenTypeToolCall:
 		i.Parts = append(i.Parts, IterationPart{
 			Type:    IterationTypeToolCall,
-			ToolReq: cloneCall(t.ToolCall),
+			ToolReq: t.ToolCall(),
 		})
 	}
 }
 
 func responseFromToken(t ai.Token) *ai.AIResponse { r := &ai.AIResponse{}; r.AppendToken(t); return r }
-func cloneCall(c *ai.ToolCall) *ai.ToolCall {
-	if c == nil {
-		return nil
-	}
-	v := c.Clone()
-	return &v
-}

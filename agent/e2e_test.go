@@ -48,7 +48,7 @@ func (m *scriptedWorkflowModel) GenerateStream(ctx context.Context, req ai.AIReq
 			case out <- token:
 			case <-ctx.Done():
 				select {
-				case out <- ai.Token{Type: ai.TokenTypeErr, Err: ctx.Err()}:
+				case out <- ai.Token{Err: ctx.Err()}:
 				default:
 				}
 				return
@@ -76,18 +76,16 @@ func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 	model := &scriptedWorkflowModel{
 		scripts: [][]ai.Token{
 			{
-				{Type: ai.TokenTypeThought, Text: "checking tool"},
-				{
-					Type: ai.TokenTypeToolCall,
-					ToolCall: &ai.ToolCall{
-						ID:   "call_1",
-						Type: "function",
-						Name: "echo",
-						Args: []byte(`{"text":"tool says hi"}`),
-					},
+				{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: "checking tool"}},
+				{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{
+					ID:   "call_1",
+					Type: "function",
+					Name: "echo",
+					Args: []byte(`{"text":"tool says hi"}`),
+				}},
 				},
 			},
-			{{Type: ai.TokenTypeText, Text: "final answer"}},
+			{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "final answer"}}},
 		},
 	}
 	assistant := agent.New(agent.Definition{
@@ -153,7 +151,7 @@ func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 	}
 	var attemptedToolCall bool
 	for _, token := range result.AttemptedTokens {
-		if token.Type == ai.TokenTypeToolCall && token.ToolCall != nil && token.ToolCall.Name == "echo" {
+		if token.Type() == ai.TokenTypeToolCall && token.ToolCall() != nil && token.ToolCall().Name == "echo" {
 			attemptedToolCall = true
 			break
 		}
@@ -194,8 +192,8 @@ func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 	if requests[0].MaxTokens != 64 || len(requests[0].Tools) != 0 {
 		t.Fatalf("first request did not preserve limits or text tool transport: %+v", requests[0])
 	}
-	if !strings.Contains(html.UnescapeString(requests[0].Prompt), `{"type":"function","name":"<tool-name>","arguments":{...}}`) {
-		t.Fatalf("first request did not include the text tool protocol:\n%s", requests[0].Prompt)
+	if !strings.Contains(html.UnescapeString(requestText(requests[0])), `{"type":"function","name":"<tool-name>","arguments":{...}}`) {
+		t.Fatalf("first request did not include the text tool protocol:\n%s", requestText(requests[0]))
 	}
 	for index, request := range requests {
 		if request.ResponseFormat.Type != ai.ResponseFormatJSONSchema || request.ResponseFormat.Name != "answer" || string(request.ResponseFormat.Schema) != expectedSchema {
@@ -205,8 +203,8 @@ func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 			t.Fatalf("request %d sent provider-native tools during text transport: %+v", index, request.Tools)
 		}
 	}
-	if !strings.Contains(html.UnescapeString(requests[1].Prompt), "tool says hi") {
-		t.Fatalf("second prompt did not include tool result:\n%s", requests[1].Prompt)
+	if !strings.Contains(html.UnescapeString(requestText(requests[1])), "tool says hi") {
+		t.Fatalf("second prompt did not include tool result:\n%s", requestText(requests[1]))
 	}
 }
 
@@ -215,7 +213,7 @@ func TestAgentWorkflowMarksTerminalFailedAttemptDiscardable(t *testing.T) {
 	model := &scriptedWorkflowModel{
 		scripts: [][]ai.Token{
 			{
-				{Type: ai.TokenTypeText, Text: "partial"},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "partial"}},
 				{Err: fatalErr},
 			},
 		},
@@ -257,7 +255,7 @@ func TestAgentWorkflowMarksTerminalFailedAttemptDiscardable(t *testing.T) {
 	if status.IterationCount != 1 || status.AttemptID != 1 || status.PartCount != 1 {
 		t.Fatalf("expected failed attempt metadata, got %#v", status)
 	}
-	if got := status.Iteration.Parts[0].Response.Text; got != "partial" {
+	if got := status.Iteration.Parts[0].Response.Text(); got != "partial" {
 		t.Fatalf("expected discard status to carry partial attempt text, got %q", got)
 	}
 }
@@ -266,15 +264,15 @@ func TestAgentWorkflowStreamsRetriedAttemptTokens(t *testing.T) {
 	model := &scriptedWorkflowModel{
 		scripts: [][]ai.Token{
 			{
-				{Type: ai.TokenTypeText, Text: "partial"},
-				{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
-				{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 4, OutputTokens: 3}}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "partial"}},
+				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
+				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 4, OutputTokens: 3}}},
 				{Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("retriable stream error")}},
 			},
 			{
-				{Type: ai.TokenTypeText, Text: "final"},
-				{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 5, OutputTokens: 4}}},
-				{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 6, OutputTokens: 5}}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "final"}},
+				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 5, OutputTokens: 4}}},
+				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 6, OutputTokens: 5}}},
 			},
 		},
 	}
@@ -327,16 +325,16 @@ func TestAgentWorkflowBillsRejectedRequiredToolAttemptWithoutExposingIt(t *testi
 	model := &scriptedWorkflowModel{
 		scripts: [][]ai.Token{
 			{
-				{Type: ai.TokenTypeText, Text: "rejected response"},
-				{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "rejected response"}},
+				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
 			},
 			{
-				{Type: ai.TokenTypeToolCall, ToolCall: &ai.ToolCall{ID: "call-1", Type: "function", Name: "echo", Args: []byte(`{"text":"payload"}`)}},
-				{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 5, OutputTokens: 4}}},
+				{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-1", Type: "function", Name: "echo", Args: []byte(`{"text":"payload"}`)}}},
+				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 5, OutputTokens: 4}}},
 			},
 			{
-				{Type: ai.TokenTypeText, Text: "final answer"},
-				{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 7, OutputTokens: 6}}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "final answer"}},
+				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 7, OutputTokens: 6}}},
 			},
 		},
 	}
@@ -387,16 +385,16 @@ func TestAgentWorkflowRunEventsBillsRejectedRequiredToolAttempt(t *testing.T) {
 	model := &scriptedWorkflowModel{
 		scripts: [][]ai.Token{
 			{
-				{Type: ai.TokenTypeText, Text: "rejected response"},
-				{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "rejected response"}},
+				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
 			},
 			{
-				{Type: ai.TokenTypeToolCall, ToolCall: &ai.ToolCall{ID: "call-1", Type: "function", Name: "echo", Args: []byte(`{"text":"payload"}`)}},
-				{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 5, OutputTokens: 4}}},
+				{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-1", Type: "function", Name: "echo", Args: []byte(`{"text":"payload"}`)}}},
+				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 5, OutputTokens: 4}}},
 			},
 			{
-				{Type: ai.TokenTypeText, Text: "final answer"},
-				{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 7, OutputTokens: 6}}},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "final answer"}},
+				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 7, OutputTokens: 6}}},
 			},
 		},
 	}
@@ -439,8 +437,8 @@ func TestAgentWorkflowRunEventsBillsRejectedRequiredToolAttempt(t *testing.T) {
 func TestAgentWorkflowRunEventsBillsTerminalErrorAttempt(t *testing.T) {
 	model := &scriptedWorkflowModel{
 		scripts: [][]ai.Token{{
-			{Type: ai.TokenTypeText, Text: "partial response"},
-			{Type: ai.TokenTypeCompletion, Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
+			{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "partial response"}},
+			{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
 			{Err: errors.New("terminal stream error")},
 		}},
 	}
@@ -509,14 +507,14 @@ func TestAgentWorkflowReportsCancellationWithoutError(t *testing.T) {
 func TestAgentWorkflowEndToEndWithAppendMiddleware(t *testing.T) {
 	main := agent.New(agent.Definition{
 		Name:  "main",
-		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Text: "answer"}}}},
+		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "answer"}}}}}}},
 		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
 			return gaictx.New(gaictx.Definition{Renderer: &gaictx.SimpleRenderer{}}), nil
 		},
 		Middleware: []agent.Middleware{
 			agent.NewAgentMiddleware(agent.New(agent.Definition{
 				Name:  "audit",
-				Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Text: " audited"}}}},
+				Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: " audited"}}}}}}},
 				Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
 					return gaictx.New(gaictx.Definition{Renderer: &gaictx.SimpleRenderer{}}), nil
 				},
@@ -552,10 +550,10 @@ func TestAgentWorkflowRunEventsPreservesRetryOrdering(t *testing.T) {
 	model := &scriptedWorkflowModel{
 		scripts: [][]ai.Token{
 			{
-				{Type: ai.TokenTypeText, Text: "partial"},
+				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "partial"}},
 				{Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("retriable stream error")}},
 			},
-			{{Type: ai.TokenTypeText, Text: "final"}},
+			{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "final"}}},
 		},
 	}
 	assistant := agent.New(agent.Definition{

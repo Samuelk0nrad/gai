@@ -288,7 +288,7 @@ func (e *UnsupportedContentError) Error() string {
 }
 func (e *UnsupportedContentError) Unwrap() error { return ErrUnsupportedCapability }
 
-// RenderMessages is the text compatibility transport for canonical messages.
+// RenderMessages is the explicit text renderer for canonical messages.
 // It preserves roles, order and tool identity. Opaque state and media produce
 // explicit errors instead of being silently dropped or exposed as prompt text.
 func RenderMessages(ctx context.Context, messages []Message) (string, error) {
@@ -332,7 +332,7 @@ func renderContentPart(out *bytes.Buffer, p ContentPart, esc func(string)) error
 		out.WriteString("</json>")
 	case ContentToolCall:
 		c := p.ToolCall
-		if len(c.Extensions) > 0 || len(c.ThoughtSignature) > 0 {
+		if len(c.Extensions) > 0 {
 			return &UnsupportedContentError{Provider: "text", Kind: ContentExtension, Detail: "tool continuity state"}
 		}
 		out.WriteString("<tool_call id=\"")

@@ -110,7 +110,6 @@ func TestMessageValidateRoleConstraints(t *testing.T) {
 func TestCanonicalMessagesRoundTripUnknownStateAndOrderedContent(t *testing.T) {
 	unknown := ai.Extension{Namespace: "future.provider", Type: "unrecognized", Data: json.RawMessage(`{"binary":"AP8B","nested":[1,true]}`), Required: true}
 	call := canonicalCall("first")
-	call.ToolCall.ThoughtSignature = []byte{0, 255, 1}
 	call.ToolCall.Extensions = []ai.Extension{unknown}
 	messages := []ai.Message{
 		{Role: ai.RoleAssistant, Extensions: []ai.Extension{unknown}, Parts: []ai.ContentPart{
@@ -170,8 +169,6 @@ func TestRenderMessagesRejectsOpaqueAndMediaContent(t *testing.T) {
 	ext := ai.Extension{Namespace: "future", Type: "secret", Data: json.RawMessage(`"opaque-state"`)}
 	call := canonicalCall("first")
 	call.ToolCall.Extensions = []ai.Extension{ext}
-	signed := canonicalCall("signed")
-	signed.ToolCall.ThoughtSignature = []byte("opaque-state")
 	for _, tt := range []struct {
 		name    string
 		message ai.Message
@@ -180,7 +177,6 @@ func TestRenderMessagesRejectsOpaqueAndMediaContent(t *testing.T) {
 		{"part extension", ai.Message{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "visible", Extensions: []ai.Extension{ext}}}}},
 		{"standalone extension", ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentExtension, Extensions: []ai.Extension{ext}}}}},
 		{"call extension", ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{call}}},
-		{"legacy signature", ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{signed}}},
 		{"media", ai.Message{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: "image/png", Data: []byte{1}}}}}},
 		{"nested media", ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "first", Name: "search", Parts: []ai.ContentPart{{Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: "image/png", URI: "https://example.test/image"}}}}}}}},
 	} {

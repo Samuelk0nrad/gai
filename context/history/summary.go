@@ -35,16 +35,12 @@ func (s Summary) MarshalJSON() ([]byte, error) {
 	return json.Marshal(summaryValue(s))
 }
 
-// UnmarshalJSON upgrades legacy {"Text": ...} summary payloads to canonical
-// text parts while rejecting structured content that a summary cannot retain.
+// UnmarshalJSON requires a valid canonical text part for summary content.
 func (s *Summary) UnmarshalJSON(data []byte) error {
 	type summaryValue Summary
 	var decoded summaryValue
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
-	}
-	if decoded.Content.Kind == "" {
-		decoded.Content.Kind = ai.ContentText
 	}
 	if decoded.Content.Kind != ai.ContentText {
 		return fmt.Errorf("summary requires a text content part")

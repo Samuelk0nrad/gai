@@ -67,12 +67,8 @@ func (w *Workflow) setVisibleOutputLocked(output []OutputPart) {
 func outputPartsFromTokens(tokens []ai.Token) []OutputPart {
 	var output []OutputPart
 	for _, token := range tokens {
-		token = token.Normalized()
-		text := token.Text
-		if text == "" {
-			text = string(token.Data)
-		}
-		switch token.Type {
+		text := token.Text()
+		switch token.Type() {
 		case ai.TokenTypeText:
 			output = append(output, OutputPart{Kind: OutputText, Text: text})
 		case ai.TokenTypeThought:
@@ -87,9 +83,9 @@ func outputPartsToTokens(output []OutputPart) []ai.Token {
 	for _, part := range output {
 		switch part.Kind {
 		case OutputText:
-			tokens = append(tokens, ai.Token{Type: ai.TokenTypeText, Text: part.Text})
+			tokens = append(tokens, ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: part.Text}})
 		case OutputReasoning:
-			tokens = append(tokens, ai.Token{Type: ai.TokenTypeThought, Text: part.Text})
+			tokens = append(tokens, ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: part.Text}})
 		}
 	}
 	return tokens
@@ -131,7 +127,7 @@ func iterationTokens(iterations []loop.Iteration) []ai.Token {
 				continue
 			}
 			for _, part := range message.Parts {
-				tokens = append(tokens, (ai.Token{Part: &part}).Normalized())
+				tokens = append(tokens, (ai.Token{Part: &part}).Clone())
 			}
 		}
 	}

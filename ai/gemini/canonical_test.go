@@ -24,7 +24,7 @@ func TestCanonicalGeminiRoundTripPreservesOrderSignaturesAndRepeatedNames(t *tes
 	if err := json.Unmarshal(raw, &restored); err != nil {
 		t.Fatal(err)
 	}
-	req := ai.AIRequest{Prompt: "obsolete", Messages: []ai.Message{ai.TextMessage(ai.RoleSystem, "rules"), restored,
+	req := ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleSystem, "rules"), restored,
 		{Role: ai.RoleTool, Parts: []ai.ContentPart{
 			{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "one", Name: "lookup", Parts: ai.TextParts("first")}},
 			{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "two", Name: "lookup", Parts: ai.TextParts("second"), IsError: true}},

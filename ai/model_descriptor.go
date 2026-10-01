@@ -42,7 +42,7 @@ type ModelDescriptor struct {
 	Provider string
 	Model    string
 	// NativeMessages reports native role/part transport support. Canonical
-	// AIRequest.Messages may also be lowered to a rendered compatibility prompt.
+	// AIRequest.Messages may also be lowered with the explicit RenderMessages helper.
 	NativeMessages FeatureSupport
 	// NativeTools reports support for AIRequest.Tools and tool-call responses.
 	NativeTools FeatureSupport
@@ -62,8 +62,8 @@ type ModelDescriptor struct {
 	JSONSchemaOutput FeatureSupport
 	Reasoning        FeatureSupport
 	// ReasoningEfforts enumerates supported values. An empty list means the
-	// supported values are not known. ReasoningEffort remains the compatibility
-	// summary for callers that only need a yes/no/unknown answer.
+	// supported values are not known. ReasoningEffort reports whether effort
+	// selection is available.
 	ReasoningEfforts []ReasoningEffort
 	ReasoningEffort  FeatureSupport
 	Tokenizer        TokenizerDescriptor
@@ -71,7 +71,7 @@ type ModelDescriptor struct {
 
 // SupportsNativeTools reports whether native tool calling is known to be
 // supported. Unknown capability is intentionally treated as unsupported so
-// callers can retain the text-based tool protocol as a compatibility fallback.
+// callers use the text tool protocol when native support is unavailable.
 func (d ModelDescriptor) SupportsNativeTools() bool {
 	return d.NativeTools == FeatureSupportSupported
 }
@@ -84,9 +84,7 @@ func (d ModelDescriptor) Copy() ModelDescriptor {
 	return d
 }
 
-// ModelDescriber is an optional extension to Model. Model intentionally does
-// not include Descriptor so existing custom Model implementations keep source
-// compatibility.
+// ModelDescriber supplies optional model capability information.
 type ModelDescriber interface {
 	Descriptor() ModelDescriptor
 }

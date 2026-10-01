@@ -78,9 +78,6 @@ func StartGenerationObservation(ctx context.Context, req AIRequest, config Gener
 // generationPromptLength counts selected system/user text without retaining
 // opaque provider state or tool payloads in observations.
 func generationPromptLength(req AIRequest) int {
-	if len(req.Messages) == 0 {
-		return len(req.Prompt)
-	}
 	length := 0
 	for _, message := range req.Messages {
 		if message.Role == RoleSystem || message.Role == RoleUser {
@@ -122,10 +119,9 @@ func (o *GenerationObservation) ObserveToken(token Token) {
 	if o == nil {
 		return
 	}
-	token = token.Normalized()
-	switch token.Type {
+	switch token.Type() {
 	case TokenTypeText, TokenTypeThought:
-		if token.Text != "" || len(token.Data) != 0 {
+		if token.Text() != "" {
 			o.FirstOutput()
 		}
 	case TokenTypeToolCall:

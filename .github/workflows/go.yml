@@ -101,34 +101,35 @@ jobs:
       - name: Scan dependencies for vulnerabilities
         run: govulncheck ./...
 
-  api-compatibility:
-    name: Public API compatibility
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    env:
-      APIDIFF_VERSION: v0.0.0-20260727155853-b88d891fe743
-      MODULE: github.com/lace-ai/gai
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Install apidiff
-        run: go install golang.org/x/exp/cmd/apidiff@${APIDIFF_VERSION}
-      - name: Compare against the latest release
-        shell: bash
-        run: |
-          set -euo pipefail
-          baseline=$(git tag --list 'v*' --sort=-version:refname | head -n1)
-          test -n "$baseline"
-          git worktree add --detach ../gai-api-baseline "$baseline"
-          trap 'git worktree remove --force ../gai-api-baseline' EXIT
-          (
-            cd ../gai-api-baseline
-            apidiff -m -w ../gai-api-baseline.json "$MODULE"
-          )
-          apidiff -m ../gai-api-baseline.json "$MODULE"
+  # Re-enable API compatibility checks once the v1 API is stable.
+  # api-compatibility:
+  #   name: Public API compatibility
+  #   if: github.event_name == 'pull_request'
+  #   runs-on: ubuntu-latest
+  #   env:
+  #     APIDIFF_VERSION: v0.0.0-20260727155853-b88d891fe743
+  #     MODULE: github.com/lace-ai/gai
+  #   steps:
+  #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  #       with:
+  #         fetch-depth: 0
+  #         persist-credentials: false
+  #     - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+  #       with:
+  #         go-version-file: go.mod
+  #         cache: true
+  #     - name: Install apidiff
+  #       run: go install golang.org/x/exp/cmd/apidiff@${APIDIFF_VERSION}
+  #     - name: Compare against the latest release
+  #       shell: bash
+  #       run: |
+  #         set -euo pipefail
+  #         baseline=$(git tag --list 'v*' --sort=-version:refname | head -n1)
+  #         test -n "$baseline"
+  #         git worktree add --detach ../gai-api-baseline "$baseline"
+  #         trap 'git worktree remove --force ../gai-api-baseline' EXIT
+  #         (
+  #           cd ../gai-api-baseline
+  #           apidiff -m -w ../gai-api-baseline.json "$MODULE"
+  #         )
+  #         apidiff -m ../gai-api-baseline.json "$MODULE"

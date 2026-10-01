@@ -46,9 +46,9 @@ func assertGeminiRequestObservationWithoutContentCapture(t *testing.T, streaming
 		t.Fatal(err)
 	}
 	if streaming {
-		for range model.GenerateStream(t.Context(), ai.AIRequest{Prompt: "secret prompt"}) {
+		for range model.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "secret prompt")}}) {
 		}
-	} else if _, err := any(model).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Prompt: "secret prompt"}); err == nil {
+	} else if _, err := any(model).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "secret prompt")}}); err == nil {
 		t.Fatal("Generate error = nil, want API error")
 	}
 

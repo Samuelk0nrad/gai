@@ -10,41 +10,9 @@ import (
 	gaictx "github.com/lace-ai/gai/context"
 )
 
-func TestWorkflowCanonicalEmptyTextCannotLeakStaleLegacyData(t *testing.T) {
-	model := &scriptedWorkflowModel{scripts: [][]ai.Token{{
-		{Type: ai.TokenTypeText, Part: &ai.ContentPart{Kind: ai.ContentText, Text: ""}, Text: "stale visible text", Data: []byte("stale secret data")},
-		{Type: ai.TokenTypeText, Text: "accepted"},
-	}}}
-	assistant := agent.New(agent.Definition{
-		Model:  model,
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return &testPromptBuilder{}, nil },
-		Limits: agent.Limits{MaxLoopIterations: 1},
-	})
-	workflow, err := assistant.NewRun(t.Context(), textRunInput("question"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var visible string
-	for event := range workflow.RunEvents(t.Context()) {
-		if event.Output != nil && event.Output.Kind == agent.OutputText {
-			visible += event.Output.Text
-		}
-	}
-	result, err := workflow.Wait()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if visible != "accepted" || result.Text != "accepted" || result.Primary.Text != "accepted" || result.AttemptedText != "accepted" || result.Primary.AttemptedText != "accepted" {
-		t.Fatalf("legacy content leaked: visible=%q result=%q primary=%q attempted=%q primary-attempted=%q", visible, result.Text, result.Primary.Text, result.AttemptedText, result.Primary.AttemptedText)
-	}
-	if len(result.Primary.Messages) != 2 || result.Primary.Messages[1].Text() != "accepted" {
-		t.Fatalf("canonical stored messages = %#v", result.Primary.Messages)
-	}
-}
-
 func TestWorkflowCanonicalJSONHasConsistentLiveAndAcceptedText(t *testing.T) {
 	const raw = `{"ok":true}`
-	model := &scriptedWorkflowModel{scripts: [][]ai.Token{{{Type: ai.TokenTypePart, Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(raw)}}}}}
+	model := &scriptedWorkflowModel{scripts: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(raw)}}}}}
 	assistant := agent.New(agent.Definition{
 		Model:  model,
 		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return &testPromptBuilder{}, nil },
@@ -75,7 +43,7 @@ func assertCanonicalJSONResult(t *testing.T, result agent.AgentResult, raw strin
 		t.Fatalf("JSON text=%q attempted=%q, want %q", result.Text, result.AttemptedText, raw)
 	}
 	for _, tokens := range [][]ai.Token{result.Tokens, result.AttemptedTokens} {
-		if len(tokens) != 1 || tokens[0].Type != ai.TokenTypeText || tokens[0].Text != raw || tokens[0].Part == nil || tokens[0].Part.Kind != ai.ContentJSON || string(tokens[0].Part.JSON) != raw {
+		if len(tokens) != 1 || tokens[0].Type() != ai.TokenTypeText || tokens[0].Text() != raw || tokens[0].Part == nil || tokens[0].Part.Kind != ai.ContentJSON || string(tokens[0].Part.JSON) != raw {
 			t.Fatalf("JSON token lost canonical kind or text projection: %#v", tokens)
 		}
 	}
@@ -105,7 +73,7 @@ func TestAgentMiddlewareCanonicalJSONAppendAndReplace(t *testing.T) {
 			var postInput agent.RunInput
 			post := agent.New(agent.Definition{
 				Name:  "post",
-				Model: &scriptedWorkflowModel{scripts: [][]ai.Token{{{Type: ai.TokenTypePart, Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(postJSON)}}}}},
+				Model: &scriptedWorkflowModel{scripts: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(postJSON)}}}}},
 				Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
 					postInput = input
 					return &testPromptBuilder{}, nil
@@ -113,7 +81,7 @@ func TestAgentMiddlewareCanonicalJSONAppendAndReplace(t *testing.T) {
 			})
 			main := agent.New(agent.Definition{
 				Name:       "main",
-				Model:      &scriptedWorkflowModel{scripts: [][]ai.Token{{{Type: ai.TokenTypePart, Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(mainJSON)}}}}},
+				Model:      &scriptedWorkflowModel{scripts: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(mainJSON)}}}}},
 				Prompt:     func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return &testPromptBuilder{}, nil },
 				Middleware: []agent.Middleware{agent.NewAgentMiddleware(post, agent.AgentMiddlewareConfig{Name: "post", Output: tt.policy})},
 			})

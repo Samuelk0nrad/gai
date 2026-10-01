@@ -153,8 +153,8 @@ func TestTurnTokenizeHandlesNilMessageContent(t *testing.T) {
 	counter := &mocks.MockTokenCounter{}
 	turn := gaictx.Turn{
 		ID:          "turn-1",
-		UserMessage: &gaictx.StoredMessage{Message: ai.Message{Role: gaictx.RoleUser}},
-		Messages:    []gaictx.StoredMessage{{Message: ai.Message{Role: gaictx.RoleAssistant}}},
+		UserMessage: &gaictx.StoredMessage{Message: ai.Message{Role: ai.RoleUser}},
+		Messages:    []gaictx.StoredMessage{{Message: ai.Message{Role: ai.RoleAssistant}}},
 	}
 
 	tokens, err := turn.Tokenize(context.Background(), counter, nil)

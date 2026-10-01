@@ -219,7 +219,10 @@ func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferToken
 func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request ai.AIRequest, deferTokens bool) (bool, attemptOutcome, error) {
 	tokens := a.run.owner.Model.GenerateStream(modelCtx, request)
 	for token := range tokens {
-		token = token.Normalized()
+		token = token.Clone()
+		if err := token.Validate(); err != nil {
+			return false, a.terminateError(err), nil
+		}
 
 		if token.Err != nil {
 			retryErr := token.Err
@@ -253,16 +256,16 @@ func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request 
 			return false, a.terminateError(terminalErr), nil
 		}
 
-		if token.Type == ai.TokenTypeToolCall && a.run.owner.ToolChoice.Mode == ai.ToolChoiceNone {
+		if token.Type() == ai.TokenTypeToolCall && a.run.owner.ToolChoice.Mode == ai.ToolChoiceNone {
 			// A provider can still emit a tool-call token after tools are disabled.
 			// Do not expose or retain a disabled call.
 			continue
 		}
-		if token.Type == ai.TokenTypeToolCall && token.ToolCall != nil {
+		if call := token.ToolCall(); call != nil {
 			a.iteration.AppendToken(token)
 			a.toolCalls = append(a.toolCalls, pendingToolCall{
 				partIndex: len(a.iteration.Parts) - 1,
-				call:      token.ToolCall.Clone(),
+				call:      *call,
 			})
 		} else {
 			a.iteration.AppendToken(token)

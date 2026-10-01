@@ -9,11 +9,7 @@ import (
 	"github.com/lace-ai/gai/ai"
 )
 
-const (
-	contextTracerName       = "github.com/lace-ai/gai/context"
-	promptDebugFullLimit    = 4000
-	promptDebugPreviewLimit = 160
-)
+const contextTracerName = "github.com/lace-ai/gai/context"
 
 // ContextSource produces one prompt part using the remaining context budget.
 // Sources are evaluated in declaration order by Builder.BuildContext.
@@ -333,32 +329,6 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 	return contextParts, nil
 }
 
-// BuildPrompt renders the exact canonical request produced by BuildRequest.
-// Model adapters and fallback rendering therefore see the same selected history.
-func (b *Builder) BuildPrompt(ctx context.Context, conv Conversation) (prompt string, err error) {
-	ctx, obs := newPromptBuilderRenderObserver(ctx, b)
-	stats := promptRenderStats{SystemPartCount: len(b.SystemInstructions), ContextPartCount: len(b.ContextParts), HasUserInput: len(b.input.User) > 0}
-	defer func() { stats.PromptChars = len(prompt); obs.FinishRender(err, stats) }()
-	request, err := b.BuildRequest(ctx, conv)
-	if err != nil {
-		return "", err
-	}
-	stats.PartCount = len(request.Messages)
-	if conv != nil {
-		stats.ConversationMessageCount = len(conv.Messages())
-	}
-	renderCtx, finish := obs.StartRendererRender(ctx, stats.PartCount)
-	prompt, err = ai.RenderMessages(renderCtx, request.Messages)
-	stats.PromptChars = len(prompt)
-	finish(err, len(prompt))
-	if err != nil {
-		obs.RenderFailed(ctx, stats, err)
-		return "", err
-	}
-	obs.RenderFinished(ctx, stats, prompt)
-	return prompt, nil
-}
-
 // BuildRequest assembles a single canonical conversation. Renderers lower only
 // arbitrary context parts; structured history and user content retain their
 // roles, ordered parts, call identifiers, and opaque provider metadata.
@@ -400,7 +370,11 @@ func (b *Builder) BuildRequest(ctx context.Context, conv Conversation) (ai.AIReq
 	if err := ctx.Err(); err != nil {
 		return ai.AIRequest{}, err
 	}
-	return (ai.AIRequest{Messages: messages}).Normalized()
+	request := ai.AIRequest{Messages: messages}
+	if err := request.Validate(); err != nil {
+		return ai.AIRequest{}, err
+	}
+	return request, nil
 }
 
 func (b *Builder) Input() PromptInput {

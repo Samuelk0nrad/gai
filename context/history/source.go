@@ -33,18 +33,16 @@ func (s HistoryState) MarshalJSON() ([]byte, error) {
 	return json.Marshal(state(s))
 }
 
-// UnmarshalJSON accepts unversioned legacy states; StoredMessage migrates plain
-// text entries and rejects legacy tool payloads whose call IDs were never saved.
+// UnmarshalJSON requires the current versioned history schema.
 func (s *HistoryState) UnmarshalJSON(data []byte) error {
 	type state HistoryState
 	var decoded state
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	if decoded.SchemaVersion != 0 && decoded.SchemaVersion != HistorySchemaVersion {
+	if decoded.SchemaVersion != HistorySchemaVersion {
 		return fmt.Errorf("unsupported history schema version: %d", decoded.SchemaVersion)
 	}
-	decoded.SchemaVersion = HistorySchemaVersion
 	*s = HistoryState(decoded)
 	return nil
 }

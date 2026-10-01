@@ -20,15 +20,6 @@ type promptContextBuildStats struct {
 	TokenCounterPresent    bool
 }
 
-type promptRenderStats struct {
-	SystemPartCount          int
-	ContextPartCount         int
-	ConversationMessageCount int
-	PartCount                int
-	PromptChars              int
-	HasUserInput             bool
-}
-
 type promptPartTokenStats struct {
 	Tokens        int
 	TokensCounted bool
@@ -57,16 +48,6 @@ func newPromptBuilderContextObserver(ctx context.Context, b *Builder) (context.C
 	return ctx, &promptBuilderObserver{debug: b.debugSink, operation: operation}
 }
 
-func newPromptBuilderRenderObserver(ctx context.Context, b *Builder) (context.Context, *promptBuilderObserver) {
-	ctx, operation := observe.Start(ctx, b.debugSink, contextTracerName, "context.prompt_builder", "context.operation", "render_prompt", "context:Builder",
-		attribute.Int("context.system_parts", len(b.SystemInstructions)),
-		attribute.Int("context.context_parts", len(b.ContextParts)),
-		attribute.Bool("context.has_user_input", b.input.User != nil),
-		attribute.Int("context.input_context_parts", len(b.input.Context)),
-	)
-	return ctx, &promptBuilderObserver{debug: b.debugSink, operation: operation}
-}
-
 func (o *promptBuilderObserver) FinishContext(err error, stats promptContextBuildStats) {
 	if o == nil {
 		return
@@ -78,32 +59,6 @@ func (o *promptBuilderObserver) FinishContext(err error, stats promptContextBuil
 		attribute.Int("context.included_source_count", stats.IncludedSourceCount),
 	)
 	o.operation.Finish(err)
-}
-
-func (o *promptBuilderObserver) FinishRender(err error, stats promptRenderStats) {
-	if o == nil {
-		return
-	}
-	o.operation.Set(
-		attribute.Int("context.conversation_messages", stats.ConversationMessageCount),
-		attribute.Int("context.part_count", stats.PartCount),
-		attribute.Int("context.prompt_chars", stats.PromptChars),
-	)
-	o.operation.Finish(err)
-}
-
-func (o *promptBuilderObserver) StartRendererRender(ctx context.Context, partCount int) (context.Context, func(error, int)) {
-	var debug gai.ObservationSink
-	if o != nil {
-		debug = o.debug
-	}
-	renderCtx, operation := observe.Start(ctx, debug, contextTracerName, "context.prompt_builder", "context.operation", "renderer_render", "context:Builder",
-		attribute.Int("context.part_count", partCount),
-	)
-	return renderCtx, func(err error, promptChars int) {
-		operation.Set(attribute.Int("context.prompt_chars", promptChars))
-		operation.Finish(err)
-	}
 }
 
 func (o *promptBuilderObserver) TokenBudgetSkipped(ctx context.Context) {
@@ -168,29 +123,6 @@ func (o *promptBuilderObserver) BuildFinished(ctx context.Context, stats promptC
 		"context_parts":    stats.ContextPartCount,
 		"remaining_tokens": stats.RemainingTokens,
 	}, nil)
-}
-
-func (o *promptBuilderObserver) RenderFailed(ctx context.Context, stats promptRenderStats, err error) {
-	o.emit(ctx, "prompt_builder_render_failed", map[string]any{
-		"part_count":            stats.PartCount,
-		"system_parts":          stats.SystemPartCount,
-		"context_parts":         stats.ContextPartCount,
-		"has_user_input":        stats.HasUserInput,
-		"conversation_messages": stats.ConversationMessageCount,
-	}, err)
-}
-
-func (o *promptBuilderObserver) RenderFinished(ctx context.Context, stats promptRenderStats, prompt string) {
-	fields := map[string]any{
-		"part_count":            stats.PartCount,
-		"system_parts":          stats.SystemPartCount,
-		"context_parts":         stats.ContextPartCount,
-		"has_user_input":        stats.HasUserInput,
-		"conversation_messages": stats.ConversationMessageCount,
-		"prompt_chars":          stats.PromptChars,
-	}
-	gai.AddObservationContent(ctx, o.debug, fields, "prompt", gai.ContentKindPrompt, prompt)
-	o.emit(ctx, "prompt_builder_render_finished", fields, nil)
 }
 
 func (o *promptBuilderObserver) TokenCountSkipped(ctx context.Context, fields map[string]any) {

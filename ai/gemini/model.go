@@ -32,8 +32,6 @@ func (m *Model) Name() string {
 	return m.name
 }
 
-func (m *Model) NativeTools() bool { return true }
-
 // TokenCounter uses a local estimate for automatic budgeting. Tokenizer is
 // still available explicitly, but may perform network I/O to load tokenizer data.
 func (m *Model) TokenCounter() ai.TokenCounter { return ai.TextTokenEstimator{} }
@@ -129,16 +127,10 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			}
 			return false
 		}
-		normalized, normalizeErr := req.Normalized()
-		if normalizeErr != nil {
-			streamErr = normalizeErr
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: normalizeErr, Text: normalizeErr.Error()})
-			return
-		}
-		req = normalized
+		req = req.Copy()
 		if err := ai.ValidateModelRequest(m, req); err != nil {
 			streamErr = err
-			emit(ai.Token{Err: err, Type: ai.TokenTypeErr, Text: err.Error()})
+			emit(ai.Token{Err: err})
 			return
 		}
 
@@ -155,21 +147,21 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					Err: err,
 				})
 			}
-			emit(ai.Token{Err: err, Type: ai.TokenTypeErr, Text: err.Error()})
+			emit(ai.Token{Err: err})
 			return
 		}
 
 		config, err := buildGenerateContentConfig(req)
 		if err != nil {
 			streamErr = err
-			emit(ai.Token{Err: err, Type: ai.TokenTypeErr, Text: err.Error()})
+			emit(ai.Token{Err: err})
 			return
 		}
 
 		contents, err := nativeContents(req)
 		if err != nil {
 			streamErr = err
-			emit(ai.Token{Err: err, Type: ai.TokenTypeErr, Text: err.Error()})
+			emit(ai.Token{Err: err})
 			return
 		}
 
@@ -198,7 +190,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 						Err: err,
 					})
 				}
-				emit(ai.Token{Err: streamErr, Type: ai.TokenTypeErr, Text: streamErr.Error()})
+				emit(ai.Token{Err: streamErr})
 				return
 			}
 
@@ -237,7 +229,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				raw, marshalErr := json.Marshal(resp)
 				if marshalErr != nil {
 					streamErr = fmt.Errorf("encode Gemini completion metadata: %w", marshalErr)
-					emit(ai.Token{Err: streamErr, Type: ai.TokenTypeErr, Text: streamErr.Error()})
+					emit(ai.Token{Err: streamErr})
 					return
 				}
 				completion.Raw = append(completion.Raw[:0], raw...)
@@ -253,7 +245,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				}
 				if hasUnsupportedGeminiPartPayload(part) {
 					streamErr = fmt.Errorf("%w: Gemini stream output part", ai.ErrUnsupportedCapability)
-					emit(ai.Token{Type: ai.TokenTypeErr, Err: streamErr, Text: streamErr.Error()})
+					emit(ai.Token{Err: streamErr})
 					return
 				}
 
@@ -280,7 +272,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 								Err:    err,
 							})
 						}
-						emit(ai.Token{Err: encodeErr, Type: ai.TokenTypeErr, Text: encodeErr.Error()})
+						emit(ai.Token{Err: encodeErr})
 						return
 					}
 					toolCall, err := mapFunctionCall(part.FunctionCall)
@@ -302,7 +294,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 								Err:    err,
 							})
 						}
-						emit(ai.Token{Err: mapErr, Type: ai.TokenTypeErr, Text: mapErr.Error()})
+						emit(ai.Token{Err: mapErr})
 						return
 					}
 					toolCall.Extensions = thoughtExtensions(part.ThoughtSignature)
@@ -318,21 +310,17 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 							Fields: fields,
 						})
 					}
-					if !emit(ai.Token{
-						Type:     ai.TokenTypeToolCall,
-						Data:     rawPart,
-						ToolCall: toolCall,
-					}) {
+					if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: toolCall}}) {
 						return
 					}
 				case len(part.ThoughtSignature) > 0:
 					semantic := ai.ContentPart{Kind: ai.ContentExtension, Extensions: thoughtExtensions(part.ThoughtSignature)}
-					if !emit(ai.Token{Type: ai.TokenTypePart, Part: &semantic}) {
+					if !emit(ai.Token{Part: &semantic}) {
 						return
 					}
 				default:
 					streamErr = fmt.Errorf("%w: Gemini stream output part", ai.ErrUnsupportedCapability)
-					emit(ai.Token{Type: ai.TokenTypeErr, Err: streamErr, Text: streamErr.Error()})
+					emit(ai.Token{Err: streamErr})
 					return
 				}
 			}
@@ -340,7 +328,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		if hasCompletion {
 			snapshot := completion
 			snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
-			emit(ai.Token{Type: ai.TokenTypeCompletion, Completion: &snapshot})
+			emit(ai.Token{Completion: &snapshot})
 		}
 	}()
 
@@ -348,11 +336,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 }
 
 func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AIResponse, err error) {
-	normalized, normalizeErr := req.Normalized()
-	if normalizeErr != nil {
-		return nil, normalizeErr
-	}
-	req = normalized
+	req = req.Copy()
 	if err := ai.ValidateModelRequest(m, req); err != nil {
 		return nil, err
 	}
@@ -459,9 +443,6 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		generationResult.FinishReason = string(result.Candidates[0].FinishReason)
 	}
 	response = &ai.AIResponse{
-		Text:            text,
-		Reasoning:       reasoning,
-		ToolCalls:       toolCalls,
 		Raw:             raw,
 		InputTokens:     inputTokens,
 		OutputTokens:    outputTokens,
@@ -475,7 +456,8 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 // nativeContents maps only the conversation; system messages are mapped to
 // GenerateContentConfig.SystemInstruction by buildGenerateContentConfig.
 func nativeContents(req ai.AIRequest) ([]*genai.Content, error) {
-	req, err := req.Normalized()
+	req = req.Copy()
+	err := req.Validate()
 	if err != nil {
 		return nil, err
 	}
@@ -512,9 +494,6 @@ func nativeContents(req ai.AIRequest) ([]*genai.Content, error) {
 				callSignature, err := geminiSignature(c.Extensions)
 				if err != nil {
 					return nil, err
-				}
-				if len(callSignature) == 0 {
-					callSignature = c.ThoughtSignatureBytes()
 				}
 				if len(signature) != 0 {
 					return nil, fmt.Errorf("%w: Gemini signature must be attached to the tool call", ai.ErrUnsupportedCapability)
@@ -601,7 +580,8 @@ func buildGenerateContentConfig(req ai.AIRequest) (*genai.GenerateContentConfig,
 		return config
 	}
 
-	normalized, err := req.Normalized()
+	normalized := req.Copy()
+	err := normalized.Validate()
 	if err != nil {
 		return nil, err
 	}
@@ -752,11 +732,6 @@ func mapGenerateContentThinkingConfig(reasoning ai.ReasoningConfig) *genai.Think
 	return config
 }
 
-func mapGenerateContentResponse(result *genai.GenerateContentResponse) (string, string, []ai.ToolCall, error) {
-	message, err := mapCanonicalResponse(result)
-	return message.Text(), message.Reasoning(), message.ToolCalls(), err
-}
-
 func mapCanonicalResponse(result *genai.GenerateContentResponse) (ai.Message, error) {
 	message := ai.Message{Role: ai.RoleAssistant}
 	if result != nil && len(result.Candidates) > 0 && result.Candidates[0] != nil && result.Candidates[0].Content != nil {
@@ -834,12 +809,12 @@ func mapFunctionCall(functionCall *genai.FunctionCall) (*ai.ToolCall, error) {
 }
 
 func buildTextToken(part *genai.Part) ai.Token {
-	kind, typ := ai.ContentText, ai.TokenTypeText
+	kind := ai.ContentText
 	if part.Thought {
-		kind, typ = ai.ContentReasoning, ai.TokenTypeThought
+		kind = ai.ContentReasoning
 	}
 	semantic := ai.ContentPart{Kind: kind, Text: part.Text, Extensions: thoughtExtensions(part.ThoughtSignature)}
-	return ai.Token{Type: typ, Text: part.Text, Data: []byte(part.Text), Part: &semantic}
+	return ai.Token{Part: &semantic}
 }
 
 func marshalArgs(args map[string]any) (json.RawMessage, error) {

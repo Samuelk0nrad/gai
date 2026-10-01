@@ -174,11 +174,8 @@ func mapLoopEvent(low loop.Event, source EventSource) (Event, bool) {
 		if low.Token == nil {
 			return Event{}, false
 		}
-		text := low.Token.Text
-		if text == "" {
-			text = string(low.Token.Data)
-		}
-		switch low.Token.Type {
+		text := low.Token.Text()
+		switch low.Token.Type() {
 		case ai.TokenTypeText:
 			event.Type = EventOutput
 			event.Output = &OutputPart{Kind: OutputText, Text: text}

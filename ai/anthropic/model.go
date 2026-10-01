@@ -31,9 +31,8 @@ type Model struct {
 var _ ai.Model = (*Model)(nil)
 var _ ai.ModelDescriber = (*Model)(nil)
 
-func (m *Model) Name() string      { return m.name }
-func (m *Model) NativeTools() bool { return true }
-func (m *Model) Close() error      { return nil }
+func (m *Model) Name() string { return m.name }
+func (m *Model) Close() error { return nil }
 
 // TokenCounter uses a local estimate for automatic budgeting. Tokenizer is
 // still available explicitly, but may perform network I/O.
@@ -104,7 +103,8 @@ func (p *Provider) sdkClient() antropic.Client {
 }
 
 func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor) (antropic.MessageNewParams, error) {
-	req, err := req.Normalized()
+	req = req.Copy()
+	err := req.Validate()
 	if err != nil {
 		return antropic.MessageNewParams{}, err
 	}
@@ -118,7 +118,6 @@ func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor) (antr
 	p := antropic.MessageNewParams{
 		Model:     antropic.Model(descriptor.Model),
 		MaxTokens: int64(maxTokens),
-		Messages:  []antropic.MessageParam{antropic.NewUserMessage(antropic.NewTextBlock(req.Prompt))},
 	}
 	for _, message := range req.Messages {
 		if message.Role != ai.RoleSystem {
@@ -140,13 +139,11 @@ func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor) (antr
 			p.System = append(p.System, antropic.TextBlockParam{Text: text})
 		}
 	}
-	if len(req.Messages) > 0 {
-		msgs, err := mapNativeMessages(req.Messages)
-		if err != nil {
-			return antropic.MessageNewParams{}, err
-		}
-		p.Messages = msgs
+	msgs, err := mapNativeMessages(req.Messages)
+	if err != nil {
+		return antropic.MessageNewParams{}, err
 	}
+	p.Messages = msgs
 	if len(req.Tools) > 0 {
 		tools, err := mapTools(req.Tools)
 		if err != nil {
@@ -256,9 +253,6 @@ func mapNativeMessages(messages []ai.Message) ([]antropic.MessageParam, error) {
 				c := part.ToolCall
 				if err := unsupportedExtensions(c.Extensions); err != nil {
 					return nil, err
-				}
-				if len(c.ThoughtSignature) > 0 {
-					return nil, fmt.Errorf("%w: Anthropic tool-call signature", ai.ErrUnsupportedCapability)
 				}
 				var input any
 				if err := json.Unmarshal(c.Args, &input); err != nil {
@@ -410,11 +404,7 @@ func mapResponseFormat(format ai.ResponseFormat) (*antropic.OutputConfigParam, e
 }
 
 func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AIResponse, err error) {
-	normalized, normalizeErr := req.Normalized()
-	if normalizeErr != nil {
-		return nil, normalizeErr
-	}
-	req = normalized
+	req = req.Copy()
 	if err := ai.ValidateModelRequest(m, req); err != nil {
 		return nil, err
 	}
@@ -552,22 +542,16 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			streamErr = ctx.Err()
 			return false
 		}
-		normalized, normalizeErr := req.Normalized()
-		if normalizeErr != nil {
-			streamErr = normalizeErr
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: normalizeErr, Text: normalizeErr.Error()})
-			return
-		}
-		req = normalized
+		req = req.Copy()
 		if err := ai.ValidateModelRequest(m, req); err != nil {
 			streamErr = err
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			emit(ai.Token{Err: err})
 			return
 		}
 		payload, err := buildMessagesRequest(req, m.Descriptor())
 		if err != nil {
 			streamErr = err
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			emit(ai.Token{Err: err})
 			return
 		}
 		client := m.client.sdkClient()
@@ -607,7 +591,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				completion.Raw = append(completion.Raw[:0], []byte(event.RawJSON())...)
 				snapshot := completion
 				snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
-				if !emit(ai.Token{Type: ai.TokenTypeCompletion, Completion: &snapshot}) {
+				if !emit(ai.Token{Completion: &snapshot}) {
 					return
 				}
 			case "content_block_start":
@@ -616,16 +600,16 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				block.signature.WriteString(event.ContentBlock.Signature)
 				switch event.ContentBlock.Type {
 				case "text":
-					if event.ContentBlock.Text != "" && !emit(ai.Token{Type: ai.TokenTypeText, Text: event.ContentBlock.Text, Data: []byte(event.ContentBlock.Text)}) {
+					if event.ContentBlock.Text != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.ContentBlock.Text}}) {
 						return
 					}
 				case "thinking":
-					if event.ContentBlock.Thinking != "" && !emit(ai.Token{Type: ai.TokenTypeThought, Text: event.ContentBlock.Thinking, Data: []byte(event.ContentBlock.Thinking)}) {
+					if event.ContentBlock.Thinking != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: event.ContentBlock.Thinking}}) {
 						return
 					}
 				case "redacted_thinking":
 					part := ai.ContentPart{Kind: ai.ContentExtension, Extensions: anthropicExtensions("redacted_thinking", event.ContentBlock.Data)}
-					if !emit(ai.Token{Type: ai.TokenTypePart, Part: &part}) {
+					if !emit(ai.Token{Part: &part}) {
 						return
 					}
 				case "tool_use":
@@ -640,11 +624,11 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				}
 				switch event.Delta.Type {
 				case "text_delta":
-					if event.Delta.Text != "" && !emit(ai.Token{Type: ai.TokenTypeText, Text: event.Delta.Text, Data: []byte(event.Delta.Text)}) {
+					if event.Delta.Text != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.Delta.Text}}) {
 						return
 					}
 				case "thinking_delta":
-					if event.Delta.Thinking != "" && !emit(ai.Token{Type: ai.TokenTypeThought, Text: event.Delta.Thinking, Data: []byte(event.Delta.Thinking)}) {
+					if event.Delta.Thinking != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: event.Delta.Thinking}}) {
 						return
 					}
 				case "signature_delta":
@@ -661,7 +645,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				delete(blocks, event.Index)
 				if block.typ == "thinking" && block.signature.Len() > 0 {
 					part := ai.ContentPart{Kind: ai.ContentReasoning, Extensions: anthropicExtensions("thinking_signature", block.signature.String())}
-					if !emit(ai.Token{Type: ai.TokenTypeThought, Part: &part}) {
+					if !emit(ai.Token{Part: &part}) {
 						return
 					}
 				}
@@ -671,7 +655,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 						streamErr = callErr
 						break
 					}
-					if !emit(ai.Token{Type: ai.TokenTypeToolCall, Data: append([]byte(nil), call.Args...), ToolCall: call}) {
+					if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: call}}) {
 						return
 					}
 				}
@@ -687,7 +671,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			streamErr = fmt.Errorf("anthropic stream ended with %d open content block(s)", len(blocks))
 		}
 		if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: streamErr, Text: streamErr.Error()})
+			emit(ai.Token{Err: streamErr})
 		}
 	}()
 	return ai.DetectToolCallsInStream(ctx, out, m.debug)

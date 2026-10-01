@@ -22,17 +22,13 @@ func (b *fixedPromptBuilder) BuildContext(context.Context) ([]gaictx.Part, error
 	return nil, nil
 }
 
-func (b *fixedPromptBuilder) BuildPrompt(context.Context, gaictx.Conversation) (string, error) {
-	return (ai.Message{Parts: b.input.User}).Text(), nil
-}
-
 func (b *fixedPromptBuilder) Input() gaictx.PromptInput { return b.input.Clone() }
 
 func TestLoopAcceptsMinimalPromptBuilderAndRecordsUserInput(t *testing.T) {
 	t.Parallel()
 
 	model := &scriptedStreamModel{sequences: [][]ai.Token{
-		{{Type: ai.TokenTypeText, Data: []byte("answer")}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "answer"}}},
 	}}
 	builder := &fixedPromptBuilder{input: gaictx.PromptInput{User: ai.TextParts("question")}}
 	l := loop.New(model, nil, builder, nil)
@@ -50,7 +46,7 @@ func TestLoopAcceptsMinimalPromptBuilderAndRecordsUserInput(t *testing.T) {
 		t.Fatalf("minimal builder unexpectedly supplied native messages: %#v", requests[0].Messages)
 	}
 	messages := l.Messages()
-	if len(messages) != 2 || messages[0].Role != gaictx.RoleUser || messages[0].Text() != "question" || messages[1].Role != gaictx.RoleAssistant || messages[1].Text() != "answer" {
+	if len(messages) != 2 || messages[0].Role != ai.RoleUser || messages[0].Text() != "question" || messages[1].Role != ai.RoleAssistant || messages[1].Text() != "answer" {
 		t.Fatalf("conversation = %#v, want the user question and assistant answer", messages)
 	}
 }

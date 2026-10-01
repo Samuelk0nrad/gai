@@ -28,7 +28,7 @@ func TestCanonicalAnthropicRoundTripPreservesOrderedSignedReasoning(t *testing.T
 	if err := json.Unmarshal(stored, &restored); err != nil {
 		t.Fatal(err)
 	}
-	params, err := buildMessagesRequest(ai.AIRequest{Prompt: "obsolete", Messages: []ai.Message{ai.TextMessage(ai.RoleSystem, "rules"), restored}}, ai.ModelDescriptor{Model: "test"})
+	params, err := buildMessagesRequest(ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleSystem, "rules"), restored}}, ai.ModelDescriptor{Model: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestCanonicalAnthropicStreamSignatureRoundTrip(t *testing.T) {
 		}
 	})
 	message := ai.Message{Role: ai.RoleAssistant}
-	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Prompt: "question"}) {
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "question")}}) {
 		if token.Err != nil {
 			t.Fatal(token.Err)
 		}

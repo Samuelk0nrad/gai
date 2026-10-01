@@ -22,10 +22,9 @@ const (
 type ToolTransportMode uint8
 
 const (
-	// ToolTransportNative sends Loop.Tools as AIRequest.Tools. This is the
-	// default to preserve direct loop.New compatibility.
+	// ToolTransportNative sends Loop.Tools as AIRequest.Tools by default.
 	ToolTransportNative ToolTransportMode = iota
-	// ToolTransportText omits AIRequest.Tools for prompt-rendered tool protocols.
+	// ToolTransportText omits AIRequest.Tools for text tool protocols.
 	ToolTransportText
 )
 
@@ -195,7 +194,7 @@ func (l *Loop) buildAttemptRequest(ctx context.Context, toolDefinitions []ai.Too
 		toolChoice = ai.ToolChoice{Mode: ai.ToolChoiceAuto}
 	}
 	if l.ToolTransport == ToolTransportText || len(toolDefinitions) == 0 {
-		// Text transport exposes tools through its rendered prompt. A neutral
+		// Text tool calling exposes definitions through message context. A neutral
 		// choice is likewise required when native tool definitions are absent.
 		toolChoice = ai.ToolChoice{}
 	}
@@ -204,17 +203,10 @@ func (l *Loop) buildAttemptRequest(ctx context.Context, toolDefinitions []ai.Too
 	request.ToolChoice = toolChoice
 	request.ResponseFormat = l.ResponseFormat
 	request.Reasoning = l.Reasoning
-	// Apply execution settings before validating and lifting legacy prompt input.
-	// Both transports consume the same authoritative message snapshot.
-	request, err = request.Normalized()
-	if err != nil {
+	// Snapshot the canonical request after applying execution settings.
+	request = request.Copy()
+	if err := request.Validate(); err != nil {
 		return ai.AIRequest{}, err
-	}
-	if l.ToolTransport == ToolTransportText {
-		request.Prompt, err = ai.RenderMessages(ctx, request.Messages)
-		if err != nil {
-			return ai.AIRequest{}, err
-		}
 	}
 	return request, nil
 }

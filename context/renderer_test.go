@@ -47,7 +47,7 @@ func TestRendererEmitsToOTelWithoutSink(t *testing.T) {
 	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{Prompt: gai.CaptureEnabled})
 	ctx, span := provider.Tracer("renderer-test").Start(ctx, "render")
 	_, err := (gaictx.SimpleRenderer{}).Render(ctx, []gaictx.Part{
-		gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("allowed prompt")}),
+		gaictx.NewMessagePart(ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("allowed prompt")}),
 	})
 	span.End()
 	if err != nil {
@@ -157,26 +157,26 @@ func TestSimpleRendererRendersInstructionsHistoryAndConversation(t *testing.T) {
 		}),
 		&historyPartAdapter{
 			contents: []ai.Message{
-				{Role: gaictx.RoleUser, Parts: ai.TextParts("hi <there> & \"quoted\"")},
-				{Role: gaictx.RoleAssistant, Parts: []ai.ContentPart{
+				{Role: ai.RoleUser, Parts: ai.TextParts("hi <there> & \"quoted\"")},
+				{Role: ai.RoleAssistant, Parts: []ai.ContentPart{
 					{Kind: ai.ContentToolCall,
 						ToolCall: &ai.ToolCall{ID: "call_search",
 							Type: "function", Name: "search", Args: []byte(`{"q":"lace<&>"}`)}}},
 				},
-				{Role: gaictx.RoleTool, Parts: []ai.ContentPart{
+				{Role: ai.RoleTool, Parts: []ai.ContentPart{
 					{Kind: ai.ContentToolResult,
 						ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "search", Parts: ai.TextParts(`found <docs> & "notes"`)}}},
 				},
-				{Role: gaictx.RoleAssistant, Parts: ai.TextParts("done")},
+				{Role: ai.RoleAssistant, Parts: ai.TextParts("done")},
 			},
 		},
-		gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("find docs")}),
-		gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleAssistant, Parts: []ai.ContentPart{
+		gaictx.NewMessagePart(ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("find docs")}),
+		gaictx.NewMessagePart(ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{
 			{Kind: ai.ContentToolCall,
 				ToolCall: &ai.ToolCall{ID: "call_search",
 					Type: "function", Name: "search", Args: []byte(`{"q":"lace"}`)}}}},
 		),
-		gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleTool, Parts: []ai.ContentPart{
+		gaictx.NewMessagePart(ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{
 			{Kind: ai.ContentToolResult,
 				ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "search", Parts: ai.TextParts("found <docs>")}}}},
 		),
@@ -279,8 +279,8 @@ func TestRenderersEmitDetailedTruncatedObservations(t *testing.T) {
 			sink := &rendererObservationSink{}
 			ctx := gai.WithContentCapturePolicy(context.Background(), gai.ContentCapturePolicy{Prompt: gai.CaptureEnabled, Completion: gai.CaptureEnabled})
 			_, err := tt.renderer(sink).Render(ctx, []gaictx.Part{
-				gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("first long message")}),
-				gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleAssistant, Parts: ai.TextParts("second long response")}),
+				gaictx.NewMessagePart(ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("first long message")}),
+				gaictx.NewMessagePart(ai.Message{Role: ai.RoleAssistant, Parts: ai.TextParts("second long response")}),
 			})
 			if err != nil {
 				t.Fatalf("Render failed: %v", err)
@@ -335,7 +335,7 @@ func TestRendererObservationsSnapshotNestedFieldsAcrossEvents(t *testing.T) {
 	sink := &rendererObservationSink{}
 	ctx := gai.WithContentCapturePolicy(context.Background(), gai.ContentCapturePolicy{Prompt: gai.CaptureEnabled})
 	_, err := (&gaictx.SimpleRenderer{ObservationSink: sink}).Render(ctx, []gaictx.Part{
-		gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("first message")}),
+		gaictx.NewMessagePart(ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("first message")}),
 	})
 	if err != nil {
 		t.Fatalf("Render failed: %v", err)
@@ -383,7 +383,7 @@ func TestRendererDebugStructureOmitsContentForNonSensitiveSink(t *testing.T) {
 
 	sink := &rendererObservationSink{}
 	_, err := (gaictx.SimpleRenderer{ObservationSink: sink}).Render(context.Background(), []gaictx.Part{
-		gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("secret prompt content")}),
+		gaictx.NewMessagePart(ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("secret prompt content")}),
 	})
 	if err != nil {
 		t.Fatalf("Render failed: %v", err)
@@ -420,9 +420,9 @@ func TestRenderersClassifyStructuredContentIndependently(t *testing.T) {
 	mixedHistory := renderTestPart{name: "history", node: gaictx.RenderNode{
 		Type: "history",
 		Children: []gaictx.RenderNode{
-			{Type: string(gaictx.RoleUser), Value: "memory-only-value"},
+			{Type: string(ai.RoleUser), Value: "memory-only-value"},
 			{
-				Type:   gaictx.ContentTypeToolResult,
+				Type:   string(ai.ContentToolResult),
 				Fields: []gaictx.RenderField{{Key: "name", Value: "search-tool"}},
 				Children: []gaictx.RenderNode{
 					{Type: "result", Value: "tool-output-value"},
@@ -485,7 +485,7 @@ func TestRenderersClassifyStructuredContentIndependently(t *testing.T) {
 
 			sink := &rendererObservationSink{}
 			ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{ToolOutput: gai.CaptureEnabled})
-			toolMessage := renderTestPart{name: "message", node: gaictx.RenderNode{Type: string(gaictx.RoleTool), Value: "direct-tool-output"}}
+			toolMessage := renderTestPart{name: "message", node: gaictx.RenderNode{Type: string(ai.RoleTool), Value: "direct-tool-output"}}
 			if _, err := tt.renderer(sink).Render(ctx, []gaictx.Part{toolMessage}); err != nil {
 				t.Fatalf("Render direct tool message: %v", err)
 			}
@@ -577,7 +577,7 @@ func TestRenderersNotifyRenderResultCallback(t *testing.T) {
 			t.Parallel()
 
 			parts := []gaictx.Part{
-				gaictx.NewMessagePart(ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("hello")}),
+				gaictx.NewMessagePart(ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("hello")}),
 			}
 			returned := false
 			calls := 0
@@ -711,4 +711,33 @@ func (t toolSignatureTestTool) Name() string        { return t.name }
 func (t toolSignatureTestTool) Description() string { return t.description }
 func (t toolSignatureTestTool) Params() ai.ToolParameters {
 	return ai.ToolParameters{}
+}
+
+func TestSimpleRendererUsesCanonicalToolResultErrorStatus(t *testing.T) {
+	t.Parallel()
+	for _, isError := range []bool{false, true} {
+		message := ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{{
+			Kind:       ai.ContentToolResult,
+			ToolResult: &ai.ToolResult{ToolCallID: "call-1", Name: "search", Parts: ai.TextParts("result text"), IsError: isError},
+		}}}
+		part := gaictx.NewMessagePart(message)
+		node, err := part.Render(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if node.Children[0].Type != string(ai.ContentToolResult) {
+			t.Fatalf("result kind = %q, want canonical tool_result", node.Children[0].Type)
+		}
+		got, err := (gaictx.SimpleRenderer{}).Render(t.Context(), []gaictx.Part{part})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "tool res: result text"
+		if isError {
+			want = "tool res: error: result text"
+		}
+		if got != want {
+			t.Fatalf("IsError=%t: got %q, want %q", isError, got, want)
+		}
+	}
 }

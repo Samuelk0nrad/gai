@@ -7,21 +7,21 @@ import (
 	"github.com/lace-ai/gai/ai"
 )
 
-func TestNormalizedJSONTokenPreservesCanonicalContentAndVisibleProjection(t *testing.T) {
+func TestJSONTokenPreservesCanonicalContentAndVisibleProjection(t *testing.T) {
 	part := ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(`{"answer":"Paris"}`)}
 	token := ai.Token{
-		Type: ai.TokenTypeToolCall, ToolCall: &ai.ToolCall{ID: "stale", Name: "must_not_run"},
-		Text: "stale text", Data: []byte("stale data"), Part: &part,
+
+		Part: &part,
 	}
-	normalized := token.Normalized()
-	if normalized.Type != ai.TokenTypeText || normalized.Text != string(part.JSON) || normalized.ToolCall != nil || normalized.Data != nil {
-		t.Fatalf("visible JSON projection = %#v", normalized)
+	cloned := token.Clone()
+	if cloned.Type() != ai.TokenTypeText || cloned.Text() != string(part.JSON) || cloned.ToolCall() != nil {
+		t.Fatalf("visible JSON projection = %#v", cloned)
 	}
-	if normalized.Part == nil || normalized.Part.Kind != ai.ContentJSON || string(normalized.Part.JSON) != string(part.JSON) {
-		t.Fatalf("canonical JSON lost: %#v", normalized.Part)
+	if cloned.Part == nil || cloned.Part.Kind != ai.ContentJSON || string(cloned.Part.JSON) != string(part.JSON) {
+		t.Fatalf("canonical JSON lost: %#v", cloned.Part)
 	}
-	normalized.Part.JSON[2] = 'X'
+	cloned.Part.JSON[2] = 'X'
 	if string(part.JSON) != `{"answer":"Paris"}` {
-		t.Fatal("normalized token aliases source JSON")
+		t.Fatal("cloned token aliases source JSON")
 	}
 }

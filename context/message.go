@@ -10,16 +10,6 @@ import (
 	"github.com/lace-ai/gai/ai"
 )
 
-// Role is retained as a source compatibility alias. New code should use ai.Role.
-type Role = ai.Role
-
-const (
-	RoleSystem    = ai.RoleSystem
-	RoleUser      = ai.RoleUser
-	RoleAssistant = ai.RoleAssistant
-	RoleTool      = ai.RoleTool
-)
-
 // MessageSchemaVersion is the current serialized storage envelope version.
 const MessageSchemaVersion = 1
 
@@ -58,73 +48,20 @@ func (m StoredMessage) MarshalJSON() ([]byte, error) {
 	return json.Marshal(stored(m))
 }
 
-// UnmarshalJSON accepts canonical envelopes and legacy plain-text messages.
-// Legacy tool payloads have no reliable call ID, so they must be migrated by the
-// application using its authoritative call records rather than guessed by name.
+// UnmarshalJSON requires the current schema and canonical message content.
 func (m *StoredMessage) UnmarshalJSON(data []byte) error {
 	type stored StoredMessage
-	var canonical stored
-	if err := json.Unmarshal(data, &canonical); err != nil {
+	var decoded stored
+	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	var keys map[string]json.RawMessage
-	if err := json.Unmarshal(data, &keys); err != nil {
-		return err
+	if decoded.SchemaVersion != MessageSchemaVersion {
+		return fmt.Errorf("unsupported message schema version: %d", decoded.SchemaVersion)
 	}
-	hasMessage := false
-	for key := range keys {
-		if strings.EqualFold(key, "message") {
-			hasMessage = true
-		}
+	if err := decoded.Message.Validate(); err != nil {
+		return fmt.Errorf("stored message: %w", err)
 	}
-	if hasMessage {
-		if canonical.SchemaVersion != MessageSchemaVersion {
-			return fmt.Errorf("unsupported message schema version: %d", canonical.SchemaVersion)
-		}
-		if err := canonical.Message.Validate(); err != nil {
-			return fmt.Errorf("stored message: %w", err)
-		}
-		*m = StoredMessage(canonical)
-		return nil
-	}
-	if canonical.SchemaVersion != 0 {
-		return fmt.Errorf("versioned message envelope requires message content")
-	}
-	var legacy struct {
-		ID         string
-		SessionID  string
-		TurnID     string
-		Role       ai.Role
-		Content    json.RawMessage
-		TokenCount map[string]int
-	}
-	if err := json.Unmarshal(data, &legacy); err != nil {
-		return err
-	}
-	var fields map[string]json.RawMessage
-	if len(legacy.Content) > 0 && string(legacy.Content) != "null" {
-		if err := json.Unmarshal(legacy.Content, &fields); err != nil {
-			return fmt.Errorf("decode legacy message content: %w", err)
-		}
-		for key := range fields {
-			if !strings.EqualFold(key, "text") {
-				return fmt.Errorf("legacy structured message cannot be migrated without authoritative tool call IDs: %s", key)
-			}
-		}
-	}
-	var text struct{ Text string }
-	if len(fields) > 0 {
-		if err := json.Unmarshal(legacy.Content, &text); err != nil {
-			return err
-		}
-	}
-	if legacy.Role == ai.RoleTool {
-		return fmt.Errorf("legacy tool message requires authoritative tool call IDs")
-	}
-	if !IsValidRole(legacy.Role) {
-		return fmt.Errorf("invalid legacy message role: %q", legacy.Role)
-	}
-	*m = StoredMessage{SchemaVersion: MessageSchemaVersion, ID: legacy.ID, SessionID: legacy.SessionID, TurnID: legacy.TurnID, Message: ai.TextMessage(legacy.Role, text.Text), TokenCount: legacy.TokenCount}
+	*m = StoredMessage(decoded)
 	return nil
 }
 
@@ -240,9 +177,9 @@ func combinedMessageContent(messages []StoredMessage) (string, error) {
 }
 
 // IsValidRole reports whether role is one of the built-in roles.
-func IsValidRole(role Role) bool {
+func IsValidRole(role ai.Role) bool {
 	switch role {
-	case RoleSystem, RoleUser, RoleAssistant, RoleTool:
+	case ai.RoleSystem, ai.RoleUser, ai.RoleAssistant, ai.RoleTool:
 		return true
 	default:
 		return false

@@ -23,11 +23,11 @@ func TestGenerateIgnoresEmptyPartsAndPreservesCompletion(t *testing.T) {
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = w.Write(emptyPartResponse(t, parts, true))
 				})
-				response, err := model.Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
+				response, err := model.Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
 				if err != nil {
 					t.Fatal(err)
 				}
-				if response.Text != "hello world" || response.Message.Text() != "hello world" || len(response.Message.Parts) != 2 || response.FinishReason != "STOP" || response.InputTokens != 11 || response.OutputTokens != 7 || response.ReasoningTokens != 3 {
+				if response.Text() != "hello world" || response.Message.Text() != "hello world" || len(response.Message.Parts) != 2 || response.FinishReason != "STOP" || response.InputTokens != 11 || response.OutputTokens != 7 || response.ReasoningTokens != 3 {
 					t.Fatalf("response = %#v", response)
 				}
 				var raw struct {
@@ -55,14 +55,14 @@ func TestGenerateStreamIgnoresEmptyPartsAndPreservesCompletion(t *testing.T) {
 				var text strings.Builder
 				var completion *ai.Completion
 				var completions, textTokens int
-				for token := range model.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
+				for token := range model.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 					if token.Err != nil {
 						t.Fatal(token.Err)
 					}
-					switch token.Type {
+					switch token.Type() {
 					case ai.TokenTypeText:
 						textTokens++
-						text.WriteString(token.Text)
+						text.WriteString(token.Text())
 					case ai.TokenTypeCompletion:
 						completions++
 						completion = token.Completion
@@ -118,8 +118,8 @@ func TestUnsupportedPartPayloadsRemainErrors(t *testing.T) {
 				_, _ = fmt.Fprintf(w, "data: %s\n\n", emptyPartResponse(t, []json.RawMessage{part}, true))
 			})
 			var streamError error
-			for token := range model.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
-				if token.Type == ai.TokenTypeErr {
+			for token := range model.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+				if token.Type() == ai.TokenTypeErr {
 					streamError = token.Err
 				}
 			}
@@ -151,14 +151,14 @@ func TestSignatureOnlyPartsRemainCanonical(t *testing.T) {
 			var message ai.Message
 			if streaming {
 				message.Role = ai.RoleAssistant
-				for token := range model.GenerateStream(t.Context(), ai.AIRequest{Prompt: "hello"}) {
+				for token := range model.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
 					if token.Err != nil {
 						t.Fatal(token.Err)
 					}
 					message.AppendToken(token)
 				}
 			} else {
-				response, err := model.Generate(t.Context(), ai.AIRequest{Prompt: "hello"})
+				response, err := model.Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
 				if err != nil {
 					t.Fatal(err)
 				}

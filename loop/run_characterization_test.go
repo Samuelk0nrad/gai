@@ -29,10 +29,6 @@ func (b *failingContextPromptBuilder) BuildContext(context.Context) ([]gaictx.Pa
 	return nil, b.err
 }
 
-func (b *failingAttemptPromptBuilder) BuildPrompt(context.Context, gaictx.Conversation) (string, error) {
-	return "", b.err
-}
-
 func (b *failingAttemptPromptBuilder) BuildRequest(context.Context, gaictx.Conversation) (ai.AIRequest, error) {
 	return ai.AIRequest{}, b.err
 }
@@ -66,7 +62,7 @@ func (blockingAfterTokenModel) GenerateStream(ctx context.Context, _ ai.AIReques
 	tokens := make(chan ai.Token)
 	go func() {
 		defer close(tokens)
-		tokens <- ai.Token{Type: ai.TokenTypeText, Text: "partial"}
+		tokens <- ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "partial"}}
 		<-ctx.Done()
 	}()
 	return tokens
@@ -116,7 +112,7 @@ func requireAttemptMetadata(t *testing.T, event loop.Event, iteration, attempt, 
 func TestLoopCharacterizationSuccessEventSequence(t *testing.T) {
 	t.Parallel()
 
-	model := &scriptedStreamModel{sequences: [][]ai.Token{{{Type: ai.TokenTypeText, Text: "done"}}}}
+	model := &scriptedStreamModel{sequences: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}}}}
 	l := loop.New(model, nil, testPromptBuilder(), nil)
 	l.MaxLoopIterations = 1
 
@@ -133,7 +129,7 @@ func TestLoopCharacterizationSuccessEventSequence(t *testing.T) {
 	if events[2].Iteration == nil || events[2].Iteration.InputMessage() == nil || events[2].PartCount != 1 {
 		t.Fatalf("completed iteration snapshot = %#v, want user input and one part", events[2])
 	}
-	if got := events[2].Iteration.Parts[0].Response.Text; got != "done" {
+	if got := events[2].Iteration.Parts[0].Response.Text(); got != "done" {
 		t.Fatalf("completed text = %q, want done", got)
 	}
 }
@@ -143,10 +139,10 @@ func TestLoopCharacterizationRetryEventSequence(t *testing.T) {
 
 	model := &scriptedStreamModel{sequences: [][]ai.Token{
 		{
-			{Type: ai.TokenTypeText, Text: "partial"},
+			{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "partial"}},
 			{Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("temporary")}},
 		},
-		{{Type: ai.TokenTypeText, Text: "final"}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "final"}}},
 	}}
 	l := loop.New(model, nil, testPromptBuilder(), nil)
 	l.MaxLoopIterations = 1
@@ -169,10 +165,10 @@ func TestLoopCharacterizationRetryEventSequence(t *testing.T) {
 	for _, index := range []int{3, 4, 5} {
 		requireAttemptMetadata(t, events[index], 1, 2, 1)
 	}
-	if events[2].Iteration == nil || events[2].PartCount != 1 || events[2].Iteration.Parts[0].Response.Text != "partial" {
+	if events[2].Iteration == nil || events[2].PartCount != 1 || events[2].Iteration.Parts[0].Response.Text() != "partial" {
 		t.Fatalf("retry snapshot = %#v, want immutable partial attempt", events[2])
 	}
-	if events[5].Iteration == nil || events[5].Iteration.Parts[0].Response.Text != "final" {
+	if events[5].Iteration == nil || events[5].Iteration.Parts[0].Response.Text() != "final" {
 		t.Fatalf("accepted snapshot = %#v, want final attempt", events[5])
 	}
 }
@@ -180,13 +176,13 @@ func TestLoopCharacterizationRetryEventSequence(t *testing.T) {
 func TestLoopCharacterizationRequiredToolDiscardEventSequence(t *testing.T) {
 	t.Parallel()
 
-	toolCall := ai.Token{Type: ai.TokenTypeToolCall, ToolCall: &ai.ToolCall{
+	toolCall := ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{
 		ID: "call-1", Type: "function", Name: "echo", Args: json.RawMessage(`{"text":"payload"}`),
-	}}
+	}}}
 	model := &scriptedStreamModel{sequences: [][]ai.Token{
-		{{Type: ai.TokenTypeText, Text: "discard me"}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "discard me"}}},
 		{toolCall},
-		{{Type: ai.TokenTypeText, Text: "done"}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}},
 	}}
 	l := loop.New(model, []loop.Tool{loop.NewEchoTool()}, testPromptBuilder(), nil)
 	l.ToolTransport = loop.ToolTransportText
@@ -223,12 +219,12 @@ func TestLoopCharacterizationRequiredToolDiscardEventSequence(t *testing.T) {
 func TestLoopCharacterizationToolErrorEventSequence(t *testing.T) {
 	t.Parallel()
 
-	toolCall := ai.Token{Type: ai.TokenTypeToolCall, ToolCall: &ai.ToolCall{
+	toolCall := ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{
 		ID: "call-1", Type: "function", Name: "failure", Args: json.RawMessage(`{"text":"payload"}`),
-	}}
+	}}}
 	model := &scriptedStreamModel{sequences: [][]ai.Token{
 		{toolCall},
-		{{Type: ai.TokenTypeText, Text: "done"}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}},
 	}}
 	l := loop.New(model, []loop.Tool{sentinelErrorTool{}}, testPromptBuilder(), nil)
 	l.MaxLoopIterations = 2
@@ -335,10 +331,10 @@ func TestLoopCharacterizationIterationLimitIsSnapshotted(t *testing.T) {
 			t.Parallel()
 
 			delegate := &scriptedStreamModel{sequences: [][]ai.Token{
-				{{Type: ai.TokenTypeToolCall, ToolCall: &ai.ToolCall{
+				{{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{
 					ID: "call-1", Type: "function", Name: "echo", Args: json.RawMessage(`{"text":"payload"}`),
-				}}},
-				{{Type: ai.TokenTypeText, Text: "done"}},
+				}}}},
+				{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}},
 			}}
 			var l *loop.Loop
 			model := &limitMutatingModel{delegate: delegate}

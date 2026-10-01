@@ -31,11 +31,11 @@ func TestSummarizerRunsSummaryAgentThroughLoop(t *testing.T) {
 	if model.request.MaxTokens != 7 {
 		t.Fatalf("expected summary max tokens on loop request, got %d", model.request.MaxTokens)
 	}
-	if !strings.Contains(model.request.Prompt, "Summarize the provided context") {
-		t.Fatalf("expected embedded summary system prompt: %q", model.request.Prompt)
+	if !strings.Contains(requestText(model.request), "Summarize the provided context") {
+		t.Fatalf("expected embedded summary system prompt: %q", requestText(model.request))
 	}
-	if !strings.Contains(model.request.Prompt, "long input") {
-		t.Fatalf("expected summary input in user prompt: %q", model.request.Prompt)
+	if !strings.Contains(requestText(model.request), "long input") {
+		t.Fatalf("expected summary input in user prompt: %q", requestText(model.request))
 	}
 }
 
@@ -51,8 +51,8 @@ func TestDefinitionAllowsSystemPromptOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Summarize failed: %v", err)
 	}
-	if !strings.Contains(model.request.Prompt, "custom summary system") {
-		t.Fatalf("expected custom system prompt: %q", model.request.Prompt)
+	if !strings.Contains(requestText(model.request), "custom summary system") {
+		t.Fatalf("expected custom system prompt: %q", requestText(model.request))
 	}
 }
 
@@ -94,7 +94,7 @@ func (m *recordingModel) Name() string {
 
 func (m *recordingModel) Generate(ctx context.Context, req ai.AIRequest) (*ai.AIResponse, error) {
 	m.request = req
-	return &ai.AIResponse{Text: m.response}, nil
+	return &ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: m.response}}}}, nil
 }
 
 func (m *recordingModel) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.Token {
@@ -102,7 +102,7 @@ func (m *recordingModel) GenerateStream(ctx context.Context, req ai.AIRequest) <
 	go func() {
 		defer close(out)
 		m.request = req
-		out <- ai.Token{Type: ai.TokenTypeText, Text: m.response}
+		out <- ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: m.response}}
 	}()
 	return out
 }
@@ -113,4 +113,12 @@ func (m *recordingModel) Close() error {
 
 func (m *recordingModel) TokenCounter() ai.TokenCounter {
 	return &mocks.MockTokenCounter{}
+}
+
+func requestText(request ai.AIRequest) string {
+	var text strings.Builder
+	for _, message := range request.Messages {
+		text.WriteString(message.Text())
+	}
+	return text.String()
 }

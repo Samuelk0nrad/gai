@@ -16,10 +16,9 @@
 // RoleSystem, RoleUser, RoleAssistant, or RoleTool. Storage metadata such as
 // session IDs and token caches belongs to storage envelopes outside Message.
 //
-// AIRequest.Messages is authoritative. Normalized lifts a legacy Prompt into a
-// user message only when Messages is empty; an existing Messages slice always
-// wins. Copy and Clone snapshot mutable payloads, including nested results,
-// media bytes, raw JSON, schemas, and opaque provider state.
+// AIRequest requires canonical Messages. Copy and Clone snapshot mutable
+// payloads, including nested results, media bytes, raw JSON, schemas, and opaque
+// provider state.
 //
 // Message.Validate checks tagged payloads and role constraints. Request
 // validation additionally matches tool results to preceding call IDs and names;
@@ -29,10 +28,10 @@
 // and tool identity, and returns an UnsupportedContentError for media or opaque
 // continuity state that has no faithful text representation.
 //
-// AIResponse.Message is the authoritative output. SetMessage and AppendToken
-// refresh its Text, Reasoning, and ToolCalls convenience views. Token.Part is a
-// canonical semantic delta and takes precedence over compatibility token fields.
-// Errors and completion accounting remain execution metadata outside messages.
+// AIResponse.Message owns output; Text(), Reasoning(), and ToolCalls() derive
+// views directly from it. Token carries exactly one canonical Part, error, or
+// completion payload. Type(), Text(), and ToolCall() derive stream views. Errors
+// and completion accounting remain execution metadata outside messages.
 //
 // # Local text counting
 //

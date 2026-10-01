@@ -32,7 +32,12 @@ type executionModel struct {
 
 func (m *executionModel) Name() string                  { return m.name }
 func (m *executionModel) TokenCounter() ai.TokenCounter { return m.counter }
-func (m *executionModel) NativeTools() bool             { return m.native }
+func (m *executionModel) Descriptor() ai.ModelDescriptor {
+	if m.native {
+		return ai.ModelDescriptor{NativeTools: ai.FeatureSupportSupported}
+	}
+	return ai.ModelDescriptor{NativeTools: ai.FeatureSupportUnsupported}
+}
 
 func TestExecutionInheritsReplacesAndResetsValues(t *testing.T) {
 	reasoning := ai.ReasoningConfig{Enabled: true, BudgetTokens: 12, Effort: ai.ReasoningEffortHigh}
@@ -120,7 +125,7 @@ func TestExecutionModelSelectsTransportAndObservations(t *testing.T) {
 			if tc.clearTools {
 				overrides.Tools = []loop.Tool{}
 			}
-			workflow, err := a.NewRun(t.Context(), agent.RunInput{Execution: overrides})
+			workflow, err := a.NewRun(t.Context(), agent.RunInput{Execution: overrides, Prompt: gaictx.PromptInput{User: ai.TextParts("")}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -394,8 +399,8 @@ func TestExecutionRetryOptionalInheritanceReplacementAndClear(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			model := &scriptedWorkflowModel{scripts: [][]ai.Token{
-				{{Type: ai.TokenTypeErr, Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("temporary")}}},
-				{{Type: ai.TokenTypeText, Text: "done"}},
+				{{Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("temporary")}}},
+				{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}},
 			}}
 			a := agent.New(agent.Definition{Model: model, Prompt: executionPrompt, RetryPolicy: &loop.RetryPolicy{MaxRetries: 1}})
 			workflow, err := a.NewRun(t.Context(), agent.RunInput{Execution: &agent.ExecutionOverrides{RetryPolicy: tc.override}})
@@ -452,8 +457,8 @@ func TestExecutionProcessorCanBeInheritedReplacedOrCleared(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			model := &scriptedWorkflowModel{scripts: [][]ai.Token{
-				{{Type: ai.TokenTypeToolCall, ToolCall: &ai.ToolCall{ID: "call", Type: "function", Name: "echo", Args: []byte("{\"text\":\"original\"}")}}},
-				{{Type: ai.TokenTypeText, Text: "done"}},
+				{{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call", Type: "function", Name: "echo", Args: []byte("{\"text\":\"original\"}")}}}},
+				{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}},
 			}}
 			a := agent.New(agent.Definition{Model: nativeToolWorkflowModel{model}, Prompt: executionPrompt, Tools: []loop.Tool{loop.NewEchoTool()}, ToolResponseProcessor: &executionProcessor{"definition"}})
 			workflow, err := a.NewRun(t.Context(), agent.RunInput{Execution: &agent.ExecutionOverrides{ToolResponseProcessor: tc.override}})
@@ -531,7 +536,7 @@ func TestExecutionToolChoiceOverridesPromptSourceOptions(t *testing.T) {
 			}
 			// Inspect the request even though this model does not call the required tool.
 			consumeWorkflow(t, workflow)
-			prompt := model.Requests()[0].Prompt
+			prompt := requestText(model.Requests()[0])
 			if !strings.Contains(prompt, "selected") || strings.Contains(prompt, "excluded") || strings.Contains(prompt, "stale") || !strings.Contains(prompt, "must") {
 				t.Fatalf("resolved choice was not applied to prompt: %s", prompt)
 			}

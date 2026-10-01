@@ -191,7 +191,7 @@ type Tool interface {
 }
 ```
 
-Tool parameters are converted to JSON Schema for provider-native function calling. Models that do not support native tools can use GAI's text-protocol compatibility path.
+Tool parameters are converted to JSON Schema for provider-native function calling. Models that do not support native tools can use GAI's text tool protocol.
 
 ```go
 func (t *LookupOrderTool) Params() ai.ToolParameters {
@@ -331,7 +331,7 @@ builder := gaictx.New(gaictx.Definition{
 })
 ```
 
-`BuildContext` allocates budget to context sources. `BuildRequest` assembles system instructions, selected history, user input, and accepted conversation as one `ai.AIRequest`. Provider adapters consume those messages directly. `BuildPrompt` is a compatibility wrapper that renders the same messages. Custom renderers lower application context parts; they do not replace conversation semantics.
+`BuildContext` allocates budget to context sources. `BuildRequest` assembles system instructions, selected history, user input, and accepted conversation as one `ai.AIRequest`. Provider adapters consume those messages directly. Custom renderers lower application context parts; they do not replace conversation semantics.
 
 ## History and summarization
 
@@ -344,7 +344,7 @@ signed reasoning, or other opaque provider state, it returns
 `ai.ErrUnsupportedCapability` instead of dropping that content. Such content can
 still be preserved in storage and replayed by a compatible native adapter.
 
-## Canonical messages and migration
+## Canonical messages
 
 `ai.Message` is the shared semantic value for generation, accepted runtime output,
 and stored history. Its `Role` and ordered `Parts` preserve text, reasoning, tool
@@ -365,19 +365,18 @@ This is a breaking pre-v1 API migration:
   Reuse `ai.ToolCall`; results use `ai.ToolResult` with matching `ToolCallID`.
 - Replace `context.PromptInput.User` content objects with `ai.TextParts(text)` or
   structured parts. `Conversation.Messages` and `AgentResult.Messages` return
-  `[]ai.Message`. Custom builders implement `BuildRequest`; `context.AdaptLegacyPromptBuilder` can lift an already-rendered prompt into a user message.
+  `[]ai.Message`. Custom builders implement `BuildRequest` and return canonical messages.
 - Construct message context with `context.NewMessagePart(ai.Message{...})`.
   `history.Part.Messages` replaces `Contents`; `history.Summary.Content` is now a
   text `ai.ContentPart`. `NativeConversation` and `NativeMessageBuilder` are removed;
   use the canonical `Conversation` and `PromptBuilder` contracts.
 - Replace persisted `context.Message` with `context.StoredMessage{Message: ...}`.
-  New history JSON has a schema version. Legacy plain-text records are readable;
-  old tool records without call IDs need an application migration from authoritative
-  call records. The reader returns an error instead of pairing tools by name.
-- `AIRequest.Messages` is authoritative when both messages and deprecated `Prompt`
-  are supplied. `Normalized` snapshots the request and lifts a prompt-only request
-  to one user message. `AIResponse.Message` owns output; text/reasoning/tool-call
-  fields are compatibility views refreshed by `SetMessage` or `AppendToken`.
+  Stored history requires an explicit schema version and canonical parts; older
+  unversioned or text-content records are rejected.
+- Requests require `AIRequest.Messages`. Stream events carry one canonical `Part`,
+  error, or completion payload; `Type()`, `Text()`, and `ToolCall()` derive views.
+  `AIResponse.Message` owns output; `Text()`, `Reasoning()`, and `ToolCalls()` derive
+  views directly from it.
 - Preserve extensions on their original message, part, or call. Built-in adapters
   replay supported provider continuity state and reject required unsupported content.
   Text fallback cannot encode media or opaque continuity state and returns
@@ -411,10 +410,10 @@ response, err := generator.Generate(ctx, ai.AIRequest{
 if err != nil {
   return err
 }
-fmt.Println(response.Text)
+fmt.Println(response.Text())
 ```
 
-`AIRequest.Messages` carries the canonical system, user, assistant, and tool-result history. A legacy prompt-only request is normalized into one user message before transport selection.
+`AIRequest.Messages` carries the canonical system, user, assistant, and tool-result history. Requests must contain canonical messages.
 
 ## Workflow middleware
 
@@ -586,7 +585,7 @@ go test ./loop/...
 go test ./examples/order-support
 ```
 
-GitHub Actions runs build, vet, tests, race detection, static analysis, coverage artifact generation, and dependency vulnerability scanning on pull requests and pushes to main. Pull requests also run public API compatibility checks. The workflow runs weekly on Mondays at 03:17 UTC and can also be started manually from the Actions tab.
+GitHub Actions runs build, vet, tests, race detection, static analysis, coverage artifact generation, and dependency vulnerability scanning on pull requests and pushes to main. Public API compatibility checks are commented out until the v1 API is stable. The workflow runs weekly on Mondays at 03:17 UTC and can also be started manually from the Actions tab.
 
 ## Contributing
 

@@ -49,7 +49,7 @@ func TestHistoryBuilderUsesSameSelectedAndTruncatedCanonicalMessages(t *testing.
 	if gotResults[1].Text() != wantResult {
 		t.Fatalf("native request did not apply shared truncation: %q", gotResults[1].Text())
 	}
-	fallback, err := builder.BuildPrompt(t.Context(), nil)
+	fallback, err := renderHistoryRequest(builder, t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestHistoryBuilderUsesSameSelectedAndTruncatedCanonicalMessages(t *testing.
 	}
 }
 
-func TestHistoryStateRoundTripAndLegacyMigration(t *testing.T) {
+func TestHistoryStateCanonicalRoundTrip(t *testing.T) {
 	t.Parallel()
 	want := history.HistoryState{SchemaVersion: history.HistorySchemaVersion, Summary: history.NewSummary("summary", "t0", "t0", 0, 0, ai.ContentPart{Kind: ai.ContentText, Text: "earlier"}), Turns: []gaictx.Turn{{ID: "turn", Count: 1, UserMessage: &gaictx.StoredMessage{SchemaVersion: gaictx.MessageSchemaVersion, ID: "message", SessionID: "session", TurnID: "turn", TokenCount: map[string]int{"counter": 7}, Message: ai.TextMessage(ai.RoleUser, "hello")}}}}
 	data, err := json.Marshal(want)
@@ -79,16 +79,7 @@ func TestHistoryStateRoundTripAndLegacyMigration(t *testing.T) {
 	if got.SchemaVersion != want.SchemaVersion || !reflect.DeepEqual(got.Turns, want.Turns) || got.Summary.Content.Text != "earlier" {
 		t.Fatalf("state round trip changed storage metadata: %#v", got)
 	}
-	legacy := `{"Turns":[{"ID":"old-turn","Count":5,"UserMessage":{"ID":"old-message","Role":"user","Content":{"Text":"old input"}}}],"Summary":{"Content":{"Text":"old summary"}}}`
-	if err := json.Unmarshal([]byte(legacy), &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.SchemaVersion != history.HistorySchemaVersion || got.Summary.Content.Kind != ai.ContentText || got.Summary.Content.Text != "old summary" || got.Turns[0].UserMessage.Message.Text() != "old input" {
-		t.Fatalf("legacy migration = %#v", got)
-	}
-	if err := json.Unmarshal([]byte(`{"schema_version":42,"Turns":[]}`), &got); err == nil {
-		t.Fatal("future schema version accepted")
-	}
+
 }
 
 func TestHistorySourcePreservesUnknownExtensionsBeforeNativeMapping(t *testing.T) {
@@ -106,7 +97,7 @@ func TestHistorySourcePreservesUnknownExtensionsBeforeNativeMapping(t *testing.T
 	if len(request.Messages) != 1 || !reflect.DeepEqual(request.Messages[0], message) {
 		t.Fatalf("history projection changed opaque state: %#v", request.Messages)
 	}
-	if _, err := builder.BuildPrompt(t.Context(), nil); err == nil {
+	if _, err := renderHistoryRequest(builder, t.Context(), nil); err == nil {
 		t.Fatal("fallback silently discarded unknown extensions")
 	}
 }
@@ -134,5 +125,29 @@ func TestHistoryStateRejectsInvalidSummaryWhenSaving(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Summary.Content, want) {
 		t.Fatal("valid summary lost provider extension in storage")
+	}
+}
+
+func TestHistoryStateRejectsOldAndUnversionedFormats(t *testing.T) {
+	t.Parallel()
+	for _, payload := range []string{
+		`{"Turns":[]}`,
+		`{"schema_version":0,"Turns":[]}`,
+		`{"schema_version":42,"Turns":[]}`,
+		`{"schema_version":1,"Turns":[{"ID":"turn","UserMessage":{"Role":"user","Content":{"Text":"old input"}}}]}`,
+		`{"schema_version":1,"Summary":{"Content":{"Text":"old summary"}}}`,
+	} {
+		var got history.HistoryState
+		if err := json.Unmarshal([]byte(payload), &got); err == nil {
+			t.Fatalf("noncanonical history accepted: %s", payload)
+		}
+	}
+}
+
+func TestSummaryRejectsMissingCanonicalContentKind(t *testing.T) {
+	t.Parallel()
+	var got history.Summary
+	if err := json.Unmarshal([]byte(`{"Content":{"Text":"old summary"}}`), &got); err == nil {
+		t.Fatal("summary without canonical kind accepted")
 	}
 }

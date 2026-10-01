@@ -16,13 +16,13 @@ func TestHistoryPartRendersStructuredContent(t *testing.T) {
 
 	part := &history.Part{
 		Messages: []ai.Message{
-			{Role: gaictx.RoleUser, Parts: ai.TextParts("hello")},
-			{Role: gaictx.RoleAssistant, Parts: []ai.ContentPart{
+			{Role: ai.RoleUser, Parts: ai.TextParts("hello")},
+			{Role: ai.RoleAssistant, Parts: []ai.ContentPart{
 				{Kind: ai.ContentToolCall,
 					ToolCall: &ai.ToolCall{ID: "call_search",
 						Type: "function", Name: "search", Args: []byte(`{"q":"lace"}`)}}},
 			},
-			{Role: gaictx.RoleTool, Parts: []ai.ContentPart{
+			{Role: ai.RoleTool, Parts: []ai.ContentPart{
 				{Kind: ai.ContentToolResult,
 					ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "search", Parts: ai.TextParts("found docs")}}},
 			},
@@ -70,13 +70,13 @@ func TestHistoryPartRendersSimpleContent(t *testing.T) {
 
 	part := &history.Part{
 		Messages: []ai.Message{
-			{Role: gaictx.RoleUser, Parts: ai.TextParts(`hello <world> & "quotes"`)},
-			{Role: gaictx.RoleAssistant, Parts: []ai.ContentPart{
+			{Role: ai.RoleUser, Parts: ai.TextParts(`hello <world> & "quotes"`)},
+			{Role: ai.RoleAssistant, Parts: []ai.ContentPart{
 				{Kind: ai.ContentToolCall,
 					ToolCall: &ai.ToolCall{ID: "call_search",
 						Type: "function", Name: "search", Args: []byte(`{"q":"lace<&>"}`)}}},
 			},
-			{Role: gaictx.RoleTool, Parts: []ai.ContentPart{
+			{Role: ai.RoleTool, Parts: []ai.ContentPart{
 				{Kind: ai.ContentToolResult,
 					ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "search", Parts: ai.TextParts(`found <docs> & "notes"`)}}},
 			},
@@ -109,7 +109,7 @@ func TestHistoryPartTruncatesToolResultToPrefix(t *testing.T) {
 	result := strings.Repeat("a", 499) + "👋" + "discarded"
 	part := &history.Part{
 		Messages: []ai.Message{
-			{Role: gaictx.RoleTool, Parts: []ai.ContentPart{
+			{Role: ai.RoleTool, Parts: []ai.ContentPart{
 				{Kind: ai.ContentToolResult,
 					ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "search", Parts: ai.TextParts(result)}}},
 			},
@@ -251,17 +251,17 @@ func TestHistorySourceIncludesNewestFittingTurnsInChronologicalOrder(t *testing.
 				{
 					ID:       "turn-1",
 					Count:    1,
-					Messages: []gaictx.StoredMessage{{TokenCount: map[string]int{"mock.counter": 100}, Message: ai.Message{Role: gaictx.RoleAssistant, Parts: ai.TextParts("oldest")}}},
+					Messages: []gaictx.StoredMessage{{TokenCount: map[string]int{"mock.counter": 100}, Message: ai.Message{Role: ai.RoleAssistant, Parts: ai.TextParts("oldest")}}},
 				},
 				{
 					ID:       "turn-2",
 					Count:    2,
-					Messages: []gaictx.StoredMessage{{TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: gaictx.RoleAssistant, Parts: ai.TextParts("middle")}}},
+					Messages: []gaictx.StoredMessage{{TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleAssistant, Parts: ai.TextParts("middle")}}},
 				},
 				{
 					ID:       "turn-3",
 					Count:    3,
-					Messages: []gaictx.StoredMessage{{TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: gaictx.RoleAssistant, Parts: ai.TextParts("newest")}}},
+					Messages: []gaictx.StoredMessage{{TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Role: ai.RoleAssistant, Parts: ai.TextParts("newest")}}},
 				},
 			},
 		},
@@ -326,7 +326,7 @@ func TestHistorySourceDoesNotSummarizeWhenHistoryFitsBudget(t *testing.T) {
 	}
 	model := &mocks.MockModel{
 		Responses: []mocks.MockModelResponse{
-			{Res: ai.AIResponse{Text: "summary text"}},
+			{Res: ai.AIResponse{Message: ai.TextMessage(ai.RoleAssistant, "summary text")}},
 		},
 	}
 	source, err := history.New("session-1", store, &history.SummarizerDefinition{
@@ -392,7 +392,7 @@ func TestHistorySourceSummarizesOldestTurnsWhenBudgetReached(t *testing.T) {
 	}
 	model := &mocks.MockModel{
 		Responses: []mocks.MockModelResponse{
-			{Res: ai.AIResponse{Text: "summary text"}},
+			{Res: ai.AIResponse{Message: ai.TextMessage(ai.RoleAssistant, "summary text")}},
 		},
 	}
 	source, err := history.New("session-1", store, &history.SummarizerDefinition{
@@ -579,7 +579,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 			store := &historyStore{state: tt.state}
 			model := &mocks.MockModel{
 				Responses: []mocks.MockModelResponse{
-					{Res: ai.AIResponse{Text: "summary text"}},
+					{Res: ai.AIResponse{Message: ai.TextMessage(ai.RoleAssistant, "summary text")}},
 				},
 			}
 
@@ -649,15 +649,15 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 func TestDefaultEstimatorRecountsCJKHistoryUnderNewIdentity(t *testing.T) {
 	t.Parallel()
 	store := &historyStore{state: &history.HistoryState{Turns: []gaictx.Turn{
-		{ID: "old", Count: 1, UserMessage: &gaictx.StoredMessage{Message: ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts(strings.Repeat("界", 40))}}, TokenCount: map[string]int{"gai.estimate/chars-v1": 10}},
-		{ID: "new", Count: 2, UserMessage: &gaictx.StoredMessage{Message: ai.Message{Role: gaictx.RoleUser, Parts: ai.TextParts("ok")}}},
+		{ID: "old", Count: 1, UserMessage: &gaictx.StoredMessage{Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts(strings.Repeat("界", 40))}}, TokenCount: map[string]int{"gai.estimate/chars-v1": 10}},
+		{ID: "new", Count: 2, UserMessage: &gaictx.StoredMessage{Message: ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("ok")}}},
 	}}}
 	source := history.NewHistory("session", store)
 	builder := gaictx.New(gaictx.Definition{TokenBudget: 20, ContextSources: []gaictx.ContextSource{source}})
 	if _, err := builder.BuildContext(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	prompt, err := builder.BuildPrompt(t.Context(), nil)
+	prompt, err := renderHistoryRequest(builder, t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -673,3 +673,11 @@ func TestDefaultEstimatorRecountsCJKHistoryUnderNewIdentity(t *testing.T) {
 }
 
 func summaryText(text string) ai.ContentPart { return ai.ContentPart{Kind: ai.ContentText, Text: text} }
+
+func renderHistoryRequest(builder *gaictx.Builder, ctx context.Context, conv gaictx.Conversation) (string, error) {
+	request, err := builder.BuildRequest(ctx, conv)
+	if err != nil {
+		return "", err
+	}
+	return ai.RenderMessages(ctx, request.Messages)
+}

@@ -40,8 +40,6 @@ var _ ai.ModelDescriber = (*Model)(nil)
 
 func (m *Model) Name() string { return m.name }
 
-func (m *Model) NativeTools() bool { return true }
-
 func (m *Model) Close() error { return nil }
 
 // Tokenizer returns a local tokenizer only when this model has a known encoding.
@@ -62,11 +60,7 @@ func (m *Model) Descriptor() ai.ModelDescriptor {
 }
 
 func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (result *ai.AIResponse, err error) {
-	normalized, normalizeErr := req.Normalized()
-	if normalizeErr != nil {
-		return nil, normalizeErr
-	}
-	req = normalized
+	req = req.Copy()
 	if err := ai.ValidateModelRequest(m, req); err != nil {
 		return nil, err
 	}
@@ -112,7 +106,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (result *ai.AIRe
 	}
 	message := response.Choices[0].Message
 	generationResult.FinishReason = response.Choices[0].FinishReason
-	result.Text = message.Content
+	semantic := ai.TextMessage(ai.RoleAssistant, message.Content)
 	for _, call := range message.ToolCalls {
 		args := json.RawMessage(strings.TrimSpace(call.Function.Arguments))
 		if len(args) == 0 {
@@ -121,17 +115,11 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (result *ai.AIRe
 		if !json.Valid(args) {
 			return nil, fmt.Errorf("invalid JSON arguments for tool %q", call.Function.Name)
 		}
-		result.ToolCalls = append(result.ToolCalls, ai.ToolCall{
-			ID: call.ID, Type: "function", Name: call.Function.Name, Args: args, Extensions: chatGoogleExtensions(call.RawJSON()),
-		})
-	}
-	semantic := ai.TextMessage(ai.RoleAssistant, result.Text)
-	for _, call := range result.ToolCalls {
-		c := call
+		c := ai.ToolCall{ID: call.ID, Type: "function", Name: call.Function.Name, Args: args, Extensions: chatGoogleExtensions(call.RawJSON())}
 		semantic.Parts = append(semantic.Parts, ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &c})
 	}
 	result.SetMessage(semantic)
-	generationResult.ToolCallCount = len(result.ToolCalls)
+	generationResult.ToolCallCount = len(result.ToolCalls())
 	return result, nil
 }
 
@@ -139,18 +127,13 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 	out := make(chan ai.Token, 1)
 	go func() {
 		defer close(out)
-		normalized, normalizeErr := req.Normalized()
-		if normalizeErr != nil {
-			ai.SendToken(ctx, out, ai.Token{Type: ai.TokenTypeErr, Err: normalizeErr, Text: normalizeErr.Error()})
-			return
-		}
-		req = normalized
+		req = req.Copy()
 		if err := ai.ValidateModelRequest(m, req); err != nil {
-			ai.SendToken(ctx, out, ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			ai.SendToken(ctx, out, ai.Token{Err: err})
 			return
 		}
 		if err := m.validateTransport(req); err != nil {
-			ai.SendToken(ctx, out, ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			ai.SendToken(ctx, out, ai.Token{Err: err})
 			return
 		}
 		if m.provider.transport == TransportResponses {
@@ -159,7 +142,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		}
 		params, err := buildChatCompletionParams(m.name, req, true)
 		if err != nil {
-			ai.SendToken(ctx, out, ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			ai.SendToken(ctx, out, ai.Token{Err: err})
 			return
 		}
 		ctx, observation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "openai", Model: m.name, Streaming: true, Sink: m.provider.debug})
@@ -171,7 +154,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			observation.Finish(generationResult)
 		}()
 		emit := func(token ai.Token) bool {
-			if token.Type == ai.TokenTypeErr && token.Err != nil {
+			if token.Type() == ai.TokenTypeErr && token.Err != nil {
 				streamErr = token.Err
 			}
 			observation.ObserveToken(token)
@@ -214,7 +197,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					completion.Raw = append(completion.Raw[:0], []byte(chunk.RawJSON())...)
 					snapshot := completion
 					snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
-					if !emit(ai.Token{Type: ai.TokenTypeCompletion, Completion: &snapshot}) {
+					if !emit(ai.Token{Completion: &snapshot}) {
 						return
 					}
 				}
@@ -225,7 +208,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				completion.FinishReason = string(choice.FinishReason)
 			}
 			if text := choice.Delta.Content; text != "" {
-				if !emit(ai.Token{Type: ai.TokenTypeText, Data: []byte(text), Text: text}) {
+				if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: text}}) {
 					return
 				}
 			}
@@ -251,7 +234,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		}
 		if err := stream.Err(); err != nil {
 			streamErr = classifyProviderError(err)
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: streamErr, Text: streamErr.Error()})
+			emit(ai.Token{Err: streamErr})
 			return
 		}
 		sendStreamToolCalls(emit, calls)
@@ -309,11 +292,11 @@ func sendStreamToolCalls(emit func(ai.Token) bool, calls map[int64]*streamToolCa
 		args := call.arguments.String()
 		if !json.Valid([]byte(args)) {
 			err := fmt.Errorf("invalid JSON arguments for tool %q", name)
-			emit(ai.Token{Type: ai.TokenTypeErr, Err: err, Text: err.Error()})
+			emit(ai.Token{Err: err})
 			return false
 		}
 		toolCall := &ai.ToolCall{ID: call.id.String(), Type: firstNonEmpty(call.typ, "function"), Name: name, Args: json.RawMessage(args), Extensions: ai.CloneExtensions(call.extensions)}
-		if !emit(ai.Token{Type: ai.TokenTypeToolCall, Data: []byte(args), ToolCall: toolCall}) {
+		if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: toolCall}}) {
 			return false
 		}
 	}
@@ -321,7 +304,8 @@ func sendStreamToolCalls(emit func(ai.Token) bool, calls map[int64]*streamToolCa
 }
 
 func buildChatCompletionParams(model string, req ai.AIRequest, stream bool) (sdk.ChatCompletionNewParams, error) {
-	req, err := req.Normalized()
+	req = req.Copy()
+	err := req.Validate()
 	if err != nil {
 		return sdk.ChatCompletionNewParams{}, err
 	}
@@ -382,9 +366,6 @@ func mapNativeMessages(messages []ai.Message) ([]sdk.ChatCompletionMessageParamU
 				signature, err := chatGoogleSignature(c.Extensions)
 				if err != nil {
 					return nil, err
-				}
-				if len(c.ThoughtSignature) > 0 {
-					return nil, fmt.Errorf("%w: unscoped OpenAI chat tool signature", ai.ErrUnsupportedCapability)
 				}
 				call := sdk.ChatCompletionMessageToolCallParam{ID: c.ID, Function: sdk.ChatCompletionMessageToolCallFunctionParam{Name: c.Name, Arguments: string(c.Args)}}
 				if len(signature) > 0 {

@@ -4,18 +4,17 @@
 // current user input, and canonical ai.Message values from a Conversation.
 // BuildRequest is the sole assembly path. Arbitrary context parts are lowered
 // through a Renderer; ConversationPart values retain their ordered content and
-// roles. BuildPrompt applies ai.RenderMessages to that same canonical request.
+// roles. Text transport uses ai.RenderMessages on the assembled request.
 // Optional token budgets reserve output space and limit dynamic context.
 //
 // StoredMessage adds IDs, token caches, and a schema version around ai.Message.
-// JSON readers upgrade legacy text messages but reject legacy tool records that
-// lack call IDs. Content implementations remain only as deprecated legacy
-// ingestion helpers. New inputs use PromptInput.User with []ai.ContentPart.
+// JSON readers require the current schema version and canonical content.
+// Inputs use PromptInput.User with []ai.ContentPart.
 //
 // New defaults to ai.TextTokenEstimator when no local TokenCounter is supplied.
 // Agents inject their resolved counter, and compatible history/context sources
 // receive it through TokenCounterSetter. Custom Part.Tokens implementations take
-// ai.TokenCounter; legacy ai.Tokenizer is no longer the budgeting dependency.
+// ai.TokenCounter, the local budgeting dependency.
 // SystemInstructionsTokens now returns (int, error), and BuildContext propagates
 // counting errors when budgeting is enabled. With a non-positive TokenBudget,
 // the builder skips its own counts; context sources still run and may perform

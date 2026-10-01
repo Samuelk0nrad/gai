@@ -139,7 +139,7 @@ func (s *loopRunState) recordToken(token ai.Token) {
 		return
 	}
 	s.stats.TokenCount++
-	if token.Type == ai.TokenTypeToolCall && token.ToolCall != nil {
+	if token.Type() == ai.TokenTypeToolCall && token.ToolCall() != nil {
 		s.stats.ToolCallCount++
 	}
 }
@@ -206,7 +206,7 @@ func (s *loopIterationState) recordToken(token ai.Token) {
 		return
 	}
 	s.stats.PartCount++
-	if token.Type == ai.TokenTypeToolCall && token.ToolCall != nil {
+	if token.Type() == ai.TokenTypeToolCall && token.ToolCall() != nil {
 		s.stats.ToolCallCount++
 	}
 }

@@ -21,9 +21,7 @@ var (
 	ErrPromptPartName       = errors.New("invalid prompt part name")
 	ErrTokenCounterNotFound = errors.New("counter not found")
 
-	ErrMessageNotFound    = errors.New("message not found")
-	ErrContentUnmarshal   = errors.New("failed to unmarshal content type")
-	ErrUnknownContentType = errors.New("unknown content type")
+	ErrMessageNotFound = errors.New("message not found")
 
 	ErrInvalidTokenCount    = errors.New("invalid token count")
 	ErrInvalideTokenLimit   = errors.New("invalid token limit")

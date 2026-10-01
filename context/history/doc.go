@@ -8,6 +8,6 @@
 // optional summarizer can compact older turns when the complete history no
 // longer fits. Persisted history remains canonical; token-budget trimming only
 // changes the prompt projection produced for the current run. JSON persistence
-// uses versioned HistoryState and context.StoredMessage envelopes; legacy tool
-// records require migration from authoritative call IDs.
+// requires versioned HistoryState and context.StoredMessage envelopes with
+// canonical messages; old and unversioned formats are rejected.
 package history

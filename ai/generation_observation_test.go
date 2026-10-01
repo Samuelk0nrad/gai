@@ -51,12 +51,12 @@ func TestGenerationObservationRecordsSemanticContract(t *testing.T) {
 
 	ctx, parent := otel.Tracer("test").Start(context.Background(), "parent")
 	_, observation := StartGenerationObservation(ctx, AIRequest{
-		Prompt: "private prompt", MaxTokens: 42,
-		ResponseFormat: ResponseFormat{Type: ResponseFormatJSONSchema},
+		MaxTokens:      42,
+		ResponseFormat: ResponseFormat{Type: ResponseFormatJSONSchema}, Messages: []Message{TextMessage(RoleUser, "private prompt")},
 	}, GenerationConfig{Provider: "test-provider", Model: "requested-model", Streaming: true})
-	observation.ObserveToken(Token{Type: TokenTypeText, Text: "private completion"})
-	observation.ObserveToken(Token{Type: TokenTypeToolCall, ToolCall: &ToolCall{Name: "search"}})
-	observation.ObserveToken(Token{Type: TokenTypeCompletion, Completion: &Completion{
+	observation.ObserveToken(Token{Part: &ContentPart{Kind: ContentText, Text: "private completion"}})
+	observation.ObserveToken(Token{Part: &ContentPart{Kind: ContentToolCall, ToolCall: &ToolCall{Name: "search"}}})
+	observation.ObserveToken(Token{Completion: &Completion{
 		Model: "resolved-model", RequestID: "request-1", FinishReason: "tool_calls",
 		UsageReported: true,
 		Usage:         Usage{InputTokens: 11, OutputTokens: 7, ReasoningTokens: 3, CachedTokens: 2},
@@ -177,7 +177,7 @@ func TestGenerationObservationFinalToolCallCountTakesPrecedence(t *testing.T) {
 	defer restore()
 
 	_, observation := StartGenerationObservation(context.Background(), AIRequest{}, GenerationConfig{Provider: "test", Model: "m", Streaming: true})
-	observation.ObserveToken(Token{Type: TokenTypeToolCall, ToolCall: &ToolCall{Name: "search"}})
+	observation.ObserveToken(Token{Part: &ContentPart{Kind: ContentToolCall, ToolCall: &ToolCall{Name: "search"}}})
 	observation.Finish(GenerationResult{ToolCallCount: 1})
 
 	attrs := spanAttributes(generationSpan(t, recorder.Ended()).Attributes())
@@ -279,14 +279,14 @@ func TestGenerationObservationUsesCanonicalInputAndToken(t *testing.T) {
 	recorder, restore := installGenerationSpanRecorder(t)
 	defer restore()
 	_, observation := StartGenerationObservation(t.Context(), AIRequest{
-		Prompt: "obsolete private prompt",
+
 		Messages: []Message{
 			TextMessage(RoleSystem, "system"),
 			TextMessage(RoleUser, "question"),
 			TextMessage(RoleAssistant, "private answer"),
 		},
 	}, GenerationConfig{Provider: "test", Model: "m", Streaming: true})
-	observation.ObserveToken(Token{Type: TokenTypeToolCall, ToolCall: &ToolCall{Name: "stale"}, Part: &ContentPart{Kind: ContentText, Text: "answer"}})
+	observation.ObserveToken(Token{Part: &ContentPart{Kind: ContentText, Text: "answer"}})
 	observation.ObserveToken(Token{Part: &ContentPart{Kind: ContentToolCall, ToolCall: &ToolCall{Name: "actual"}}})
 	observation.Finish(GenerationResult{})
 	attrs := spanAttributes(generationSpan(t, recorder.Ended()).Attributes())
