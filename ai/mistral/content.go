@@ -214,11 +214,18 @@ var imageMIMETypes = map[string]bool{
 	"image/gif":  true,
 }
 
-func imageChunk(media *ai.MediaPart) (chatContentChunk, error) {
-	mimeType := strings.ToLower(strings.TrimSpace(media.MIMEType))
+// normalizeImageMIME lowercases a MIME type and maps the common image/jpg
+// alias to image/jpeg.
+func normalizeImageMIME(mimeType string) string {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
 	if mimeType == "image/jpg" {
-		mimeType = "image/jpeg"
+		return "image/jpeg"
 	}
+	return mimeType
+}
+
+func imageChunk(media *ai.MediaPart) (chatContentChunk, error) {
+	mimeType := normalizeImageMIME(media.MIMEType)
 	if !imageMIMETypes[mimeType] {
 		return chatContentChunk{}, &ai.UnsupportedContentError{Provider: "mistral", Kind: ai.ContentMedia, Detail: fmt.Sprintf("MIME type %q (supported: image/jpeg, image/png, image/webp, image/gif)", media.MIMEType)}
 	}
@@ -235,9 +242,13 @@ func imageChunk(media *ai.MediaPart) (chatContentChunk, error) {
 			return chatContentChunk{}, &ai.UnsupportedContentError{Provider: "mistral", Kind: ai.ContentMedia, Detail: "image URL requires a host"}
 		}
 	case "data":
-		if !strings.HasPrefix(strings.ToLower(media.URI), "data:"+mimeType+";base64,") {
+		header, payload, found := strings.Cut(media.URI[len("data:"):], ",")
+		uriMIME, isBase64 := strings.CutSuffix(strings.ToLower(header), ";base64")
+		if !found || !isBase64 || normalizeImageMIME(uriMIME) != mimeType {
 			return chatContentChunk{}, &ai.UnsupportedContentError{Provider: "mistral", Kind: ai.ContentMedia, Detail: "data URI must be base64 encoded and match the part MIME type"}
 		}
+		// Send the canonical MIME type so aliases such as image/jpg are accepted.
+		return chatContentChunk{Type: chunkImageURL, ImageURL: "data:" + mimeType + ";base64," + payload}, nil
 	default:
 		return chatContentChunk{}, &ai.UnsupportedContentError{Provider: "mistral", Kind: ai.ContentMedia, Detail: fmt.Sprintf("image URI scheme %q (use http, https, data, or inline bytes)", parsed.Scheme)}
 	}

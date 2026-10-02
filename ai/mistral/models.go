@@ -12,6 +12,7 @@ const (
 var models = []string{
 	MistralSmallLatest,
 	MistralMediumLatest,
+	MistralMedium35,
 	MistralLargeLatest,
 	CodestralLatest,
 }
