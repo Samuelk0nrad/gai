@@ -92,6 +92,42 @@ envelope, which already includes framing. Native tool schemas and non-default
 response/tool/reasoning options are counted separately once. Text tool protocols
 already live in rendered messages and incur no additional native-schema cost.
 
+During request-budget allocation, the standard builder reserves fixed system and
+input context using the same rendered or canonical messages as `BuildRequest`,
+including their framing. It also debits each returned source's emitted cost
+before allocating the next source. Canonical history includes framing once and
+hands off its build-local count without recounting the selected snapshot.
+
+Optional sources can implement `context.ContextSourceWithBudgetProjection` to
+select content that fits the rendered allowance. `FunctionWithBudget` receives a
+build-local `project(ctx, part)` callback and returns the selected part, its
+projected count, and an error. The callback includes escaping, renderer markup,
+and message framing, or the complete canonical messages of a `ConversationPart`.
+For example, a source can try its own candidates in preference order:
+
+```go
+func (s *Source) FunctionWithBudget(ctx context.Context, budget int,
+    project func(context.Context, gaictx.Part) (int, error),
+) (gaictx.Part, int, error) {
+    for _, text := range s.candidates {
+        part := gaictx.NewTextPart(text)
+        tokens, err := project(ctx, part)
+        if err != nil { return nil, 0, err }
+        if tokens <= budget { return part, tokens, nil }
+    }
+    return nil, 0, nil
+}
+```
+
+Do not retain the callback or change the selected part afterward. Exact-fit
+selection assumes a stable renderer and remains a local estimate; the final
+request guard is authoritative. Legacy `Function(budget)` and
+`FunctionWithTokens` receive allocation hints because their unknown return shape
+cannot be costed before invocation. Their raw counts cannot guarantee a rendered
+fit. The builder calls each source once and does not drop or reconstruct a
+returned part to fit. Direct builder use without a loop's request allocation
+retains its existing raw-part counting behavior.
+
 `TokenCounter.Fidelity` describes text counting, while request diagnostics always
 mark this portable projection as estimated. Media, provider serialization, hidden
 reasoning, and native options can differ from the projection. Its breakdowns are
