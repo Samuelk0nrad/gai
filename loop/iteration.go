@@ -29,6 +29,11 @@ type Iteration struct {
 	inputMessages int
 	// Usage is the provider-reported usage for the accepted generation attempt.
 	Usage ai.Usage
+	// UsageReported distinguishes absent usage from a reported zero.
+	UsageReported bool
+	// RequestBudget is the finalized pre-generation accounting decision. Reported
+	// Usage supersedes its input estimate when establishing the next checkpoint.
+	RequestBudget *ai.RequestBudgetResult
 }
 
 // IterationPart contains one response, tool call, or tool result segment.
@@ -65,6 +70,10 @@ func (i *Iteration) DeltaMessages() []ai.Message {
 
 // Clone snapshots both execution diagnostics and semantic conversation data.
 func (i Iteration) Clone() Iteration {
+	if i.RequestBudget != nil {
+		budget := *i.RequestBudget
+		i.RequestBudget = &budget
+	}
 	i.Conversation = ai.CloneMessages(i.Conversation)
 	i.Parts = append([]IterationPart(nil), i.Parts...)
 	for n := range i.Parts {
@@ -130,7 +139,10 @@ func (i *Iteration) AppendToken(t ai.Token) {
 		if t.Completion == nil {
 			return
 		}
-		i.Usage = t.Completion.Usage
+		if t.Completion.UsageReported {
+			i.Usage = t.Completion.Usage
+			i.UsageReported = true
+		}
 		if last != nil && last.Type == IterationTypeResponse {
 			last.Response.AppendToken(t)
 		} else {

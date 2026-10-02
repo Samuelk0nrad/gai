@@ -23,7 +23,8 @@ func TestPlainSavedAndGeneratedSummariesFitTightBudget(t *testing.T) {
 		if generated {
 			name = "generated"
 		}
-		for _, budget := range []int{5, 6} {
+		// The literal prefixed summary costs 6 text tokens + 4 framing tokens.
+		for _, budget := range []int{9, 10} {
 			t.Run(fmt.Sprintf("%s/budget_%d", name, budget), func(t *testing.T) {
 				t.Parallel()
 				store := &sharedHistoryStore{state: &history.HistoryState{}}
@@ -48,12 +49,12 @@ func TestPlainSavedAndGeneratedSummariesFitTightBudget(t *testing.T) {
 					t.Fatal(err)
 				}
 				messages := part.(*history.Part).ConversationMessages()
-				if budget == 5 {
+				if budget == 9 {
 					if len(messages) != 0 || tokens != 0 {
 						t.Fatalf("oversized summary included: messages %d, tokens %d", len(messages), tokens)
 					}
 				} else {
-					if len(messages) != 1 || len(messages[0].Parts) != 1 || messages[0].Text() != "Conversation summary:\nx" || tokens != 6 {
+					if len(messages) != 1 || len(messages[0].Parts) != 1 || messages[0].Text() != "Conversation summary:\nx" || tokens != 10 {
 						t.Fatalf("exactly fitting plain summary omitted or overcounted: messages %#v, tokens %d", messages, tokens)
 					}
 				}
@@ -140,15 +141,15 @@ func TestHistoryBuilderCountsSelectedMessagesOncePerBuild(t *testing.T) {
 		if err := build(); err != nil {
 			t.Fatal(err)
 		}
-		if counter.CountCalls != calls || next.remaining != 97 {
-			t.Fatalf("build counted %d messages, want %d; remaining %d, want 97", counter.CountCalls, calls, next.remaining)
+		if counter.CountCalls != calls || next.remaining != 85 {
+			t.Fatalf("build counted %d messages, want %d; remaining %d, want 85", counter.CountCalls, calls, next.remaining)
 		}
 	}
 	store.state.Turns[0].UserMessage.Message.Parts[0].Text = "one two three four"
 	if err := build(); err != nil {
 		t.Fatal(err)
 	}
-	if counter.CountCalls != 9 || next.remaining != 94 {
+	if counter.CountCalls != 9 || next.remaining != 82 {
 		t.Fatalf("changed content reused an old total: calls %d, remaining %d", counter.CountCalls, next.remaining)
 	}
 	failure := errors.New("later count failed")
@@ -172,7 +173,8 @@ func TestConcurrentHistoryBuildTotalsStayInvocationLocal(t *testing.T) {
 	counter := ai.TextTokenEstimator{}
 	source.SetTokenCounter(counter)
 	var group sync.WaitGroup
-	for _, budget := range []int{1, 5, 6, 7, 100} {
+	// Exercise both sides of the summary-only (10) and full-history (18) fits.
+	for _, budget := range []int{1, 9, 10, 17, 18, 100} {
 		group.Go(func() {
 			for range 20 {
 				part, tokens, err := source.FunctionWithTokens(t.Context(), budget)

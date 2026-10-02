@@ -82,20 +82,13 @@ func (p *Part) Render(ctx context.Context) (gaictx.RenderNode, error) {
 	return node, nil
 }
 
-// Tokens counts the selected, previewed messages on demand. It does not cache
+// Tokens estimates the selected, previewed messages including message framing,
+// using the same projection as the finalized request guard. It does not cache
 // counts or mutate the part, so read-only parts can be counted concurrently with
 // a concurrency-safe counter.
 func (p *Part) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
 	if counter == nil {
 		return 0, gaictx.ErrTokenCounterNotFound
 	}
-	count := 0
-	for _, message := range p.ConversationMessages() {
-		tokens, err := (gaictx.StoredMessage{Message: message}).Tokens(ctx, counter)
-		if err != nil {
-			return 0, err
-		}
-		count += tokens
-	}
-	return count, nil
+	return ai.EstimateMessageTokens(ctx, p.ConversationMessages(), counter)
 }

@@ -89,7 +89,12 @@ type Builder struct {
 	debugSink          gai.ObservationSink
 	input              PromptInput
 	counter            ai.TokenCounter
+	configuredCounter  ai.TokenCounter
 	OutputTokenReserve int
+	allocationOverride bool
+	allocationLimit    int
+	allocationOutput   int
+	allocationReserve  int
 }
 
 // New creates a prompt builder from def. A nil TokenCounter selects the
@@ -120,6 +125,7 @@ func New(def Definition) *Builder {
 		debugSink:          def.ObservationSink,
 		input:              def.PromptInput.Clone(),
 		counter:            counter,
+		configuredCounter:  def.TokenCounter,
 	}
 }
 
@@ -246,11 +252,17 @@ func (b *Builder) AppendSystemInstructions(ctx context.Context, instructions ...
 
 func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err error) {
 	ctx, obs := newPromptBuilderContextObserver(ctx, b)
+	limit, outputReserve := b.TokenBudget, b.OutputTokenReserve
+	additionalReserve := 0
+	if b.allocationOverride {
+		limit, outputReserve = b.allocationLimit, b.allocationOutput
+		additionalReserve = b.allocationReserve
+	}
 	stats := promptContextBuildStats{
 		SourceCount:            len(b.ContextSources),
 		SystemInstructionCount: len(b.SystemInstructions),
-		TokenBudget:            b.TokenBudget,
-		OutputTokenReserve:     b.OutputTokenReserve,
+		TokenBudget:            limit,
+		OutputTokenReserve:     outputReserve,
 		TokenCounterPresent:    b.counter != nil,
 	}
 	defer func() {
@@ -261,12 +273,35 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 		return nil, err
 	}
 
-	if b.TokenBudget > 0 {
+	if limit > 0 {
 		stats.SystemTokens, err = b.SystemInstructionsTokens(ctx)
 		if err != nil {
 			return nil, err
 		}
-		stats.RemainingTokens = b.TokenBudget - b.OutputTokenReserve - stats.SystemTokens
+		stats.RemainingTokens = spendBudget(limit, outputReserve)
+		stats.RemainingTokens = spendBudget(stats.RemainingTokens, additionalReserve)
+		stats.RemainingTokens = spendBudget(stats.RemainingTokens, stats.SystemTokens)
+		// Required user/machine input takes priority over optional sources. These
+		// are allocation estimates; the loop checks the final rendered request.
+		if b.counter != nil && len(b.input.User) > 0 {
+			tokens, countErr := ai.EstimateMessageTokens(ctx, []ai.Message{{Role: ai.RoleUser, Parts: b.input.User}}, b.counter)
+			if countErr != nil {
+				return nil, countErr
+			}
+			stats.RemainingTokens = spendBudget(stats.RemainingTokens, tokens)
+		}
+		for _, part := range b.input.Context {
+			if part == nil {
+				continue
+			}
+			tokens, countErr := b.partTokens(ctx, part, map[string]any{"source": "prompt_input", "part": part.Name()})
+			if countErr != nil {
+				return nil, countErr
+			}
+			if b.counter != nil {
+				stats.RemainingTokens = spendBudget(stats.RemainingTokens, tokens)
+			}
+		}
 	} else {
 		obs.TokenBudgetSkipped(ctx)
 		stats.RemainingTokens = 1000000 // effectively unlimited
@@ -287,7 +322,7 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 		var part Part
 		var sourceTokens int
 		countedSource, counted := source.(ContextSourceWithTokenCount)
-		counted = counted && b.TokenBudget > 0 && b.counter != nil
+		counted = counted && limit > 0 && b.counter != nil
 		if counted {
 			part, sourceTokens, err = countedSource.FunctionWithTokens(ctx, stats.RemainingTokens)
 		} else {
@@ -304,7 +339,7 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 			contextParts = append(contextParts, part)
 			stats.IncludedSourceCount++
 			var tokenStats promptPartTokenStats
-			if b.TokenBudget > 0 {
+			if limit > 0 {
 				fields := map[string]any{
 					"source": source.Name(),
 					"part":   part.Name(),
@@ -320,7 +355,7 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 				}
 				tokenStats = promptPartTokenStats{Tokens: tokens, TokensCounted: b.counter != nil}
 				if tokenStats.TokensCounted {
-					stats.RemainingTokens -= tokens
+					stats.RemainingTokens = spendBudget(stats.RemainingTokens, tokens)
 				}
 			}
 			obs.SourceIncluded(ctx, source.Name(), part.Name(), tokenStats, stats.RemainingTokens)
@@ -334,19 +369,6 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 			continue
 		}
 		contextParts = append(contextParts, part)
-		if b.TokenBudget <= 0 {
-			continue
-		}
-		tokens, err := b.partTokens(ctx, part, map[string]any{
-			"source": "prompt_input",
-			"part":   part.Name(),
-		})
-		if err != nil {
-			return nil, err
-		}
-		if b.counter != nil {
-			stats.RemainingTokens -= tokens
-		}
 	}
 	if err = ctx.Err(); err != nil {
 		return nil, err
@@ -413,6 +435,7 @@ func (b *Builder) SetTokenLimit(limit int) error {
 		return fmt.Errorf("%w: %d", ErrInvalideTokenLimit, limit)
 	}
 	b.TokenBudget = limit
+	b.allocationOverride = false
 	return nil
 }
 
@@ -424,8 +447,49 @@ func (b *Builder) TokenCounter() ai.TokenCounter {
 	return b.counter
 }
 
+// ConfiguredTokenCounter returns an explicit application counter, or nil when
+// the loop should resolve its model's counter before the generic fallback.
+func (b *Builder) ConfiguredTokenCounter() ai.TokenCounter {
+	return b.configuredCounter
+}
+
+// RequestBudget supplies the configured window to the loop's final guard.
+// Allocation-only native overhead is deliberately excluded from inheritance.
+func (b *Builder) RequestBudget() ai.RequestBudgetConfig {
+	return ai.RequestBudgetConfig{Limit: max(0, b.TokenBudget), OutputReserve: b.OutputTokenReserve}
+}
+
+// SetBudgetAllocation applies the run's effective window and output reserve,
+// plus separate native overhead/margin for source selection. It does not change
+// the authoritative loop policy or perform source construction.
+func (b *Builder) SetBudgetAllocation(limit, outputReserve, additionalReserve int) error {
+	if limit < 0 {
+		return ai.ErrInvalidRequestBudget
+	}
+	if _, err := ai.AddTokenCounts(outputReserve, additionalReserve); err != nil {
+		return fmt.Errorf("%w: %w", ai.ErrInvalidRequestBudget, err)
+	}
+	b.allocationLimit, b.allocationOutput, b.allocationReserve = limit, outputReserve, additionalReserve
+	b.allocationOverride = true
+	return nil
+}
+
+func spendBudget(remaining, tokens int) int {
+	if remaining <= 0 || tokens >= remaining {
+		return 0
+	}
+	return remaining - tokens
+}
+
 // SetTokenCounter replaces the local counter; nil selects the generic estimator.
 func (b *Builder) SetTokenCounter(counter ai.TokenCounter) {
+	b.configuredCounter = counter
+	b.SetBudgetTokenCounter(counter)
+}
+
+// SetBudgetTokenCounter injects the current run's effective local counter while
+// preserving the application's configured override for future runs.
+func (b *Builder) SetBudgetTokenCounter(counter ai.TokenCounter) {
 	if counter == nil {
 		counter = ai.TextTokenEstimator{}
 	}
@@ -437,6 +501,7 @@ func (b *Builder) SetOutputTokenReserve(reserve int) error {
 		return fmt.Errorf("%w: %d", ErrInvalidOutputReserve, reserve)
 	}
 	b.OutputTokenReserve = reserve
+	b.allocationOverride = false
 	return nil
 }
 
@@ -461,7 +526,10 @@ func (b *Builder) SystemInstructionsTokens(ctx context.Context) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		count += tokens
+		count, err = ai.AddTokenCounts(count, tokens)
+		if err != nil {
+			return 0, err
+		}
 	}
 	return count, nil
 }

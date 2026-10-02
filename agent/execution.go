@@ -53,6 +53,9 @@ type ExecutionOverrides struct {
 	// effective model, falling back to ai.TextTokenEstimator. It never disables
 	// counting. Counters supplied here must perform only local work.
 	TokenCounter Optional[ai.TokenCounter]
+	// RequestBudget replaces the entire budget policy. Set with nil restores
+	// prompt-builder inheritance; an explicit zero policy disables limits.
+	RequestBudget Optional[*ai.RequestBudgetConfig]
 	// RetryPolicy set to nil disables the entire policy, including its timeouts.
 	RetryPolicy Optional[*loop.RetryPolicy]
 	// ToolResponseProcessor set to nil disables the inherited processor.
@@ -67,6 +70,7 @@ type resolvedExecution struct {
 	responseFormat            ai.ResponseFormat
 	reasoning                 ai.ReasoningConfig
 	counter                   ai.TokenCounter
+	requestBudget             *ai.RequestBudgetConfig
 	retryPolicy               *loop.RetryPolicy
 	toolResponseProcessor     loop.ToolResponseProcessor
 	nativeTools               bool
@@ -81,7 +85,8 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 		model: def.Model, limits: def.Limits, tools: def.Tools,
 		toolChoice: def.ToolChoice, responseFormat: def.ResponseFormat,
 		reasoning: def.Reasoning, counter: def.TokenCounter,
-		retryPolicy: def.RetryPolicy, toolResponseProcessor: def.ToolResponseProcessor,
+		requestBudget: def.RequestBudget,
+		retryPolicy:   def.RetryPolicy, toolResponseProcessor: def.ToolResponseProcessor,
 		reconfigureTools: def.ToolChoice.Mode != "" || len(def.ToolChoice.Names) != 0,
 	}
 	if overrides != nil {
@@ -114,6 +119,9 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 			r.counter = overrides.TokenCounter.Value
 			r.requireTokenCounterSetter = true
 		}
+		if overrides.RequestBudget.Set {
+			r.requestBudget = overrides.RequestBudget.Value
+		}
 		if overrides.RetryPolicy.Set {
 			r.retryPolicy = overrides.RetryPolicy.Value
 		}
@@ -126,6 +134,12 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 	}
 	if r.limits.MaxTokens < 0 {
 		return resolvedExecution{}, fmt.Errorf("%w: MaxTokens must be non-negative", ErrInvalidExecutionConfig)
+	}
+	if r.requestBudget != nil {
+		if err := r.requestBudget.Validate(); err != nil {
+			return resolvedExecution{}, fmt.Errorf("%w: %w", ErrInvalidExecutionConfig, err)
+		}
+		r.requestBudget = clonePointer(r.requestBudget)
 	}
 	if r.limits.MaxLoopIterations < 0 {
 		return resolvedExecution{}, fmt.Errorf("%w: MaxLoopIterations must be non-negative", ErrInvalidExecutionConfig)
@@ -189,6 +203,7 @@ func nilDependency(value any) bool {
 }
 
 func cloneDefinition(def Definition) Definition {
+	def.RequestBudget = clonePointer(def.RequestBudget)
 	def.Tools = cloneTools(def.Tools)
 	def.ToolChoice = cloneToolChoice(def.ToolChoice)
 	def.ResponseFormat = cloneResponseFormat(def.ResponseFormat)
@@ -231,6 +246,7 @@ func cloneExecution(overrides *ExecutionOverrides) *ExecutionOverrides {
 		copy.ResponseFormat = &format
 	}
 	copy.Reasoning = clonePointer(overrides.Reasoning)
+	copy.RequestBudget.Value = clonePointer(overrides.RequestBudget.Value)
 	copy.RetryPolicy.Value = cloneRetryPolicy(overrides.RetryPolicy.Value)
 	return &copy
 }

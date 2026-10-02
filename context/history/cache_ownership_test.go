@@ -95,7 +95,9 @@ func TestLegacyCalculatedCountsAreIgnoredAndNotPersisted(t *testing.T) {
 	source := history.NewHistory("session", store)
 	counter := &mocks.MockTokenCounter{IDValue: "counter"}
 	source.SetTokenCounter(counter)
-	result, err := source.Function(t.Context(), 4)
+	// The prefixed summary costs 3 text tokens + 4 framing tokens, and the
+	// user message costs 1 text token + 4 framing tokens: an exact fit of 12.
+	result, err := source.Function(t.Context(), 12)
 	if err != nil {
 		t.Fatal(err)
 	}
