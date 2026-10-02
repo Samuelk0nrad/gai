@@ -134,7 +134,7 @@ func TestNativeMessagesMapUserPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 1 || messages[0].Role != "user" || messages[0].Content != "initial request" {
+	if len(messages) != 1 || messages[0].Role != "user" || messages[0].Content.Text() != "initial request" {
 		t.Fatalf("payload = %#v", messages)
 	}
 }
@@ -149,7 +149,7 @@ func TestNativeMessagesMapToolErrorPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 1 || messages[0].Role != "tool" || messages[0].ToolCallID != "call_1" || messages[0].Content != `{"error":"upstream unavailable"}` {
+	if len(messages) != 1 || messages[0].Role != "tool" || messages[0].ToolCallID != "call_1" || messages[0].Content.Text() != `{"error":"upstream unavailable"}` {
 		t.Fatalf("payload = %#v", messages)
 	}
 }
@@ -394,7 +394,7 @@ func TestModelTokenizerCountTokens(t *testing.T) {
 	if len(gotReq.Messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(gotReq.Messages))
 	}
-	if gotReq.Messages[0].Content != "hello" {
+	if gotReq.Messages[0].Content.Text() != "hello" {
 		t.Fatalf("unexpected content: %q", gotReq.Messages[0].Content)
 	}
 	if gotReq.MaxTokens == nil || *gotReq.MaxTokens != 1 {

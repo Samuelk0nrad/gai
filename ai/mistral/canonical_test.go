@@ -20,7 +20,7 @@ func TestCanonicalMistralKeepsSystemAndParallelToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(params.Messages) != 2 || params.Messages[0].Role != "system" || params.Messages[0].Content != "rules" || params.Messages[1].Content != "checking" || len(params.Messages[1].ToolCalls) != 2 {
+	if len(params.Messages) != 2 || params.Messages[0].Role != "system" || params.Messages[0].Content.Text() != "rules" || params.Messages[1].Content.Text() != "checking" || len(params.Messages[1].ToolCalls) != 2 {
 		t.Fatalf("params = %#v", params)
 	}
 }

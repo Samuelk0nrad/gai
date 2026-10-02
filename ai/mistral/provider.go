@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lace-ai/gai"
@@ -23,6 +24,10 @@ type Provider struct {
 	debug      gai.ObservationSink
 	catalog    modelcatalog.ModelCatalogCache
 	catalogMu  syncutil.ContextMutex
+	// vision holds discovered image-input support from the same snapshot as
+	// catalog. It is written only with catalogMu held, after catalog.Replace.
+	visionMu sync.RWMutex
+	vision   map[string]bool
 }
 
 var _ ai.Provider = (*Provider)(nil)
@@ -117,7 +122,7 @@ func (p *Provider) ListModelDescriptors(ctx context.Context) ([]ai.ModelDescript
 	}
 	discoveryCtx, cancel := context.WithTimeout(ctx, modelDiscoveryTimeout)
 	defer cancel()
-	discovered, err := p.listModelCatalog(discoveryCtx)
+	discovered, vision, err := p.listModelCatalog(discoveryCtx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -125,26 +130,38 @@ func (p *Provider) ListModelDescriptors(ctx context.Context) ([]ai.ModelDescript
 		return p.fallbackDescriptors(), nil
 	}
 	p.catalog.Replace(discovered)
+	p.visionMu.Lock()
+	p.vision = vision
+	p.visionMu.Unlock()
 	return p.effectiveDescriptors(discovered), nil
 }
 
-func (p *Provider) listModelCatalog(ctx context.Context) ([]ai.ModelDescriptor, error) {
+// visionSupport reports discovered image-input support. It reads only the
+// cached snapshot and never triggers discovery.
+func (p *Provider) visionSupport(model string) (supported, known bool) {
+	p.visionMu.RLock()
+	defer p.visionMu.RUnlock()
+	supported, known = p.vision[model]
+	return supported, known
+}
+
+func (p *Provider) listModelCatalog(ctx context.Context) ([]ai.ModelDescriptor, map[string]bool, error) {
 	if p.httpClient == nil {
-		return nil, fmt.Errorf("mistral model discovery: nil HTTP client")
+		return nil, nil, fmt.Errorf("mistral model discovery: nil HTTP client")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(p.baseURL, "/")+"/v1/models", nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 
 	res, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("mistral model discovery: unexpected status %s", res.Status)
+		return nil, nil, fmt.Errorf("mistral model discovery: unexpected status %s", res.Status)
 	}
 
 	var payload struct {
@@ -153,14 +170,17 @@ func (p *Provider) listModelCatalog(ctx context.Context) ([]ai.ModelDescriptor, 
 			Capabilities struct {
 				CompletionChat  *bool `json:"completion_chat"`
 				FunctionCalling *bool `json:"function_calling"`
+				Reasoning       *bool `json:"reasoning"`
+				Vision          *bool `json:"vision"`
 			} `json:"capabilities"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	descriptors := make([]ai.ModelDescriptor, 0, len(payload.Data))
+	vision := make(map[string]bool)
 	for _, model := range payload.Data {
 		name := strings.TrimSpace(model.ID)
 		if name == "" || model.Capabilities.CompletionChat != nil && !*model.Capabilities.CompletionChat {
@@ -170,9 +190,18 @@ func (p *Provider) listModelCatalog(ctx context.Context) ([]ai.ModelDescriptor, 
 		if model.Capabilities.FunctionCalling != nil {
 			facts.NativeTools = featureSupport(*model.Capabilities.FunctionCalling)
 		}
+		// The catalog flag marks reasoning models. Adjustable-reasoning models
+		// may report false, so false is not treated as a known limitation, and
+		// true says nothing about which reasoning_effort values are accepted.
+		if model.Capabilities.Reasoning != nil && *model.Capabilities.Reasoning {
+			facts.Reasoning = ai.FeatureSupportSupported
+		}
+		if model.Capabilities.Vision != nil {
+			vision[name] = *model.Capabilities.Vision
+		}
 		descriptors = append(descriptors, facts)
 	}
-	return descriptors, nil
+	return descriptors, vision, nil
 }
 
 func (p *Provider) fallbackDescriptors() []ai.ModelDescriptor {
@@ -191,9 +220,11 @@ func (p *Provider) effectiveDescriptors(facts []ai.ModelDescriptor) []ai.ModelDe
 	return descriptors
 }
 
+// effectiveMistralDescriptor lets catalog facts replace static per-model facts,
+// then bounds the result by what the adapter implements.
 func effectiveMistralDescriptor(model string, catalog ai.ModelDescriptor) ai.ModelDescriptor {
-	adapter := mistralAdapterDescriptor(model)
-	return modelcatalog.IntersectModelDescriptors(adapter, modelcatalog.OverrideModelDescriptor(adapter, catalog))
+	facts := modelcatalog.OverrideModelDescriptor(mistralAdapterDescriptor(model), catalog)
+	return modelcatalog.IntersectModelDescriptors(mistralImplementationDescriptor(model), facts)
 }
 
 func featureSupport(supported bool) ai.FeatureSupport {
