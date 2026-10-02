@@ -51,13 +51,86 @@ func (m *Model) Descriptor() ai.ModelDescriptor {
 	return mistralAdapterDescriptor(m.name)
 }
 
-func mistralAdapterDescriptor(model string) ai.ModelDescriptor {
+// mistralImplementationDescriptor reports what this adapter can map for any
+// model. It is an upper bound: per-model facts and the provider catalog can
+// only narrow it, so a catalog flag never enables unimplemented behavior.
+func mistralImplementationDescriptor(model string) ai.ModelDescriptor {
 	return ai.ModelDescriptor{Model: model, NativeMessages: ai.FeatureSupportSupported, NativeTools: ai.FeatureSupportSupported,
 		ToolChoiceModes: []ai.ToolChoiceMode{ai.ToolChoiceAuto, ai.ToolChoiceNone, ai.ToolChoiceRequired},
 		Usage:           ai.FeatureSupportSupported, FinishReason: ai.FeatureSupportSupported, StreamingUsage: ai.FeatureSupportSupported,
 		JSONOutput: ai.FeatureSupportSupported, JSONSchemaOutput: ai.FeatureSupportSupported,
-		Reasoning: ai.FeatureSupportUnsupported, ReasoningEffort: ai.FeatureSupportUnsupported,
+		Reasoning: ai.FeatureSupportSupported, ReasoningEffort: ai.FeatureSupportSupported,
 	}
+}
+
+// adjustableReasoningEfforts are the reasoning_effort values Mistral documents
+// for adjustable-reasoning models. The API enum is wider, but other values are
+// not documented per model, so they are not advertised.
+var adjustableReasoningEfforts = []ai.ReasoningEffort{ai.ReasoningEffortNone, ai.ReasoningEffortHigh}
+
+// mistralAdapterDescriptor reports the static facts GAI knows for model.
+// Reasoning is Unknown for models without documented adjustable reasoning:
+// requests pass local preflight and the provider decides.
+func mistralAdapterDescriptor(model string) ai.ModelDescriptor {
+	d := mistralImplementationDescriptor(model)
+	if isAdjustableReasoningModel(model) {
+		d.ReasoningEfforts = append([]ai.ReasoningEffort(nil), adjustableReasoningEfforts...)
+		return d
+	}
+	d.Reasoning, d.ReasoningEffort = ai.FeatureSupportUnknown, ai.FeatureSupportUnknown
+	return d
+}
+
+func isAdjustableReasoningModel(model string) bool {
+	switch strings.TrimSpace(model) {
+	case MistralSmallLatest, MistralMedium35:
+		return true
+	}
+	return false
+}
+
+// mapReasoning converts the portable reasoning configuration into
+// reasoning_effort. Omitted configuration stays omitted, explicit "none" is
+// sent, and enabling reasoning without an effort selects "high", the only
+// documented setting that returns thinking. Mistral always returns thinking
+// when reasoning is on, so IncludeThoughts cannot hide it.
+func mapReasoning(config ai.ReasoningConfig) (*string, error) {
+	if config.BudgetTokens > 0 {
+		return nil, fmt.Errorf("%w: Mistral has no reasoning token budget; set Reasoning.Effort instead", ai.ErrUnsupportedCapability)
+	}
+	enabled := config.Enabled || config.IncludeThoughts
+	var effort string
+	switch config.Effort {
+	case "":
+		if !enabled {
+			return nil, nil
+		}
+		effort = string(ai.ReasoningEffortHigh)
+	case ai.ReasoningEffortNone:
+		if enabled {
+			return nil, fmt.Errorf("%w: Mistral reasoning effort %q cannot be combined with enabled reasoning or included thoughts", ai.ErrUnsupportedCapability, config.Effort)
+		}
+		effort = string(config.Effort)
+	case ai.ReasoningEffortMinimal, ai.ReasoningEffortLow, ai.ReasoningEffortMedium, ai.ReasoningEffortHigh, ai.ReasoningEffortXHigh:
+		effort = string(config.Effort)
+	default:
+		return nil, fmt.Errorf("%w: Mistral reasoning effort %q", ai.ErrUnsupportedCapability, config.Effort)
+	}
+	return &effort, nil
+}
+
+// preflight applies descriptor validation plus Mistral input checks that the
+// shared descriptor cannot express. It never performs discovery.
+func (m *Model) preflight(req ai.AIRequest) error {
+	if err := ai.ValidateModelRequest(m, req); err != nil {
+		return err
+	}
+	if containsImageInput(req.Messages) {
+		if vision, known := m.client.visionSupport(m.name); known && !vision {
+			return &ai.UnsupportedCapabilityError{Model: m.name, Capability: "image input"}
+		}
+	}
+	return nil
 }
 
 func (m *Model) Close() error {
@@ -74,6 +147,8 @@ type chatCompletionRequest struct {
 	ToolChoice     any                  `json:"tool_choice,omitempty"`
 	ResponseFormat *chatResponseFormat  `json:"response_format,omitempty"`
 	StreamOptions  *chatStreamOptions   `json:"stream_options,omitempty"`
+	// ReasoningEffort is owned by the portable request's Reasoning field.
+	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
 }
 
 type chatStreamOptions struct {
@@ -82,7 +157,7 @@ type chatStreamOptions struct {
 
 type chatMessageRequest struct {
 	Role       string                `json:"role"`
-	Content    string                `json:"content"`
+	Content    chatContent           `json:"content"`
 	ToolCalls  []chatMessageToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string                `json:"tool_call_id,omitempty"`
 }
@@ -122,7 +197,8 @@ type chatCompletionResponse struct {
 	Model   string `json:"model"`
 	Choices []struct {
 		Message struct {
-			Content   string          `json:"content"`
+			// Content is a string or an ordered chunk array.
+			Content   json.RawMessage `json:"content"`
 			ToolCalls json.RawMessage `json:"tool_calls"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
@@ -174,6 +250,11 @@ func buildChatCompletionRequest(req ai.AIRequest, modelName string, stream bool)
 		return chatCompletionRequest{}, err
 	}
 	payload.ResponseFormat = responseFormat
+	effort, err := mapReasoning(req.Reasoning)
+	if err != nil {
+		return chatCompletionRequest{}, err
+	}
+	payload.ReasoningEffort = effort
 	return payload, nil
 }
 func mapNativeMessages(messages []ai.Message) ([]chatMessageRequest, error) {
@@ -191,15 +272,33 @@ func mapNativeMessages(messages []ai.Message) ([]chatMessageRequest, error) {
 				return nil, err
 			}
 			switch part.Kind {
-			case ai.ContentText, ai.ContentJSON:
+			case ai.ContentText, ai.ContentJSON, ai.ContentReasoning, ai.ContentMedia:
+				// Mistral carries content and tool calls in separate fields, so
+				// content after a call cannot keep its canonical position.
 				if len(message.ToolCalls) > 0 {
-					return nil, fmt.Errorf("%w: Mistral text after tool calls", ai.ErrUnsupportedCapability)
+					return nil, fmt.Errorf("%w: Mistral %s content after tool calls", ai.ErrUnsupportedCapability, part.Kind)
 				}
-				if part.Kind == ai.ContentText {
-					message.Content += part.Text
-				} else {
-					message.Content += string(part.JSON)
+			}
+			switch part.Kind {
+			case ai.ContentText:
+				message.Content.appendText(part.Text)
+			case ai.ContentJSON:
+				message.Content.appendText(string(part.JSON))
+			case ai.ContentReasoning:
+				chunk, err := reasoningChunk(part)
+				if err != nil {
+					return nil, err
 				}
+				message.Content = append(message.Content, chunk)
+			case ai.ContentMedia:
+				if m.Role != ai.RoleUser {
+					return nil, &ai.UnsupportedContentError{Provider: "mistral", Kind: ai.ContentMedia, Detail: "images are only accepted in user messages"}
+				}
+				chunk, err := imageChunk(part.Media)
+				if err != nil {
+					return nil, err
+				}
+				message.Content = append(message.Content, chunk)
 			case ai.ContentToolCall:
 				c := part.ToolCall
 				if err := rejectRequiredExtensions(c.Extensions); err != nil {
@@ -211,7 +310,7 @@ func mapNativeMessages(messages []ai.Message) ([]chatMessageRequest, error) {
 				if err != nil {
 					return nil, err
 				}
-				out = append(out, chatMessageRequest{Role: "tool", Content: content, ToolCallID: part.ToolResult.ToolCallID})
+				out = append(out, chatMessageRequest{Role: "tool", Content: textContent(content), ToolCallID: part.ToolResult.ToolCallID})
 			case ai.ContentExtension:
 			default:
 				return nil, fmt.Errorf("%w: Mistral content %q", ai.ErrUnsupportedCapability, part.Kind)
@@ -325,7 +424,7 @@ func (t *Tokenizer) CountTokens(ctx context.Context, text string) (tokens int, e
 		Messages: []chatMessageRequest{
 			{
 				Role:    "user",
-				Content: text,
+				Content: textContent(text),
 			},
 		},
 		MaxTokens: intPtr(maxTokensForTokenCount),
@@ -546,7 +645,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			return false
 		}
 		req = req.Copy()
-		if err := ai.ValidateModelRequest(m, req); err != nil {
+		if err := m.preflight(req); err != nil {
 			streamErr = err
 			emit(ai.Token{Err: err})
 			return
@@ -764,12 +863,13 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				completion.Raw = append(completion.Raw[:0], []byte(event)...)
 			}
 
-			text, err := extractStreamText(chunk.Choices[0].Delta.Content)
+			parts, err := parseResponseContent(chunk.Choices[0].Delta.Content)
 			if err != nil {
-				return err
+				return fmt.Errorf("decode stream content: %w", err)
 			}
-			if text != "" {
-				if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: text}}) {
+			for _, part := range streamContentParts(parts) {
+				p := part
+				if !emit(ai.Token{Part: &p}) {
 					return ctx.Err()
 				}
 			}
@@ -902,34 +1002,23 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 	return ai.DetectToolCallsInStream(ctx, raw, m.debug)
 }
 
-func extractStreamText(raw json.RawMessage) (string, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return "", nil
-	}
-
-	var text string
-	if err := json.Unmarshal(raw, &text); err == nil {
-		return text, nil
-	}
-
-	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(raw, &parts); err == nil {
-		var builder strings.Builder
-		for _, p := range parts {
-			if p.Text == "" {
-				continue
-			}
-			if p.Type == "" || p.Type == "text" {
-				builder.WriteString(p.Text)
-			}
+// streamContentParts prepares delta parts for ai.Message.AppendToken. Empty
+// deltas are skipped. A thinking signature is emitted after its text as an
+// empty reasoning part, so AppendToken attaches it to the reasoning part
+// accumulated from earlier deltas instead of splitting the thinking block.
+func streamContentParts(parts []ai.ContentPart) []ai.ContentPart {
+	out := make([]ai.ContentPart, 0, len(parts))
+	for _, part := range parts {
+		if part.Text == "" && len(part.Extensions) == 0 {
+			continue
 		}
-		return builder.String(), nil
+		if part.Kind == ai.ContentReasoning && part.Text != "" && len(part.Extensions) > 0 {
+			out = append(out, ai.ContentPart{Kind: part.Kind, Text: part.Text})
+			part.Text = ""
+		}
+		out = append(out, part)
 	}
-
-	return "", fmt.Errorf("unsupported stream content payload: %s", string(raw))
+	return out
 }
 
 func intPtr(v int) *int {
@@ -938,7 +1027,7 @@ func intPtr(v int) *int {
 
 func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AIResponse, err error) {
 	req = req.Copy()
-	if err := ai.ValidateModelRequest(m, req); err != nil {
+	if err := m.preflight(req); err != nil {
 		return nil, err
 	}
 	payload, err := m.chatCompletionRequest(req, false)
@@ -1003,9 +1092,23 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	if len(parsed.Choices) == 0 {
 		return nil, ErrNoChoices
 	}
+	contentParts, err := parseResponseContent(parsed.Choices[0].Message.Content)
+	if err != nil {
+		return nil, err
+	}
 	toolCalls, err := mapChatResponseToolCalls(parsed.Choices[0].Message.ToolCalls)
 	if err != nil {
 		return nil, err
+	}
+	// Mistral returns content before tool calls; keep that order. An absent or
+	// string response keeps the leading text part, even when it is empty.
+	if len(contentParts) == 0 {
+		contentParts = ai.TextParts("")
+	}
+	semantic := ai.Message{Role: ai.RoleAssistant, Parts: contentParts}
+	for _, call := range toolCalls {
+		c := call
+		semantic.Parts = append(semantic.Parts, ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &c})
 	}
 	usage := ai.Usage{}
 	if parsed.Usage != nil {
@@ -1022,7 +1125,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 			"output_tokens": usage.OutputTokens,
 		}
 
-		gai.AddObservationContent(ctx, m.debug, fields, "response_text", gai.ContentKindCompletion, parsed.Choices[0].Message.Content)
+		gai.AddObservationContent(ctx, m.debug, fields, "response_text", gai.ContentKindCompletion, semantic.Text())
 		gai.EmitObservation(ctx, m.debug, gai.Observation{
 			Name:   "mistral_generate_response",
 			Source: "ai:mistral.Model.Generate",
@@ -1035,11 +1138,6 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		FinishReason: parsed.Choices[0].FinishReason,
 		InputTokens:  usage.InputTokens,
 		OutputTokens: usage.OutputTokens,
-	}
-	semantic := ai.TextMessage(ai.RoleAssistant, parsed.Choices[0].Message.Content)
-	for _, call := range toolCalls {
-		c := call
-		semantic.Parts = append(semantic.Parts, ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &c})
 	}
 	result.SetMessage(semantic)
 	return result, nil

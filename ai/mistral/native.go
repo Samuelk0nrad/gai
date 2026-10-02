@@ -1,7 +1,10 @@
 package mistral
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,47 +15,172 @@ import (
 // ModelOption configures a concrete model at construction.
 type ModelOption func(*Model)
 
-// ChatCompletionOptions contains Mistral-specific sampling settings. Pointer
-// fields distinguish omission from explicit zero/false. Use NativeClient for
-// native messages, hosted tools, other endpoints, or additional provider fields.
+// ChatCompletionOptions contains typed Mistral chat controls that the portable
+// ai.AIRequest does not model. Pointer fields distinguish omission from an
+// explicit zero/false value; a nil Stop slice or Prediction is omitted.
+//
+// Precedence: the portable request exclusively owns model, messages,
+// max_tokens, tools, tool_choice, response_format, reasoning_effort, and
+// streaming. These options have no fields for those controls, so they can
+// neither override nor be overridden by portable settings. Options are
+// validated before every request; invalid values fail without a provider call.
+//
+// Use NativeClient for native messages, hosted tools, multiple completions,
+// prompt_mode, guardrails, service_tier, metadata, or other endpoints.
 type ChatCompletionOptions struct {
+	// Temperature is the sampling temperature. It must be non-negative.
 	Temperature *float64 `json:"temperature,omitempty"`
-	TopP        *float64 `json:"top_p,omitempty"`
-	RandomSeed  *int     `json:"random_seed,omitempty"`
-	SafePrompt  *bool    `json:"safe_prompt,omitempty"`
+	// TopP is the nucleus-sampling probability mass, between 0 and 1.
+	TopP *float64 `json:"top_p,omitempty"`
+	// RandomSeed makes sampling deterministic across calls. It must be non-negative.
+	RandomSeed *int `json:"random_seed,omitempty"`
+	// SafePrompt injects Mistral's safety prompt before the conversation.
+	SafePrompt *bool `json:"safe_prompt,omitempty"`
+	// Stop ends generation at any of these sequences. Entries must be non-empty.
+	Stop []string `json:"stop,omitempty"`
+	// PresencePenalty penalizes words or phrases that already appeared.
+	PresencePenalty *float64 `json:"presence_penalty,omitempty"`
+	// FrequencyPenalty penalizes words in proportion to their frequency.
+	FrequencyPenalty *float64 `json:"frequency_penalty,omitempty"`
+	// ParallelToolCalls controls whether the model may call several tools in
+	// one turn. Mistral's default is true; set false to request one call.
+	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
+	// Prediction supplies expected output to speed up generation.
+	Prediction *Prediction `json:"prediction,omitempty"`
+	// PromptCacheKey groups requests that share a prompt prefix for caching.
+	PromptCacheKey *string `json:"prompt_cache_key,omitempty"`
+}
+
+// Prediction is Mistral's predicted-output control.
+type Prediction struct {
+	// Content is the expected completion. It must be non-empty.
+	Content string
+}
+
+// MarshalJSON encodes the documented {"type":"content"} prediction shape.
+func (p Prediction) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Type    string `json:"type"`
+		Content string `json:"content"`
+	}{"content", p.Content})
+}
+
+// UnmarshalJSON decodes the documented prediction shape.
+func (p *Prediction) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Type    string `json:"type"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.Type != "" && wire.Type != "content" {
+		return fmt.Errorf("mistral prediction type %q", wire.Type)
+	}
+	p.Content = wire.Content
+	return nil
+}
+
+// ErrInvalidChatCompletionOptions reports invalid typed Mistral options.
+var ErrInvalidChatCompletionOptions = errors.New("invalid mistral chat completion options")
+
+// Validate checks option values that can be verified locally.
+func (o ChatCompletionOptions) Validate() error {
+	invalid := func(format string, args ...any) error {
+		return fmt.Errorf("%w: %s", ErrInvalidChatCompletionOptions, fmt.Sprintf(format, args...))
+	}
+	finite := func(name string, v *float64) error {
+		if v != nil && (math.IsNaN(*v) || math.IsInf(*v, 0)) {
+			return invalid("%s must be finite", name)
+		}
+		return nil
+	}
+	for _, field := range []struct {
+		name  string
+		value *float64
+	}{{"temperature", o.Temperature}, {"top_p", o.TopP}, {"presence_penalty", o.PresencePenalty}, {"frequency_penalty", o.FrequencyPenalty}} {
+		if err := finite(field.name, field.value); err != nil {
+			return err
+		}
+	}
+	if o.Temperature != nil && *o.Temperature < 0 {
+		return invalid("temperature must be non-negative")
+	}
+	if o.TopP != nil && (*o.TopP < 0 || *o.TopP > 1) {
+		return invalid("top_p must be between 0 and 1")
+	}
+	if o.RandomSeed != nil && *o.RandomSeed < 0 {
+		return invalid("random_seed must be non-negative")
+	}
+	for i, stop := range o.Stop {
+		if stop == "" {
+			return invalid("stop[%d] is empty", i)
+		}
+	}
+	if o.Prediction != nil && o.Prediction.Content == "" {
+		return invalid("prediction content is empty")
+	}
+	if o.PromptCacheKey != nil && strings.TrimSpace(*o.PromptCacheKey) == "" {
+		return invalid("prompt_cache_key is empty")
+	}
+	return nil
 }
 
 // WithChatCompletionOptions snapshots settings for synchronous and streaming
 // calls. Later mutation of the supplied values does not affect the model.
+// Invalid values are reported by Generate and GenerateStream.
 func WithChatCompletionOptions(options ChatCompletionOptions) ModelOption {
 	options = options.copy()
 	return func(m *Model) { m.chatOptions = options.copy() }
 }
 
+// With returns an independent copy of m with options applied, sharing the
+// provider. m is not modified. WithChatCompletionOptions replaces the whole
+// option set, so build per-call options from the complete desired values.
+func (m *Model) With(options ...ModelOption) *Model {
+	derived := *m
+	derived.chatOptions = m.chatOptions.copy()
+	for _, option := range options {
+		if option != nil {
+			option(&derived)
+		}
+	}
+	return &derived
+}
+
 func (o ChatCompletionOptions) copy() ChatCompletionOptions {
-	if o.Temperature != nil {
-		v := *o.Temperature
-		o.Temperature = &v
-	}
-	if o.TopP != nil {
-		v := *o.TopP
-		o.TopP = &v
-	}
-	if o.RandomSeed != nil {
-		v := *o.RandomSeed
-		o.RandomSeed = &v
-	}
-	if o.SafePrompt != nil {
-		v := *o.SafePrompt
-		o.SafePrompt = &v
-	}
+	o.Temperature = clonePtr(o.Temperature)
+	o.TopP = clonePtr(o.TopP)
+	o.RandomSeed = clonePtr(o.RandomSeed)
+	o.SafePrompt = clonePtr(o.SafePrompt)
+	o.PresencePenalty = clonePtr(o.PresencePenalty)
+	o.FrequencyPenalty = clonePtr(o.FrequencyPenalty)
+	o.ParallelToolCalls = clonePtr(o.ParallelToolCalls)
+	o.Prediction = clonePtr(o.Prediction)
+	o.PromptCacheKey = clonePtr(o.PromptCacheKey)
+	o.Stop = append([]string(nil), o.Stop...)
 	return o
 }
 
+func clonePtr[T any](v *T) *T {
+	if v == nil {
+		return nil
+	}
+	copy := *v
+	return &copy
+}
+
 func (m *Model) chatCompletionRequest(req ai.AIRequest, streaming bool) (chatCompletionRequest, error) {
+	options := m.chatOptions.copy()
+	if err := options.Validate(); err != nil {
+		return chatCompletionRequest{}, err
+	}
 	payload, err := buildChatCompletionRequest(req, m.name, streaming)
-	payload.ChatCompletionOptions = m.chatOptions.copy()
-	return payload, err
+	if err != nil {
+		return chatCompletionRequest{}, err
+	}
+	payload.ChatCompletionOptions = options
+	return payload, nil
 }
 
 // NativeClient provides native HTTP access, not an SDK or a normalized response.

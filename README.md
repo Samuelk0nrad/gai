@@ -159,6 +159,11 @@ GAI currently includes these adapters:
 | Mistral | `ai/mistral` |
 | OpenAI | `ai/openai` |
 
+The [Mistral provider guide](docs/providers/mistral.md) documents reasoning,
+image input, typed native options, and capability boundaries. Mistral reasoning
+requests are no longer rejected locally. Models with documented adjustable
+reasoning accept the `none` and `high` efforts. For other models the API decides.
+
 Each provider exposes the shared `ai.Provider` interface:
 
 ```go
