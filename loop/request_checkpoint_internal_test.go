@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"reflect"
 	"testing"
 
@@ -25,6 +26,30 @@ func (checkpointSliceModel) GenerateStream(context.Context, ai.AIRequest) <-chan
 	ch := make(chan ai.Token)
 	close(ch)
 	return ch
+}
+
+type checkpointValueModel struct{ identity any }
+
+func (checkpointValueModel) Name() string { return "value-model" }
+func (checkpointValueModel) GenerateStream(context.Context, ai.AIRequest) <-chan ai.Token {
+	ch := make(chan ai.Token)
+	close(ch)
+	return ch
+}
+
+type checkpointTransportModel struct{ transport http.RoundTripper }
+
+func (checkpointTransportModel) Name() string { return "transport-value-model" }
+func (checkpointTransportModel) GenerateStream(context.Context, ai.AIRequest) <-chan ai.Token {
+	ch := make(chan ai.Token)
+	close(ch)
+	return ch
+}
+
+type checkpointRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f checkpointRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 type checkpointTestCounter struct {
@@ -192,5 +217,59 @@ func TestRequestCheckpointBudgetRejectsBoundaryAndOverflow(t *testing.T) {
 	checkpoint.input = int(^uint(0) >> 1)
 	if _, err = run.checkRequestBudget(t.Context(), request); !errors.Is(err, ai.ErrRequestCountFailed) {
 		t.Fatalf("overflow error=%v", err)
+	}
+}
+
+func TestRequestCheckpointUncomparableInterfaceFieldsUseFullEstimate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		model ai.Model
+	}{
+		{"slice", checkpointValueModel{identity: []string{"value"}}},
+		{"map", checkpointValueModel{identity: map[string]int{"value": 1}}},
+		{"function", checkpointValueModel{identity: func() {}}},
+		{"nested interface array", checkpointValueModel{identity: [1]any{[]string{"value"}}}},
+		{"round trip function adapter", checkpointTransportModel{transport: checkpointRoundTripFunc(func(*http.Request) (*http.Response, error) { return nil, nil })}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !reflect.TypeOf(tc.model).Comparable() {
+				t.Fatal("fixture must have a statically comparable model type")
+			}
+			request := ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "question")}}
+			counter := &checkpointTestCounter{id: "test/counter-v1"}
+			checkpoint := &requestCheckpoint{request: request.Copy(), model: tc.model, modelName: ai.ModelName(tc.model), counterID: ai.RequestEstimateID + ":" + counter.ID(), input: 40}
+			if checkpoint.matches(request, tc.model, counter) {
+				t.Fatal("uncomparable model value reused checkpoint")
+			}
+			run := &runExecution{owner: &Loop{Model: tc.model}, ctx: t.Context(), counter: counter, checkpoint: checkpoint, budget: ai.RequestBudgetConfig{Limit: 100}}
+			result, err := run.checkRequestBudget(t.Context(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Method != "local_estimate" || result.CheckpointTokens != 0 || result.InputTokens != 8 || len(counter.inputs) != 1 {
+				t.Fatalf("unsafe equality did not fall back to full estimation: %+v", result)
+			}
+		})
+	}
+}
+
+func TestRequestCheckpointComparableValueIdentityStillMatches(t *testing.T) {
+	for _, identity := range []any{"stable", 17, [1]any{"stable"}, (*http.Transport)(nil)} {
+		model := checkpointValueModel{identity: identity}
+		request := ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "question")}}
+		counter := &checkpointTestCounter{id: "test/counter-v1"}
+		checkpoint := &requestCheckpoint{request: request.Copy(), model: model, modelName: model.Name(), counterID: ai.RequestEstimateID + ":" + counter.ID(), input: 40}
+		equivalent := checkpointValueModel{identity: identity}
+		if !checkpoint.matches(request, equivalent, counter) {
+			t.Fatalf("safe comparable value lost identity: %#v", identity)
+		}
+		run := &runExecution{owner: &Loop{Model: equivalent}, ctx: t.Context(), counter: counter, checkpoint: checkpoint, budget: ai.RequestBudgetConfig{Limit: 100}}
+		result, err := run.checkRequestBudget(t.Context(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Method != "usage_checkpoint" || result.InputTokens != 40 || len(counter.inputs) != 0 {
+			t.Fatalf("equal comparable model was fully recounted: %+v", result)
+		}
 	}
 }

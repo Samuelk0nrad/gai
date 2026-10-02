@@ -183,10 +183,11 @@ func (c *requestCheckpoint) matches(request ai.AIRequest, model ai.Model, counte
 }
 
 func sameModel(a, b ai.Model) bool {
-	if a == nil || b == nil || reflect.TypeOf(a) != reflect.TypeOf(b) || !reflect.TypeOf(a).Comparable() {
+	if a == nil || b == nil || reflect.TypeOf(a) != reflect.TypeOf(b) {
 		return false
 	}
-	return a == b
+	left, right := reflect.ValueOf(a), reflect.ValueOf(b)
+	return left.Comparable() && right.Comparable() && left.Equal(right)
 }
 
 func nilRuntimeDependency(value any) bool {
