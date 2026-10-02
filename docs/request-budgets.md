@@ -128,6 +128,15 @@ fit. The builder calls each source once and does not drop or reconstruct a
 returned part to fit. Direct builder use without a loop's request allocation
 retains its existing raw-part counting behavior.
 
+Built-in renderers use quiet budget previews and publish render
+callbacks and observations only during final request rendering. Custom renderers
+with notifications should implement the optional `context.PreviewRenderer`:
+`RenderPreview` must produce the same text and errors as `Render` without the
+renderer's notifications. Render-only implementations remain supported through
+`Render`, including wrappers that override an embedded renderer's output.
+Preview still invokes `Part.Render`, so custom parts remain responsible for
+effects inside that method.
+
 `TokenCounter.Fidelity` describes text counting, while request diagnostics always
 mark this portable projection as estimated. Media, provider serialization, hidden
 reasoning, and native options can differ from the projection. Its breakdowns are

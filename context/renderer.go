@@ -21,6 +21,16 @@ type Renderer interface {
 	Render(ctx context.Context, contextParts []Part) (string, error)
 }
 
+// PreviewRenderer optionally renders budget candidates without publishing render
+// results. RenderPreview must match Render's output and errors for the same stable
+// parts while omitting the renderer's callbacks and observations. It still calls
+// Part.Render; custom parts are responsible for their own effects. Builder uses
+// quiet previews internally for the built-in XML and Simple renderers.
+type PreviewRenderer interface {
+	Renderer
+	RenderPreview(ctx context.Context, contextParts []Part) (string, error)
+}
+
 // ToolSignature is the minimal tool metadata required for prompt formatting.
 type ToolSignature interface {
 	Name() string
@@ -72,6 +82,26 @@ var (
 	_ Renderer = (*SimpleRenderer)(nil)
 )
 
+// renderPreview recognizes exact built-in types, so a custom renderer that
+// embeds one and overrides Render keeps its own formatting unless it explicitly
+// implements PreviewRenderer. A promoted preview would bypass that override.
+func renderPreview(ctx context.Context, renderer Renderer, parts []Part) (string, error) {
+	switch r := renderer.(type) {
+	case XMLRenderer:
+		return r.render(ctx, parts, false)
+	case *XMLRenderer:
+		return r.render(ctx, parts, false)
+	case SimpleRenderer:
+		return r.render(ctx, parts, false)
+	case *SimpleRenderer:
+		return r.render(ctx, parts, false)
+	case PreviewRenderer:
+		return r.RenderPreview(ctx, parts)
+	default:
+		return renderer.Render(ctx, parts)
+	}
+}
+
 func renderToolSignatures(tools []ToolSignature) (string, error) {
 	if len(tools) == 0 {
 		return "", nil
@@ -108,10 +138,19 @@ func renderToolSignatures(tools []ToolSignature) (string, error) {
 }
 
 func (r XMLRenderer) Render(ctx context.Context, parts []Part) (string, error) {
-	obs := newRenderObserver("xml", r.ObservationSink, r.ObservationPreviewChars)
+	return r.render(ctx, parts, true)
+}
+
+func (r XMLRenderer) render(ctx context.Context, parts []Part, publish bool) (string, error) {
+	var obs *renderObserver
+	if publish {
+		obs = newRenderObserver("xml", r.ObservationSink, r.ObservationPreviewChars)
+	}
 	obs.started(ctx, len(parts))
 	if len(parts) == 0 {
-		r.notifyRenderResult(parts, "")
+		if publish {
+			r.notifyRenderResult(parts, "")
+		}
 		obs.finished(ctx, nil, "")
 		return "", nil
 	}
@@ -138,16 +177,27 @@ func (r XMLRenderer) Render(ctx context.Context, parts []Part) (string, error) {
 	}
 
 	prompt := builder.String()
-	r.notifyRenderResult(parts, prompt)
+	if publish {
+		r.notifyRenderResult(parts, prompt)
+	}
 	obs.finished(ctx, nil, prompt)
 	return prompt, nil
 }
 
 func (r SimpleRenderer) Render(ctx context.Context, parts []Part) (string, error) {
-	obs := newRenderObserver("simple", r.ObservationSink, r.ObservationPreviewChars)
+	return r.render(ctx, parts, true)
+}
+
+func (r SimpleRenderer) render(ctx context.Context, parts []Part, publish bool) (string, error) {
+	var obs *renderObserver
+	if publish {
+		obs = newRenderObserver("simple", r.ObservationSink, r.ObservationPreviewChars)
+	}
 	obs.started(ctx, len(parts))
 	if len(parts) == 0 {
-		r.notifyRenderResult(parts, "")
+		if publish {
+			r.notifyRenderResult(parts, "")
+		}
 		obs.finished(ctx, nil, "")
 		return "", nil
 	}
@@ -168,7 +218,9 @@ func (r SimpleRenderer) Render(ctx context.Context, parts []Part) (string, error
 	}
 
 	prompt := strings.Join(blocks, "\n\n")
-	r.notifyRenderResult(parts, prompt)
+	if publish {
+		r.notifyRenderResult(parts, prompt)
+	}
 	obs.finished(ctx, nil, prompt)
 	return prompt, nil
 }

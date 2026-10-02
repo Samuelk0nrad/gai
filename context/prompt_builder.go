@@ -294,7 +294,7 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 	if limit > 0 {
 		if b.allocationOverride && b.counter != nil && len(b.SystemInstructions) > 0 {
 			var messages []ai.Message
-			messages, err = b.renderMessages(ctx, []Part{NewSystemPart(b.SystemInstructions)}, ai.RoleSystem)
+			messages, err = b.renderMessages(ctx, []Part{NewSystemPart(b.SystemInstructions)}, ai.RoleSystem, true)
 			if err == nil {
 				stats.SystemTokens, err = ai.EstimateMessageTokens(ctx, messages, b.counter)
 			}
@@ -428,7 +428,7 @@ func (b *Builder) BuildRequest(ctx context.Context, conv Conversation) (ai.AIReq
 	}
 	var messages []ai.Message
 	if len(b.SystemInstructions) > 0 {
-		system, err := b.renderMessages(ctx, []Part{NewSystemPart(b.SystemInstructions)}, ai.RoleSystem)
+		system, err := b.renderMessages(ctx, []Part{NewSystemPart(b.SystemInstructions)}, ai.RoleSystem, false)
 		if err != nil {
 			return ai.AIRequest{}, err
 		}
@@ -441,7 +441,7 @@ func (b *Builder) BuildRequest(ctx context.Context, conv Conversation) (ai.AIReq
 		if part == nil {
 			continue
 		}
-		projected, err := b.partMessages(ctx, part)
+		projected, err := b.partMessages(ctx, part, false)
 		if err != nil {
 			return ai.AIRequest{}, err
 		}
@@ -465,7 +465,7 @@ func (b *Builder) BuildRequest(ctx context.Context, conv Conversation) (ai.AIReq
 
 // partMessages is shared by source allocation and final request construction.
 // Canonical conversation parts already carry their message envelopes.
-func (b *Builder) partMessages(ctx context.Context, part Part) ([]ai.Message, error) {
+func (b *Builder) partMessages(ctx context.Context, part Part, preview bool) ([]ai.Message, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -475,11 +475,17 @@ func (b *Builder) partMessages(ctx context.Context, part Part) ([]ai.Message, er
 	if canonical, ok := part.(ConversationPart); ok {
 		return ai.CloneMessages(canonical.ConversationMessages()), nil
 	}
-	return b.renderMessages(ctx, []Part{part}, ai.RoleUser)
+	return b.renderMessages(ctx, []Part{part}, ai.RoleUser, preview)
 }
 
-func (b *Builder) renderMessages(ctx context.Context, parts []Part, role ai.Role) ([]ai.Message, error) {
-	text, err := b.Renderer.Render(ctx, parts)
+func (b *Builder) renderMessages(ctx context.Context, parts []Part, role ai.Role, preview bool) ([]ai.Message, error) {
+	var text string
+	var err error
+	if preview {
+		text, err = renderPreview(ctx, b.Renderer, parts)
+	} else {
+		text, err = b.Renderer.Render(ctx, parts)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -487,7 +493,7 @@ func (b *Builder) renderMessages(ctx context.Context, parts []Part, role ai.Role
 }
 
 func (b *Builder) projectPartTokens(ctx context.Context, part Part) (int, error) {
-	messages, err := b.partMessages(ctx, part)
+	messages, err := b.partMessages(ctx, part, true)
 	if err != nil {
 		return 0, err
 	}
