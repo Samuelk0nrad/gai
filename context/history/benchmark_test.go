@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/lace-ai/gai/ai"
+	"github.com/lace-ai/gai/ai/openai"
 	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/context/history"
 	"github.com/lace-ai/gai/context/tooldefinitions"
@@ -16,6 +17,19 @@ import (
 // building a fresh prompt each time, as repeated agent runs do. History includes
 // 8 KiB tool results whose outgoing projection is truncated to 500 runes.
 func BenchmarkRepeatedPromptBuild(b *testing.B) {
+	b.Run("estimate", func(b *testing.B) {
+		benchmarkRepeatedPromptBuild(b, ai.TextTokenEstimator{})
+	})
+	b.Run("openai", func(b *testing.B) {
+		model, err := openai.New("test", nil).Model(openai.GPT41)
+		if err != nil {
+			b.Fatal(err)
+		}
+		benchmarkRepeatedPromptBuild(b, model.(ai.TokenCounterProvider).TokenCounter())
+	})
+}
+
+func benchmarkRepeatedPromptBuild(b *testing.B, counter ai.TokenCounter) {
 	for _, turnCount := range []int{0, 10, 100} {
 		b.Run(fmt.Sprintf("turns_%d", turnCount), func(b *testing.B) {
 			ctx := context.Background()
@@ -52,7 +66,7 @@ func BenchmarkRepeatedPromptBuild(b *testing.B) {
 				builder := gaictx.New(gaictx.Definition{
 					SystemInstructions: []gaictx.Part{instructions},
 					ContextSources:     []gaictx.ContextSource{history.NewHistory("benchmark", store)},
-					PromptInput:        input, TokenBudget: 2000000,
+					PromptInput:        input, TokenBudget: 2000000, TokenCounter: counter,
 				})
 				if _, err := builder.BuildContext(ctx); err != nil {
 					b.Fatal(err)

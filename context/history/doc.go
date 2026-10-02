@@ -15,7 +15,9 @@
 // build and its observations. HistoryStore persists semantic state, never token
 // caches. Selection and Part.Tokens count the same previewed messages, including
 // the summary prefix. These are text estimates rather than complete provider
-// request costs.
+// request costs. Repeated builds recount the selected messages. Applications
+// choosing an encoding counter pay its tokenization cost on each build; the
+// generic ai.TextTokenEstimator avoids that cost. No runtime cache is implicit.
 //
 // Counting does not mutate messages, turns, parts, or summaries. Shared content
 // must remain read-only, and concurrent counting requires a concurrency-safe
