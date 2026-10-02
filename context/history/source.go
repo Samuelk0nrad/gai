@@ -48,12 +48,10 @@ func (s *HistoryState) UnmarshalJSON(data []byte) error {
 }
 
 // HistoryStore loads and saves history state for a session.
-// Implementations also store cached per-turn token counts through TurnTokenStore.
+// Calculated token counts are build-local and are never written to the store.
 type HistoryStore interface {
 	GetLastHistoryState(ctx context.Context, sessionID string) (*HistoryState, error)
 	SaveHistoryState(ctx context.Context, sessionID string, state *HistoryState) error
-
-	gaictx.TurnTokenStore
 }
 
 // HistorySource renders persisted conversation history as prompt context.
@@ -137,7 +135,21 @@ func (s *HistorySource) ObservationSink(debug gai.ObservationSink, conv gaictx.C
 	s.debug = debug
 }
 
-func (s *HistorySource) Function(ctx context.Context, tokenBudget int) (result gaictx.Part, err error) {
+// Function returns a semantic history part selected for tokenBudget.
+func (s *HistorySource) Function(ctx context.Context, tokenBudget int) (gaictx.Part, error) {
+	part, _, err := s.build(ctx, tokenBudget)
+	return part, err
+}
+
+// FunctionWithTokens returns the selected part and the token total calculated
+// during this invocation with the configured counter. Builder can consume that
+// total without recounting the part; the part itself remains stateless.
+func (s *HistorySource) FunctionWithTokens(ctx context.Context, tokenBudget int) (gaictx.Part, int, error) {
+	return s.build(ctx, tokenBudget)
+}
+
+// build selects and counts one snapshot. Its token total is local to this call.
+func (s *HistorySource) build(ctx context.Context, tokenBudget int) (result gaictx.Part, tokens int, err error) {
 	ctx, obs := newHistoryBuildObserver(ctx, s.debug, s.sessionID, tokenBudget, s.summarize)
 	defer func() {
 		obs.Finish(err)
@@ -145,18 +157,18 @@ func (s *HistorySource) Function(ctx context.Context, tokenBudget int) (result g
 
 	if s.historyStateStore == nil {
 		obs.StoreMissing(ctx)
-		return nil, gaictx.ErrSessionStoreNotFound
+		return nil, 0, gaictx.ErrSessionStoreNotFound
 	}
 	if s.counter == nil {
 		obs.TokenCounterMissing(ctx)
-		return nil, gaictx.ErrTokenCounterNotFound
+		return nil, 0, gaictx.ErrTokenCounterNotFound
 	}
 	counterID := s.counter.ID()
 	obs.SetTokenCounterID(counterID)
 	lastHistoryState, err := s.historyStateStore.GetLastHistoryState(ctx, s.sessionID)
 	if err != nil {
 		obs.StateLoadFailed(ctx, err)
-		return nil, err
+		return nil, 0, err
 	}
 	var part Part
 	summaryIncluded := false
@@ -168,7 +180,11 @@ func (s *HistorySource) Function(ctx context.Context, tokenBudget int) (result g
 	if lastHistoryState == nil {
 		obs.StateMissing(ctx)
 	} else {
-		lastHistoryState.Turns = sortTurnsByCount(lastHistoryState.Turns)
+		// The loaded state belongs to the store. Sorting and setting the storage
+		// version apply only to this build's copy; counting reads shared content.
+		stateCopy := *lastHistoryState
+		stateCopy.Turns = sortTurnsByCount(append([]gaictx.Turn(nil), lastHistoryState.Turns...))
+		lastHistoryState = &stateCopy
 		obs.MarkStatePresent()
 		state := lastHistoryState
 		summarized := false
@@ -183,7 +199,7 @@ func (s *HistorySource) Function(ctx context.Context, tokenBudget int) (result g
 
 			buildBudgetReached, err := s.buildPart(ctx, state, tokenBudget, s.counter, &part, obs, &tokenCount, &turnCount, &messageCount, &includedTurnCount, &summaryIncluded)
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			budgetReached = buildBudgetReached
 
@@ -192,7 +208,7 @@ func (s *HistorySource) Function(ctx context.Context, tokenBudget int) (result g
 				state, err = s.summarizeState(ctx, lastHistoryState, tokenBudget)
 				if err != nil {
 					obs.SummaryFailed(ctx, err)
-					return nil, err
+					return nil, 0, err
 				}
 				if state != lastHistoryState && state.Summary != nil {
 					obs.MarkSummaryGenerated()
@@ -208,17 +224,16 @@ func (s *HistorySource) Function(ctx context.Context, tokenBudget int) (result g
 				state.SchemaVersion = HistorySchemaVersion
 				if err := s.historyStateStore.SaveHistoryState(ctx, s.sessionID, state); err != nil {
 					obs.StateSaveFailed(ctx, err)
-					return nil, err
+					return nil, 0, err
 				}
 				obs.MarkStateSaved()
 			}
 			break
 		}
 	}
-	part.saveTokens(counterID, tokenCount)
 	obs.BuildFinished(ctx, &part, tokenCount, turnCount, includedTurnCount, messageCount)
 	result = &part
-	return result, nil
+	return result, tokenCount, nil
 }
 
 func (s *HistorySource) buildPart(
@@ -241,7 +256,16 @@ func (s *HistorySource) buildPart(
 		if err := state.Summary.Content.Validate(); err != nil {
 			return false, err
 		}
-		summaryTokenCount, err := state.Summary.TokenCount(counter)
+		// Count the same prefixed summary message returned in the prompt.
+		summaryParts := ai.TextParts("Conversation summary:\n" + state.Summary.Content.Text)
+		if len(state.Summary.Content.Extensions) > 0 {
+			// Opaque state belongs to the original part, whose text must stay
+			// unchanged. Only plain summaries can coalesce the prefix.
+			summaryParts = ai.TextParts("Conversation summary:\n")
+			summaryParts = append(summaryParts, ai.CloneParts([]ai.ContentPart{state.Summary.Content})...)
+		}
+		summaryPart := Part{Messages: []ai.Message{{Role: ai.RoleUser, Parts: summaryParts}}}
+		summaryTokenCount, err := summaryPart.Tokens(ctx, counter)
 		if err != nil {
 			obs.SummaryTokenCountFailed(ctx, state.Summary, err)
 			return false, err
@@ -251,11 +275,9 @@ func (s *HistorySource) buildPart(
 			return true, nil
 		}
 		*summaryIncluded = true
-		summaryParts := ai.TextParts("Conversation summary:\n")
-		summaryParts = append(summaryParts, ai.CloneParts([]ai.ContentPart{state.Summary.Content})...)
-		part.Messages = append(part.Messages, ai.Message{Role: ai.RoleUser, Parts: summaryParts})
+		part.Messages = append(part.Messages, summaryPart.Messages...)
 		*tokenCount += summaryTokenCount
-		obs.SummaryIncluded(ctx, state.Summary)
+		obs.SummaryIncluded(ctx, state.Summary, summaryTokenCount)
 	} else {
 		obs.SummaryMissing(ctx)
 	}
@@ -265,7 +287,16 @@ func (s *HistorySource) buildPart(
 	for i := len(state.Turns) - 1; i >= 0; i-- {
 		turn := &state.Turns[i]
 		*turnCount++
-		tokens, err := turn.Tokenize(ctx, s.counter, s.historyStateStore)
+		// Selection and final accounting use the same preview projection. The
+		// candidate owns no token cache and only reads the stored messages.
+		candidate := Part{}
+		if turn.UserMessage != nil {
+			candidate.Messages = append(candidate.Messages, turn.UserMessage.Message)
+		}
+		for _, message := range turn.Messages {
+			candidate.Messages = append(candidate.Messages, message.Message)
+		}
+		tokens, err := candidate.Tokens(ctx, counter)
 		if err != nil {
 			turnCopy := *turn
 			obs.TurnTokenizeFailed(ctx, &turnCopy, err)

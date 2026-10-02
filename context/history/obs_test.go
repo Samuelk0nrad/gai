@@ -87,3 +87,18 @@ func TestHistoryBuildObserverPreservesTelemetryContract(t *testing.T) {
 		}
 	}
 }
+
+func TestSummaryObservationsUseBuildLocalCounts(t *testing.T) {
+	t.Parallel()
+	var events []gai.Observation
+	sink := gai.ObservationSinkFunc(func(_ context.Context, event gai.Observation) { events = append(events, event) })
+	ctx, observer := newHistoryBuildObserver(t.Context(), sink, "session", 100, false)
+	defer observer.Finish(nil)
+	observer.SetTokenCounterID("counter")
+	summary := &Summary{ID: "summary"}
+	observer.SummaryIncluded(ctx, summary, 7)
+	observer.SummaryGenerated(ctx, summary, 11, 2, 1, false)
+	if len(events) != 2 || events[0].Fields["summary_tokens"] != 7 || events[1].Fields["summary_tokens"] != 11 || observer.summaryTokens != 11 {
+		t.Fatalf("summary counts lost: %#v", events)
+	}
+}

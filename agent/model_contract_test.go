@@ -170,6 +170,3 @@ func (localCountHistoryStore) GetLastHistoryState(context.Context, string) (*his
 func (localCountHistoryStore) SaveHistoryState(context.Context, string, *history.HistoryState) error {
 	return nil
 }
-func (localCountHistoryStore) UpdateTurnTokens(context.Context, string, string, int) error {
-	return nil
-}

@@ -2,292 +2,152 @@ package context_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"github.com/lace-ai/gai/ai"
+	"sync"
 	"testing"
 
-	"github.com/lace-ai/gai"
+	"github.com/lace-ai/gai/ai"
 	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/testutil/mocks"
 )
 
-type turnTokenUpdate struct {
-	turnID  string
-	counter string
-	tokens  int
-}
-
-type turnTokenStore struct {
-	updates []turnTokenUpdate
-	err     error
-}
-
-func (s *turnTokenStore) UpdateTurnTokens(ctx context.Context, turnID string, counter string, tokens int) error {
-	s.updates = append(s.updates, turnTokenUpdate{
-		turnID:  turnID,
-		counter: counter,
-		tokens:  tokens,
-	})
-	return s.err
-}
-
-func TestTurnTokenizeUsesExistingTurnCount(t *testing.T) {
+func TestTurnTokensCountsCombinedContentOnEveryCall(t *testing.T) {
 	t.Parallel()
-
-	counter := &mocks.MockTokenCounter{}
-	store := &turnTokenStore{}
 	turn := gaictx.Turn{
-		ID:         "turn-1",
-		TokenCount: map[string]int{"mock.counter": 7},
+		UserMessage: &gaictx.StoredMessage{Message: ai.TextMessage(ai.RoleUser, "hello")},
 		Messages: []gaictx.StoredMessage{
-			{Message: ai.Message{Parts: ai.TextParts("should not be counted")}},
+			{Message: ai.TextMessage(ai.RoleAssistant, "assistant response")},
+			{Message: ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call", Name: "search", Parts: ai.TextParts("found docs")}}}}},
 		},
 	}
-
-	tokens, err := turn.Tokenize(context.Background(), counter, store)
+	encoded, err := json.Marshal(turn.Messages[1].Message)
 	if err != nil {
-		t.Fatalf("Tokenize failed: %v", err)
+		t.Fatal(err)
 	}
-	if tokens != 7 {
-		t.Fatalf("expected cached turn tokens, got %d", tokens)
-	}
-	if counter.CountCalls != 0 {
-		t.Fatalf("expected counter not to be called, got %d calls", counter.CountCalls)
-	}
-	if len(store.updates) != 0 {
-		t.Fatalf("expected cached count not to be saved again, got %+v", store.updates)
-	}
-}
-
-func TestTurnTokenizeSumsExistingMessageCounts(t *testing.T) {
-	t.Parallel()
-
-	counter := &mocks.MockTokenCounter{}
-	store := &turnTokenStore{}
-	turn := gaictx.Turn{
-		ID: "turn-1",
-		UserMessage: &gaictx.StoredMessage{
-			TokenCount: map[string]int{"mock.counter": 1}, Message: ai.Message{Parts: ai.TextParts("hello")},
-		},
-		Messages: []gaictx.StoredMessage{
-			{
-
-				TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Parts: ai.TextParts("assistant response")},
-			},
-			{
-
-				TokenCount: map[string]int{"mock.counter": 3}, Message: ai.Message{Parts: []ai.ContentPart{
-					{Kind: ai.ContentToolResult,
-						ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "tool", Parts: ai.TextParts("result text")}}}},
-			},
-		},
-	}
-
-	tokens, err := turn.Tokenize(context.Background(), counter, store)
+	combined := "hello\nassistant response\n" + string(encoded)
+	want, err := (ai.TextTokenEstimator{}).CountTokens(t.Context(), combined)
 	if err != nil {
-		t.Fatalf("Tokenize failed: %v", err)
+		t.Fatal(err)
 	}
-	if tokens != 6 {
-		t.Fatalf("expected summed message tokens, got %d", tokens)
-	}
-	if counter.CountCalls != 0 {
-		t.Fatalf("expected counter not to be called, got %d calls", counter.CountCalls)
-	}
-	if turn.TokenCount["mock.counter"] != 6 {
-		t.Fatalf("expected turn token count to be cached, got %+v", turn.TokenCount)
-	}
-	if len(store.updates) != 1 {
-		t.Fatalf("expected one turn token update, got %+v", store.updates)
-	}
-	if store.updates[0].turnID != "turn-1" || store.updates[0].tokens != 6 {
-		t.Fatalf("unexpected turn token update: %+v", store.updates[0])
-	}
-}
-
-func TestTurnTokenizeCountsCombinedMessagesWithoutUpdatingMessages(t *testing.T) {
-	t.Parallel()
-
-	counter := &mocks.MockTokenCounter{}
-	store := &turnTokenStore{}
-	turn := gaictx.Turn{
-		ID:          "turn-1",
-		UserMessage: &gaictx.StoredMessage{Message: ai.Message{Parts: ai.TextParts("hello user")}},
-		Messages: []gaictx.StoredMessage{
-			{Message: ai.Message{Parts: ai.TextParts("assistant response")}},
-			{Message: ai.Message{Parts: []ai.ContentPart{
-				{Kind: ai.ContentToolResult,
-					ToolResult: &ai.ToolResult{ToolCallID: "call_search", Name: "tool", Parts: ai.TextParts("tool result")}}}},
-			},
-		},
-	}
-
-	tokens, err := turn.Tokenize(context.Background(), counter, store)
+	before, err := json.Marshal(turn)
 	if err != nil {
-		t.Fatalf("Tokenize failed: %v", err)
+		t.Fatal(err)
 	}
-	if tokens == 0 {
-		t.Fatal("expected combined messages to be counted")
-	}
-	if counter.CountCalls != 1 {
-		t.Fatalf("expected one combined counter call, got %d calls", counter.CountCalls)
-	}
-	if turn.UserMessage.TokenCount != nil {
-		t.Fatalf("expected user message token count to stay untouched, got %+v", turn.UserMessage.TokenCount)
-	}
-	for _, message := range turn.Messages {
-		if message.TokenCount != nil {
-			t.Fatalf("expected message token count to stay untouched, got %+v", message.TokenCount)
+	for range 2 {
+		got, err := turn.Tokens(t.Context(), ai.TextTokenEstimator{})
+		if err != nil || got != want {
+			t.Fatalf("Tokens = %d, %v; want %d", got, err, want)
 		}
 	}
-	if turn.TokenCount["mock.counter"] != tokens {
-		t.Fatalf("expected turn token count to be cached, got %+v", turn.TokenCount)
-	}
-	if len(store.updates) != 1 {
-		t.Fatalf("expected one turn token update, got %+v", store.updates)
+	after, err := json.Marshal(turn)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("counting changed turn: %s, %v", after, err)
 	}
 }
 
-func TestTurnTokenizeHandlesNilMessageContent(t *testing.T) {
+func TestMessageAndTurnTokensObserveCurrentContentAndCounter(t *testing.T) {
 	t.Parallel()
-
+	message := gaictx.StoredMessage{Message: ai.TextMessage(ai.RoleUser, "one")}
+	turn := gaictx.Turn{UserMessage: &message}
+	for _, count := range []func(context.Context, ai.TokenCounter) (int, error){message.Tokens, turn.Tokens} {
+		first, second := &mocks.MockTokenCounter{Count: 3}, &mocks.MockTokenCounter{Count: 8}
+		for _, counter := range []*mocks.MockTokenCounter{first, second, first} {
+			got, err := count(t.Context(), counter)
+			if err != nil || got != counter.Count {
+				t.Fatalf("Tokens = %d, %v; want %d", got, err, counter.Count)
+			}
+		}
+		if first.CountCalls != 2 || second.CountCalls != 1 {
+			t.Fatal("count was reused by counter ID")
+		}
+	}
+	copy := message
+	copy.Message = ai.TextMessage(ai.RoleUser, "one two three")
 	counter := &mocks.MockTokenCounter{}
-	turn := gaictx.Turn{
-		ID:          "turn-1",
-		UserMessage: &gaictx.StoredMessage{Message: ai.Message{Role: ai.RoleUser}},
-		Messages:    []gaictx.StoredMessage{{Message: ai.Message{Role: ai.RoleAssistant}}},
+	got, err := copy.Tokens(t.Context(), counter)
+	if err != nil || got != 3 {
+		t.Fatalf("copied message count = %d, %v", got, err)
 	}
-
-	tokens, err := turn.Tokenize(context.Background(), counter, nil)
-	if err != nil {
-		t.Fatalf("Tokenize failed: %v", err)
+	got, err = message.Tokens(t.Context(), counter)
+	if err != nil || got != 1 {
+		t.Fatalf("original message count = %d, %v", got, err)
 	}
-	if tokens != 0 {
-		t.Fatalf("expected nil content to contribute no tokens, got %d", tokens)
-	}
-	if counter.CountCalls != 1 {
-		t.Fatalf("expected one counter call, got %d", counter.CountCalls)
+	turn.UserMessage = &copy
+	got, err = turn.Tokens(t.Context(), counter)
+	if err != nil || got != 3 {
+		t.Fatalf("changed turn count = %d, %v", got, err)
 	}
 }
 
-func TestTurnTokenizeRequiresTokenCounter(t *testing.T) {
+func TestMessageAndTurnTokensPropagateErrors(t *testing.T) {
 	t.Parallel()
-
-	turn := gaictx.Turn{ID: "turn-1"}
-	_, err := turn.Tokenize(context.Background(), nil, nil)
-	if !errors.Is(err, gaictx.ErrTokenCounterNotFound) {
-		t.Fatalf("expected ErrTokenCounterNotFound, got %v", err)
+	message := gaictx.StoredMessage{Message: ai.TextMessage(ai.RoleUser, "text")}
+	turn := gaictx.Turn{UserMessage: &message}
+	for _, count := range []func(context.Context, ai.TokenCounter) (int, error){message.Tokens, turn.Tokens} {
+		if _, err := count(t.Context(), nil); !errors.Is(err, gaictx.ErrTokenCounterNotFound) {
+			t.Fatalf("nil counter error = %v", err)
+		}
+		failure := errors.New("count failed")
+		if _, err := count(t.Context(), &mocks.MockTokenCounter{Err: failure}); !errors.Is(err, failure) {
+			t.Fatalf("counter error = %v", err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if _, err := count(ctx, ai.TextTokenEstimator{}); !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation error = %v", err)
+		}
+	}
+	var missing *gaictx.Turn
+	if _, err := missing.Tokens(t.Context(), ai.TextTokenEstimator{}); !errors.Is(err, gaictx.ErrMessageNotFound) {
+		t.Fatalf("nil turn error = %v", err)
+	}
+	invalid := gaictx.StoredMessage{Message: ai.Message{Parts: []ai.ContentPart{{Kind: ai.ContentJSON, JSON: json.RawMessage(`{`)}}}}
+	if _, err := invalid.Tokens(t.Context(), ai.TextTokenEstimator{}); err == nil {
+		t.Fatal("invalid JSON count succeeded")
+	}
+	if _, err := (&gaictx.Turn{Messages: []gaictx.StoredMessage{invalid}}).Tokens(t.Context(), ai.TextTokenEstimator{}); err == nil {
+		t.Fatal("invalid turn count succeeded")
 	}
 }
 
-func TestMessageTokensRecountsNegativeCachedValue(t *testing.T) {
+func TestEmptyMessageAndTurnTokens(t *testing.T) {
 	t.Parallel()
-
-	counter := &mocks.MockTokenCounter{Count: 4}
-	message := gaictx.StoredMessage{
-		TokenCount: map[string]int{"mock.counter": -1}, Message: ai.Message{Parts: ai.TextParts("hello world")},
-	}
-
-	tokens, err := message.Tokens(context.Background(), counter)
-	if err != nil {
-		t.Fatalf("Tokens failed: %v", err)
-	}
-	if tokens != 4 {
-		t.Fatalf("expected counter to recount invalid cached value, got %d", tokens)
-	}
-	if counter.CountCalls != 1 {
-		t.Fatalf("expected one counter call, got %d", counter.CountCalls)
-	}
-	if message.TokenCount["mock.counter"] != 4 {
-		t.Fatalf("expected cache to be updated, got %+v", message.TokenCount)
+	message := gaictx.StoredMessage{}
+	turn := gaictx.Turn{UserMessage: &message, Messages: []gaictx.StoredMessage{{}}}
+	for _, count := range []func(context.Context, ai.TokenCounter) (int, error){message.Tokens, turn.Tokens, (&gaictx.Turn{}).Tokens} {
+		got, err := count(t.Context(), &mocks.MockTokenCounter{})
+		if err != nil || got != 0 {
+			t.Fatalf("empty count = %d, %v", got, err)
+		}
 	}
 }
 
-func TestMessageTokensHandlesNilContent(t *testing.T) {
+func TestCopiedMessagesAndTurnsCanBeCountedConcurrently(t *testing.T) {
 	t.Parallel()
-
-	counter := &mocks.MockTokenCounter{}
-	message := gaictx.StoredMessage{Message: ai.Message{}}
-
-	tokens, err := message.Tokens(context.Background(), counter)
+	message := gaictx.StoredMessage{Message: ai.Message{Role: ai.RoleAssistant, Parts: ai.TextParts("hello"), Extensions: []ai.Extension{{Namespace: "test", Type: "opaque", Data: json.RawMessage(`{"state":1}`)}}}}
+	turn := gaictx.Turn{Messages: []gaictx.StoredMessage{message}}
+	before, err := json.Marshal(turn)
 	if err != nil {
-		t.Fatalf("Tokens failed: %v", err)
+		t.Fatal(err)
 	}
-	if tokens != 0 {
-		t.Fatalf("expected nil content to contribute no tokens, got %d", tokens)
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Go(func() {
+			copyMessage, copyTurn := message, turn
+			for range 20 {
+				for _, count := range []func(context.Context, ai.TokenCounter) (int, error){copyMessage.Tokens, copyTurn.Tokens} {
+					if _, err := count(t.Context(), ai.TextTokenEstimator{}); err != nil {
+						t.Error(err)
+						return
+					}
+				}
+			}
+		})
 	}
-}
-
-func TestTurnTokenizeIgnoresNegativeCachedMessageCounts(t *testing.T) {
-	t.Parallel()
-
-	counter := &mocks.MockTokenCounter{}
-	store := &turnTokenStore{}
-	turn := gaictx.Turn{
-		ID: "turn-1",
-		UserMessage: &gaictx.StoredMessage{
-			TokenCount: map[string]int{"mock.counter": -1}, Message: ai.Message{Parts: ai.TextParts("hello")},
-		},
-		Messages: []gaictx.StoredMessage{
-			{
-
-				TokenCount: map[string]int{"mock.counter": 2}, Message: ai.Message{Parts: ai.TextParts("assistant response")},
-			},
-		},
-	}
-
-	tokens, err := turn.Tokenize(context.Background(), counter, store)
-	if err != nil {
-		t.Fatalf("Tokenize failed: %v", err)
-	}
-	if tokens != 3 {
-		t.Fatalf("expected turn tokens to be recounted from messages, got %d", tokens)
-	}
-	if counter.CountCalls != 1 {
-		t.Fatalf("expected counter to be called once, got %d calls", counter.CountCalls)
-	}
-	if turn.TokenCount["mock.counter"] != 3 {
-		t.Fatalf("expected turn token count to be cached, got %+v", turn.TokenCount)
-	}
-	if len(store.updates) != 1 || store.updates[0].tokens != 3 {
-		t.Fatalf("expected turn token update with repaired count, got %+v", store.updates)
-	}
-}
-
-func TestTurnTokenizeEmitsObservationWhenSavingTokensFails(t *testing.T) {
-	t.Parallel()
-
-	saveErr := errors.New("save tokens")
-	store := &turnTokenStore{err: saveErr}
-	turn := gaictx.Turn{
-		ID:    "turn-1",
-		Count: 2,
-		Messages: []gaictx.StoredMessage{
-			{Message: ai.Message{Parts: ai.TextParts("three token message")}},
-		},
-	}
-	var event gai.Observation
-	turn.SetObservationSink(gai.ObservationSinkFunc(func(_ context.Context, emitted gai.Observation) {
-		event = emitted
-	}))
-
-	tokens, err := turn.Tokenize(context.Background(), &mocks.MockTokenCounter{}, store)
-	if err != nil {
-		t.Fatalf("Tokenize failed: %v", err)
-	}
-	if tokens != 3 {
-		t.Fatalf("expected calculated token count despite save failure, got %d", tokens)
-	}
-	if event.Name != "turn_token_save_failed" {
-		t.Fatalf("expected token save failure event, got %+v", event)
-	}
-	if event.Source != "context:Turn.Tokenize" {
-		t.Fatalf("unexpected event source: %q", event.Source)
-	}
-	if event.Err != nil || event.Fields["outcome"] != "error" {
-		t.Fatalf("expected safe save-error observation, got %#v", event)
-	}
-	if event.Fields["turn_id"] != "turn-1" || event.Fields["turn_count"] != 2 ||
-		event.Fields["counter_id"] != "mock.counter" || event.Fields["token_count"] != 3 {
-		t.Fatalf("unexpected event fields: %+v", event.Fields)
+	wg.Wait()
+	after, err := json.Marshal(turn)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("shared turn changed: %s, %v", after, err)
 	}
 }
