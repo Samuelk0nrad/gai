@@ -89,13 +89,6 @@ func (t *MockTokenCounter) ID() string {
 	return "mock.counter"
 }
 
-func (t *MockTokenCounter) Tokenize(ctx context.Context, text string) ([]string, error) {
-	if t.Err != nil {
-		return nil, t.Err
-	}
-	return strings.Fields(text), nil
-}
-
 func (t *MockTokenCounter) CountTokens(ctx context.Context, text string) (int, error) {
 	t.CountCalls++
 	if t.Err != nil {
@@ -104,9 +97,5 @@ func (t *MockTokenCounter) CountTokens(ctx context.Context, text string) (int, e
 	if t.Count > 0 {
 		return t.Count, nil
 	}
-	tokens, err := t.Tokenize(ctx, text)
-	if err != nil {
-		return 0, err
-	}
-	return len(tokens), nil
+	return len(strings.Fields(text)), nil
 }

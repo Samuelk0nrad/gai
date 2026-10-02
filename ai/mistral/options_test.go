@@ -14,7 +14,7 @@ import (
 func TestWithBaseURLTrailingSlashes(t *testing.T) {
 	for _, prefix := range []string{"", "/proxy"} {
 		for _, suffix := range []string{"", "/", "///"} {
-			for _, operation := range []string{"generate", "stream", "count_tokens"} {
+			for _, operation := range []string{"generate", "stream"} {
 				t.Run(prefix+suffix+"/"+operation, func(t *testing.T) {
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						if r.Method != http.MethodPost || r.URL.Path != prefix+"/v1/chat/completions" {
@@ -73,14 +73,7 @@ func TestWithBaseURLTrailingSlashes(t *testing.T) {
 						if text != "ok" {
 							t.Fatalf("unexpected stream: %q", text)
 						}
-					case "count_tokens":
-						count, err := model.Tokenizer().CountTokens(t.Context(), "hello")
-						if err != nil {
-							t.Fatal(err)
-						}
-						if count != 7 {
-							t.Fatalf("unexpected token count: %d", count)
-						}
+
 					}
 				})
 			}

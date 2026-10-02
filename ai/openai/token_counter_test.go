@@ -155,21 +155,17 @@ func TestPublicBlockCountsMatchIndependentUpstreamChunks(t *testing.T) {
 			if err != nil || whole == want {
 				t.Fatalf("fixture must distinguish whole-text and block counts: %d/%d, %v", whole, want, err)
 			}
-			tokenizer, err := NewTokenizer(tc.model)
+			explicit, err := NewTokenCounter(tc.model)
 			if err != nil {
 				t.Fatal(err)
 			}
 			counter := (&Model{name: tc.model}).TokenCounter()
-			explicit, ok := tokenizer.(ai.TokenCounter)
-			if !ok {
-				t.Fatal("explicit tokenizer does not expose counter fidelity")
-			}
 			if explicit.Fidelity() != ai.TokenCountEstimated || counter.Fidelity() != ai.TokenCountEstimated || explicit.ID() != counter.ID() || counter.ID() == "openai.tiktoken-go/v0.8.1:"+string(tc.encoding) {
 				t.Fatalf("block counters need matching estimated identities distinct from whole-text counts: %q/%q", explicit.ID(), counter.ID())
 			}
 			for name, count := range map[string]func(context.Context, string) (int, error){
-				"tokenizer": tokenizer.CountTokens,
-				"model":     counter.CountTokens,
+				"explicit": explicit.CountTokens,
+				"model":    counter.CountTokens,
 			} {
 				got, err := count(t.Context(), text)
 				if err != nil || got != want {

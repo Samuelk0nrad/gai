@@ -127,6 +127,6 @@ var (
 	// ErrUnsupportedCapability indicates that a provider cannot satisfy a
 	// requested feature or optional operation, such as model discovery.
 	ErrUnsupportedCapability = errors.New("unsupported provider capability")
-	// ErrTokenizerUnsupported indicates that a tokenizer does not support an operation.
-	ErrTokenizerUnsupported = errors.New("tokenizer operation unsupported")
+	// ErrTokenCounterUnsupported indicates an unsupported local counting algorithm.
+	ErrTokenCounterUnsupported = errors.New("token counter unsupported")
 )

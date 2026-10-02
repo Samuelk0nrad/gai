@@ -5,6 +5,8 @@ This example shows the shortest end-to-end GAI workflow that is still representa
 - an OpenAI-backed agent;
 - a typed `lookup_order` tool;
 - provider-native tool calling;
+- a 2048-token request window checked before every generation, with 500 tokens
+  reserved for output and a 128-token estimation margin;
 - ordered streaming through `Workflow.RunEvents`, followed by `Workflow.Wait` for the final result;
 - deterministic local data, so only one API key is required.
 
@@ -37,6 +39,12 @@ Assistant: Order LACE-1042 is in transit and has left the Vienna logistics cente
 ```
 
 Model wording can vary. The shipping facts come from the local tool result in `main.go`, not from the model.
+
+Budgeting uses OpenAI's local count-only counter and the accepted response's
+reported input usage for subsequent requests. An oversized request fails before
+generation with `ai.ErrRequestBudgetExceeded`; context sources are not rebuilt.
+See [request budgets](../../docs/request-budgets.md) for per-run overrides and
+explicit provider preflight. OpenAI does not advertise full-request preflight.
 
 ## What to inspect
 

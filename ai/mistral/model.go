@@ -13,10 +13,7 @@ import (
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
-	"go.opentelemetry.io/otel/attribute"
 )
-
-const mistralTracerName = "github.com/lace-ai/gai/ai/mistral"
 
 type Model struct {
 	name        string
@@ -32,17 +29,8 @@ func (m *Model) Name() string {
 	return m.name
 }
 
-// TokenCounter uses a local estimate for automatic budgeting. Tokenizer is
-// still available explicitly, but may perform network I/O.
+// TokenCounter supplies the generic local estimator without provider I/O.
 func (m *Model) TokenCounter() ai.TokenCounter { return ai.TextTokenEstimator{} }
-
-func (m *Model) Tokenizer() ai.Tokenizer {
-	return &Tokenizer{
-		modelName: m.name,
-		client:    m.client,
-		debug:     m.debug,
-	}
-}
 
 func (m *Model) Descriptor() ai.ModelDescriptor {
 	if facts, ok := m.client.catalog.Lookup(m.name); ok {
@@ -382,118 +370,6 @@ func mapChatResponseFormat(format ai.ResponseFormat) (*chatResponseFormat, error
 	default:
 		return nil, fmt.Errorf("%w: %s", ai.ErrInvalidResponseFormat, format.Type)
 	}
-}
-
-type Tokenizer struct {
-	modelName string
-	client    *Provider
-	debug     gai.ObservationSink
-}
-
-func (t *Tokenizer) ID() string {
-	return "mistral." + t.modelName
-}
-
-func (t *Tokenizer) Tokenize(ctx context.Context, text string) (tokens []string, err error) {
-	_, span := gai.StartOperationSpan(ctx, mistralTracerName, "ai.mistral", "ai.operation", "tokenizer.tokenize",
-		attribute.String("ai.provider", "mistral"),
-		attribute.String("ai.model", t.modelName),
-		attribute.String("ai.tokenizer", t.ID()),
-		attribute.Int("ai.input_length", len(text)),
-	)
-	err = ai.ErrTokenizerUnsupported
-	defer func() { gai.EndSpan(span, err) }()
-	return nil, err
-}
-
-func (t *Tokenizer) CountTokens(ctx context.Context, text string) (tokens int, err error) {
-	ctx, span := gai.StartOperationSpan(ctx, mistralTracerName, "ai.mistral", "ai.operation", "tokenizer.count_tokens",
-		attribute.String("ai.provider", "mistral"),
-		attribute.String("ai.model", t.modelName),
-		attribute.String("ai.tokenizer", t.ID()),
-		attribute.Int("ai.input_length", len(text)),
-	)
-	defer func() {
-		span.SetAttributes(attribute.Int("ai.input_tokens", tokens))
-		gai.EndSpan(span, err)
-	}()
-
-	const maxTokensForTokenCount = 1
-	payload := chatCompletionRequest{
-		Model: t.modelName,
-		Messages: []chatMessageRequest{
-			{
-				Role:    "user",
-				Content: textContent(text),
-			},
-		},
-		MaxTokens: intPtr(maxTokensForTokenCount),
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return 0, err
-	}
-
-	httpReq, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		t.client.baseURL+"/v1/chat/completions",
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		return 0, err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+t.client.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	res, err := t.client.httpClient.Do(httpReq)
-	if err != nil {
-		if gai.ObservationEnabled(ctx, t.debug) {
-			gai.EmitObservation(ctx, t.debug, gai.Observation{
-				Name:   "mistral_token_count_request_failed",
-				Source: "ai:mistral.Tokenizer.CountTokens",
-				Fields: map[string]any{
-					"error": err.Error(),
-				},
-				Err: err,
-			})
-		}
-		return 0, err
-	}
-	defer res.Body.Close()
-
-	const maxResponseBody = 1 << 20 // 1MB
-	resBody, err := io.ReadAll(io.LimitReader(res.Body, maxResponseBody))
-	if err != nil {
-		return 0, err
-	}
-
-	if res.StatusCode >= http.StatusMultipleChoices {
-		span.SetAttributes(attribute.Int("http.response.status_code", res.StatusCode))
-		if gai.ObservationEnabled(ctx, t.debug) {
-			fields := map[string]any{
-				"status_code": res.StatusCode,
-			}
-
-			gai.EmitObservation(ctx, t.debug, gai.Observation{
-				Name:   "mistral_token_count_request_failed",
-				Source: "ai:mistral.Tokenizer.CountTokens",
-				Fields: fields,
-			})
-		}
-		return 0, newHTTPError("token count", res.StatusCode, resBody)
-	}
-	span.SetAttributes(attribute.Int("http.response.status_code", res.StatusCode))
-
-	var parsed chatCompletionResponse
-	if err := json.Unmarshal(resBody, &parsed); err != nil {
-		return 0, err
-	}
-	if parsed.Usage == nil {
-		return 0, nil
-	}
-	return parsed.Usage.PromptTokens, nil
 }
 
 type chatCompletionStreamResponse struct {
@@ -1019,10 +895,6 @@ func streamContentParts(parts []ai.ContentPart) []ai.ContentPart {
 		out = append(out, part)
 	}
 	return out
-}
-
-func intPtr(v int) *int {
-	return &v
 }
 
 func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AIResponse, err error) {

@@ -136,6 +136,9 @@ func run(ctx context.Context) error {
 		Name:  "order-support",
 		Model: model,
 		Tools: []loop.Tool{newLookupOrderTool()},
+		RequestBudget: &ai.RequestBudgetConfig{
+			Limit: 2048, OutputReserve: 500, SafetyMargin: 128,
+		},
 		Limits: agent.Limits{
 			MaxLoopIterations: 4,
 			MaxTokens:         500,

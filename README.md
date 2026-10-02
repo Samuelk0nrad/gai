@@ -341,6 +341,13 @@ builder := gaictx.New(gaictx.Definition{
 
 `BuildContext` allocates budget to context sources. `BuildRequest` assembles system instructions, selected history, user input, and accepted conversation as one `ai.AIRequest`. Provider adapters consume those messages directly. Custom renderers lower application context parts; they do not replace conversation semantics.
 
+The loop also checks the complete finalized request before each generation.
+`agent.Definition.RequestBudget` and per-run execution overrides configure total
+or input-only limits, output reserve, and a safety margin. Local estimation is
+the default; accepted input usage anchors subsequent estimates. Explicit accurate
+mode requires a supported full-request capability (currently Anthropic).
+See [request budgets and migration](docs/request-budgets.md).
+
 ## History and summarization
 
 `context/history` provides a `ContextSource` backed by a `HistoryStore`. It loads persisted state, selects recent turns that fit the available budget, and counts candidate turns locally on demand. Calculated counts are not persisted.
@@ -392,8 +399,8 @@ This is a breaking pre-v1 API migration:
   imply that every provider adapter supports media input.
 
 History selection and tool-result previews happen before transport selection.
-Local `TokenCounter` estimates remain separate from future full-request provider
-preflight; both preflight and generation can now consume the same request value.
+Local `TokenCounter` estimates remain separate from opt-in full-request provider
+preflight; preflight and generation consume the same finalized request value.
 
 ## Structured output and direct model calls
 

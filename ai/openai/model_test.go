@@ -915,10 +915,10 @@ func TestOpenAIDescriptorUsesReasoningFamilyOverlay(t *testing.T) {
 	}
 }
 
-func TestModelTokenizerUsesLocalTokenizerWhenEncodingIsKnown(t *testing.T) {
+func TestModelCounterUsesLocalEncodingWhenKnown(t *testing.T) {
 	m := &Model{name: GPT41}
-	if tokenizer := m.Tokenizer(); tokenizer == nil {
-		t.Fatal("Tokenizer() = nil, want local tokenizer for a known encoding")
+	if tokenizer := m.TokenCounter(); tokenizer == nil {
+		t.Fatal("TokenCounter() = nil, want local counter for a known encoding")
 	}
 }
 

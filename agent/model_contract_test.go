@@ -145,14 +145,14 @@ func TestAutomaticProviderCountersBuildPromptsWithoutNetwork(t *testing.T) {
 	}
 }
 
-type legacyTokenizerModel struct{ streamOnlyModel }
+type preflightOnlyModel struct{ streamOnlyModel }
 
-func (*legacyTokenizerModel) Tokenizer() ai.Tokenizer {
-	panic("legacy tokenizer must be explicitly requested")
+func (*preflightOnlyModel) CountInputTokens(context.Context, ai.AIRequest) (int, error) {
+	panic("preflight must be explicitly requested")
 }
 
-func TestAutomaticCounterDoesNotConsultLegacyTokenizer(t *testing.T) {
-	a := agent.New(agent.Definition{Model: &legacyTokenizerModel{}, Prompt: executionPrompt})
+func TestAutomaticCounterDoesNotConsultPreflight(t *testing.T) {
+	a := agent.New(agent.Definition{Model: &preflightOnlyModel{}, Prompt: executionPrompt})
 	workflow, err := a.NewRun(t.Context(), agent.RunInput{})
 	if err != nil {
 		t.Fatal(err)
