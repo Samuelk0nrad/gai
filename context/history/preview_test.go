@@ -48,6 +48,12 @@ func TestToolResultPreviewUsesOneMarkerAcrossTextParts(t *testing.T) {
 			text:    manyTexts,
 			want:    manyWant,
 		},
+		{
+			name:    "invalid UTF-8 in truncated prefix",
+			markers: 1,
+			text:    []string{strings.Repeat("a", 499) + "\xff" + "tail"},
+			want:    []string{strings.Repeat("a", 499) + "\ufffd" + marker},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

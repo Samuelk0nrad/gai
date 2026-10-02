@@ -343,7 +343,7 @@ builder := gaictx.New(gaictx.Definition{
 
 ## History and summarization
 
-`context/history` provides a `ContextSource` backed by a `HistoryStore`. It loads persisted state, selects recent turns that fit the available budget, and reuses cached per-turn token counts.
+`context/history` provides a `ContextSource` backed by a `HistoryStore`. It loads persisted state, selects recent turns that fit the available budget, and counts candidate turns locally on demand. Calculated counts are not persisted.
 
 Use `history.NewHistory(sessionID, store)` for budgeted history selection. Use `history.New(sessionID, store, summarizerDefinition)` when older turns should be summarized under token pressure. The built-in `agent/summary` package can supply the summarizer agent.
 
@@ -358,7 +358,7 @@ still be preserved in storage and replayed by a compatible native adapter.
 and stored history. Its `Role` and ordered `Parts` preserve text, reasoning, tool
 call IDs and results, structured JSON, media, and namespaced provider extensions.
 `ai.Token` remains a streaming event; `loop.Iteration` retains execution diagnostics
-and canonical snapshots. `context.StoredMessage` adds storage IDs and token caches.
+and canonical snapshots. `context.StoredMessage` adds storage IDs and a schema version.
 
 ```go
 request := ai.AIRequest{Messages: []ai.Message{

@@ -222,7 +222,7 @@ func (o *historyObserver) StateSaveFailed(ctx context.Context, err error) {
 	}, err)
 }
 
-func (o *historyObserver) SummaryIncluded(ctx context.Context, summary *Summary) {
+func (o *historyObserver) SummaryIncluded(ctx context.Context, summary *Summary, tokens int) {
 	if o == nil || summary == nil {
 		return
 	}
@@ -230,7 +230,7 @@ func (o *historyObserver) SummaryIncluded(ctx context.Context, summary *Summary)
 	fields := map[string]any{
 		"session_id":          o.sessionID,
 		"counter_id":          o.counterID,
-		"summary_tokens":      summary.tokenCount[o.counterID],
+		"summary_tokens":      tokens,
 		"summary_start_turn":  summary.StartTurnID,
 		"summary_end_turn":    summary.EndTurnID,
 		"summary_start_count": summary.StartTurnCount,
@@ -316,7 +316,7 @@ func (o *historyObserver) BuildFinished(ctx context.Context, part *Part, tokenCo
 	o.emit(ctx, "history_source_build_finished", fields, nil)
 }
 
-func (o *historyObserver) SummaryGenerated(ctx context.Context, summary *Summary, summarizedTurnCount, remainingTurnCount int, previousSummaryFound bool) {
+func (o *historyObserver) SummaryGenerated(ctx context.Context, summary *Summary, tokens, summarizedTurnCount, remainingTurnCount int, previousSummaryFound bool) {
 	if o == nil || summary == nil {
 		return
 	}
@@ -324,7 +324,7 @@ func (o *historyObserver) SummaryGenerated(ctx context.Context, summary *Summary
 	o.summaryTotalTurnCount = summarizedTurnCount + remainingTurnCount
 	o.summaryTurnCount = summarizedTurnCount
 	o.summaryRemainingCount = remainingTurnCount
-	o.summaryTokens = summary.tokenCount[o.counterID]
+	o.summaryTokens = tokens
 	o.summaryExisting = previousSummaryFound
 
 	fields := map[string]any{

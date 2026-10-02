@@ -48,12 +48,10 @@ func (s *HistoryState) UnmarshalJSON(data []byte) error {
 }
 
 // HistoryStore loads and saves history state for a session.
-// Implementations also store cached per-turn token counts through TurnTokenStore.
+// Calculated token counts are build-local and are never written to the store.
 type HistoryStore interface {
 	GetLastHistoryState(ctx context.Context, sessionID string) (*HistoryState, error)
 	SaveHistoryState(ctx context.Context, sessionID string, state *HistoryState) error
-
-	gaictx.TurnTokenStore
 }
 
 // HistorySource renders persisted conversation history as prompt context.
@@ -168,7 +166,11 @@ func (s *HistorySource) Function(ctx context.Context, tokenBudget int) (result g
 	if lastHistoryState == nil {
 		obs.StateMissing(ctx)
 	} else {
-		lastHistoryState.Turns = sortTurnsByCount(lastHistoryState.Turns)
+		// The loaded state belongs to the store. Sorting and setting the storage
+		// version apply only to this build's copy; counting reads shared content.
+		stateCopy := *lastHistoryState
+		stateCopy.Turns = sortTurnsByCount(append([]gaictx.Turn(nil), lastHistoryState.Turns...))
+		lastHistoryState = &stateCopy
 		obs.MarkStatePresent()
 		state := lastHistoryState
 		summarized := false
@@ -215,7 +217,6 @@ func (s *HistorySource) Function(ctx context.Context, tokenBudget int) (result g
 			break
 		}
 	}
-	part.saveTokens(counterID, tokenCount)
 	obs.BuildFinished(ctx, &part, tokenCount, turnCount, includedTurnCount, messageCount)
 	result = &part
 	return result, nil
@@ -241,7 +242,11 @@ func (s *HistorySource) buildPart(
 		if err := state.Summary.Content.Validate(); err != nil {
 			return false, err
 		}
-		summaryTokenCount, err := state.Summary.TokenCount(counter)
+		// Count the same prefixed summary message returned in the prompt.
+		summaryParts := ai.TextParts("Conversation summary:\n")
+		summaryParts = append(summaryParts, ai.CloneParts([]ai.ContentPart{state.Summary.Content})...)
+		summaryPart := Part{Messages: []ai.Message{{Role: ai.RoleUser, Parts: summaryParts}}}
+		summaryTokenCount, err := summaryPart.Tokens(ctx, counter)
 		if err != nil {
 			obs.SummaryTokenCountFailed(ctx, state.Summary, err)
 			return false, err
@@ -251,11 +256,9 @@ func (s *HistorySource) buildPart(
 			return true, nil
 		}
 		*summaryIncluded = true
-		summaryParts := ai.TextParts("Conversation summary:\n")
-		summaryParts = append(summaryParts, ai.CloneParts([]ai.ContentPart{state.Summary.Content})...)
-		part.Messages = append(part.Messages, ai.Message{Role: ai.RoleUser, Parts: summaryParts})
+		part.Messages = append(part.Messages, summaryPart.Messages...)
 		*tokenCount += summaryTokenCount
-		obs.SummaryIncluded(ctx, state.Summary)
+		obs.SummaryIncluded(ctx, state.Summary, summaryTokenCount)
 	} else {
 		obs.SummaryMissing(ctx)
 	}
@@ -265,7 +268,16 @@ func (s *HistorySource) buildPart(
 	for i := len(state.Turns) - 1; i >= 0; i-- {
 		turn := &state.Turns[i]
 		*turnCount++
-		tokens, err := turn.Tokenize(ctx, s.counter, s.historyStateStore)
+		// Selection and final accounting use the same preview projection. The
+		// candidate owns no token cache and only reads the stored messages.
+		candidate := Part{}
+		if turn.UserMessage != nil {
+			candidate.Messages = append(candidate.Messages, turn.UserMessage.Message)
+		}
+		for _, message := range turn.Messages {
+			candidate.Messages = append(candidate.Messages, message.Message)
+		}
+		tokens, err := candidate.Tokens(ctx, counter)
 		if err != nil {
 			turnCopy := *turn
 			obs.TurnTokenizeFailed(ctx, &turnCopy, err)

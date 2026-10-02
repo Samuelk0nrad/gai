@@ -2,7 +2,6 @@ package history
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/lace-ai/gai/ai"
 	gaictx "github.com/lace-ai/gai/context"
@@ -14,8 +13,7 @@ const historyToolResultPreviewRunes = 500
 // projection applies the tool-result preview before either native mapping or
 // fallback rendering, so both transports consume exactly the same content.
 type Part struct {
-	Messages   []ai.Message
-	TokenCount map[string]int
+	Messages []ai.Message
 }
 
 func (p *Part) Name() string { return "history" }
@@ -47,13 +45,24 @@ func (p *Part) ConversationMessages() []ai.Message {
 					result.Text = ""
 					continue
 				}
-				runes := []rune(result.Text)
-				if len(runes) > remaining {
-					result.Text = string(runes[:remaining]) + "\n[tool result truncated]"
+				// Inspect only the retained prefix and one extra rune. Repeated
+				// local counts must not allocate a rune slice for the full result.
+				end, used := len(result.Text), 0
+				for index := range result.Text {
+					if used == remaining {
+						end = index
+						break
+					}
+					used++
+				}
+				if end < len(result.Text) {
+					// Preserve the existing normalization of invalid UTF-8 in
+					// truncated text while converting only the retained prefix.
+					result.Text = string([]rune(result.Text[:end])) + "\n[tool result truncated]"
 					remaining = 0
 					markerAdded = true
 				} else {
-					remaining -= len(runes)
+					remaining -= used
 				}
 			}
 		}
@@ -73,39 +82,20 @@ func (p *Part) Render(ctx context.Context) (gaictx.RenderNode, error) {
 	return node, nil
 }
 
+// Tokens counts the selected, previewed messages on demand. It does not cache
+// counts or mutate the part, so read-only parts can be counted concurrently with
+// a concurrency-safe counter.
 func (p *Part) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
 	if counter == nil {
 		return 0, gaictx.ErrTokenCounterNotFound
 	}
-	counterID := counter.ID()
-	if count, ok := p.TokenCount[counterID]; ok && count >= 0 {
-		return count, nil
-	} else if ok {
-		delete(p.TokenCount, counterID)
-	}
 	count := 0
 	for _, message := range p.ConversationMessages() {
-		text := message.Text()
-		if len(message.Parts) != 1 || message.Parts[0].Kind != ai.ContentText || len(message.Extensions) > 0 || len(message.Parts[0].Extensions) > 0 {
-			encoded, err := json.Marshal(message)
-			if err != nil {
-				return 0, err
-			}
-			text = string(encoded)
-		}
-		tokens, err := counter.CountTokens(ctx, text)
+		tokens, err := (gaictx.StoredMessage{Message: message}).Tokens(ctx, counter)
 		if err != nil {
 			return 0, err
 		}
 		count += tokens
 	}
-	p.saveTokens(counterID, count)
 	return count, nil
-}
-
-func (p *Part) saveTokens(counterID string, tokens int) {
-	if p.TokenCount == nil {
-		p.TokenCount = make(map[string]int)
-	}
-	p.TokenCount[counterID] = tokens
 }

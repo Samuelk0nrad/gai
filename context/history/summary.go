@@ -19,7 +19,6 @@ type Summary struct {
 	StartTurnCount int
 	EndTurnCount   int
 	Content        ai.ContentPart
-	tokenCount     map[string]int
 }
 
 // MarshalJSON rejects content that the summary reader cannot retain. Storage
@@ -60,7 +59,6 @@ func NewSummary(id, startTurnID, endTurnID string, startTurnCount, endTurnCount 
 		StartTurnCount: startTurnCount,
 		EndTurnCount:   endTurnCount,
 		Content:        ai.CloneParts([]ai.ContentPart{content})[0],
-		tokenCount:     map[string]int{},
 	}
 }
 
@@ -142,8 +140,7 @@ func (s *HistorySource) summarizeState(ctx context.Context, state *HistoryState,
 		obs.SummaryTokenCountFailed(ctx, nextSummary, err)
 		return nil, err
 	}
-	nextSummary.SetTokenCount(s.counter.ID(), tokenCount)
-	obs.SummaryGenerated(ctx, nextSummary, summarizedTurnCount, len(state.Turns)-summarizedTurnCount, state.Summary != nil)
+	obs.SummaryGenerated(ctx, nextSummary, tokenCount, summarizedTurnCount, len(state.Turns)-summarizedTurnCount, state.Summary != nil)
 
 	nextState := &HistoryState{
 		Summary: nextSummary,
@@ -183,53 +180,14 @@ func writeTurn(ctx context.Context, builder *strings.Builder, turn *gaictx.Turn)
 	return nil
 }
 
-func (s *Summary) TokenCount(counter ai.TokenCounter) (int, error) {
+// Tokens counts the summary text on demand using the caller's context. Counting
+// does not mutate the summary or persist calculated token counts.
+func (s *Summary) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
 	if s == nil {
 		return 0, fmt.Errorf("summary is nil")
 	}
 	if counter == nil {
-		return 0, fmt.Errorf("counter is required")
+		return 0, gaictx.ErrTokenCounterNotFound
 	}
-	if s.tokenCount == nil {
-		s.tokenCount = map[string]int{}
-	}
-	counterID := counter.ID()
-	if count, ok := s.tokenCount[counterID]; ok && count >= 0 {
-		return count, nil
-	} else if ok {
-		delete(s.tokenCount, counterID)
-	}
-	count, err := counter.CountTokens(context.Background(), s.Content.Text)
-	if err != nil {
-		return 0, err
-	}
-	s.SetTokenCount(counterID, count)
-	return count, nil
-}
-
-func (s *Summary) SetTokenCount(counterID string, tokens int) {
-	if s == nil {
-		return
-	}
-	if s.tokenCount == nil {
-		s.tokenCount = map[string]int{}
-	}
-	if tokens < 0 {
-		delete(s.tokenCount, counterID)
-		return
-	}
-	s.tokenCount[counterID] = tokens
-}
-
-func (s *Summary) SetTokenCounts(tokenCounts map[string]int) {
-	if s == nil {
-		return
-	}
-	s.tokenCount = make(map[string]int, len(tokenCounts))
-	for counterID, tokens := range tokenCounts {
-		if tokens < 0 {
-			continue
-		}
-		s.tokenCount[counterID] = tokens
-	}
+	return counter.CountTokens(ctx, s.Content.Text)
 }

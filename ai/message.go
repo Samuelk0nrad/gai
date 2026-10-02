@@ -72,7 +72,7 @@ type ToolResult struct {
 }
 
 // Message is the canonical conversation value used by context, execution,
-// providers and persistence. IDs, token caches and attempts belong to wrappers.
+// providers and persistence. Storage IDs and execution attempts belong to wrappers.
 type Message struct {
 	Role       Role          `json:"role"`
 	Parts      []ContentPart `json:"parts"`

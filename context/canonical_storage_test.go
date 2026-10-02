@@ -14,7 +14,6 @@ func TestStoredMessageRoundTripPreservesOrderedPartsAndExtensions(t *testing.T) 
 	want := gaictx.StoredMessage{
 		SchemaVersion: gaictx.MessageSchemaVersion,
 		ID:            "message-1", SessionID: "session-1", TurnID: "turn-1",
-		TokenCount: map[string]int{"estimated/v1": 42},
 		Message: ai.Message{Role: ai.RoleAssistant,
 			Extensions: []ai.Extension{{Namespace: "future-provider", Type: "continuation", Data: json.RawMessage(`{"opaque":[1,2,3]}`), Required: true}},
 			Parts: []ai.ContentPart{

@@ -24,13 +24,10 @@ func TestHistoryBuilderUsesSameSelectedAndTruncatedCanonicalMessages(t *testing.
 		{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call-1", Name: "search", Parts: ai.TextParts(fullResult)}},
 	}}
 	store := &historyStore{state: &history.HistoryState{Turns: []gaictx.Turn{
-		{ID: "old", Count: 1, Messages: []gaictx.StoredMessage{{Message: ai.TextMessage(ai.RoleAssistant, "excluded")}}, TokenCount: map[string]int{"gai.estimate/utf8-bytes-v1": 999999}},
+		{ID: "old", Count: 1, Messages: []gaictx.StoredMessage{{Message: ai.TextMessage(ai.RoleAssistant, strings.Repeat("excluded ", 5000))}}},
 		{ID: "new", Count: 2, UserMessage: &gaictx.StoredMessage{Message: ai.TextMessage(ai.RoleUser, "earlier question")}, Messages: []gaictx.StoredMessage{{Message: call}, {Message: results}}},
 	}}}
 	builder := gaictx.New(gaictx.Definition{TokenBudget: 10000, ContextSources: []gaictx.ContextSource{history.NewHistory("session", store)}, PromptInput: gaictx.PromptInput{User: ai.TextParts("current question")}})
-	// Use a persisted count under the effective estimator identity to exclude
-	// the older turn independently of its short text.
-	store.state.Turns[0].TokenCount = map[string]int{builder.TokenCounter().ID(): 999999}
 	if _, err := builder.BuildContext(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +64,7 @@ func TestHistoryBuilderUsesSameSelectedAndTruncatedCanonicalMessages(t *testing.
 
 func TestHistoryStateCanonicalRoundTrip(t *testing.T) {
 	t.Parallel()
-	want := history.HistoryState{SchemaVersion: history.HistorySchemaVersion, Summary: history.NewSummary("summary", "t0", "t0", 0, 0, ai.ContentPart{Kind: ai.ContentText, Text: "earlier"}), Turns: []gaictx.Turn{{ID: "turn", Count: 1, UserMessage: &gaictx.StoredMessage{SchemaVersion: gaictx.MessageSchemaVersion, ID: "message", SessionID: "session", TurnID: "turn", TokenCount: map[string]int{"counter": 7}, Message: ai.TextMessage(ai.RoleUser, "hello")}}}}
+	want := history.HistoryState{SchemaVersion: history.HistorySchemaVersion, Summary: history.NewSummary("summary", "t0", "t0", 0, 0, ai.ContentPart{Kind: ai.ContentText, Text: "earlier"}), Turns: []gaictx.Turn{{ID: "turn", Count: 1, UserMessage: &gaictx.StoredMessage{SchemaVersion: gaictx.MessageSchemaVersion, ID: "message", SessionID: "session", TurnID: "turn", Message: ai.TextMessage(ai.RoleUser, "hello")}}}}
 	data, err := json.Marshal(want)
 	if err != nil {
 		t.Fatal(err)

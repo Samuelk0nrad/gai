@@ -14,7 +14,7 @@
 // persisted history. Its ordered ContentPart values retain text, reasoning,
 // tool calls/results, JSON, media, and provider extensions. Message.Role uses
 // RoleSystem, RoleUser, RoleAssistant, or RoleTool. Storage metadata such as
-// session IDs and token caches belongs to storage envelopes outside Message.
+// session IDs belongs to storage envelopes outside Message.
 //
 // AIRequest requires canonical Messages. Copy and Clone snapshot mutable
 // payloads, including nested results, media bytes, raw JSON, schemas, and opaque
@@ -86,7 +86,7 @@
 // no token-splitting method is required. Clearing an agent counter override with
 // Optional[TokenCounter]{Set: true} restores automatic local selection.
 //
-// Text counts and the remaining history caches do not represent a full model
-// request budget. Request framing, complete input/conversation budgeting, and
-// cache ownership remain separate work.
+// Calculated text counts are not stored on messages, turns, parts, or summaries.
+// They do not represent a full model request budget. Request framing and complete
+// input/conversation budgeting remain separate work.
 package ai
