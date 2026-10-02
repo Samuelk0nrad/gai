@@ -95,7 +95,7 @@ func TestLegacyCalculatedCountsAreIgnoredAndNotPersisted(t *testing.T) {
 	source := history.NewHistory("session", store)
 	counter := &mocks.MockTokenCounter{IDValue: "counter"}
 	source.SetTokenCounter(counter)
-	result, err := source.Function(t.Context(), 3)
+	result, err := source.Function(t.Context(), 4)
 	if err != nil {
 		t.Fatal(err)
 	}

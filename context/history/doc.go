@@ -14,9 +14,13 @@
 // Token counts are calculated locally on demand and belong only to the current
 // build and its observations. HistoryStore persists semantic state, never token
 // caches. Selection and Part.Tokens count the same previewed messages, including
-// the summary prefix. These are text estimates rather than complete provider
-// request costs. Repeated builds recount the selected messages. Applications
-// choosing an encoding counter pay its tokenization cost on each build; the
+// the summary prefix. Plain summaries are counted as their prefixed text;
+// opaque summary content retains its original part and metadata. HistorySource
+// implements context.ContextSourceWithTokenCount so the builder consumes the
+// selection total without a second counting pass. These are text estimates
+// rather than complete provider request costs. Repeated builds recount the
+// selected messages. Applications choosing an encoding counter pay its
+// tokenization cost on each build; the
 // generic ai.TextTokenEstimator avoids that cost. No runtime cache is implicit.
 //
 // Counting does not mutate messages, turns, parts, or summaries. Shared content

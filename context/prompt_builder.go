@@ -23,6 +23,19 @@ type TokenCounterSetter interface {
 	SetTokenCounter(counter ai.TokenCounter)
 }
 
+// ContextSourceWithTokenCount optionally returns the token total calculated
+// while selecting a part, avoiding a second count during the same build.
+// Builder injects its counter before calling FunctionWithTokens. When a part is
+// returned, its total must be non-negative and equal to counting that snapshot
+// with the injected counter. Counts accompanying a nil part are ignored.
+// It belongs only to this invocation, not to the part or persisted state.
+// Builders use Function when budgeting is disabled or no counter is available.
+type ContextSourceWithTokenCount interface {
+	ContextSource
+	TokenCounterSetter
+	FunctionWithTokens(ctx context.Context, tokenBudget int) (Part, int, error)
+}
+
 // PromptBuilder is the prompt-construction contract consumed by agent loops.
 // Input exposes the user content recorded in the loop's conversation. Builder
 // configuration methods remain available on the concrete Builder; consumers
@@ -271,7 +284,15 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 		if setter, ok := source.(TokenCounterSetter); ok && b.counter != nil {
 			setter.SetTokenCounter(b.counter)
 		}
-		part, err := source.Function(ctx, stats.RemainingTokens)
+		var part Part
+		var sourceTokens int
+		countedSource, counted := source.(ContextSourceWithTokenCount)
+		counted = counted && b.TokenBudget > 0 && b.counter != nil
+		if counted {
+			part, sourceTokens, err = countedSource.FunctionWithTokens(ctx, stats.RemainingTokens)
+		} else {
+			part, err = source.Function(ctx, stats.RemainingTokens)
+		}
 		if err != nil {
 			obs.SourceFailed(ctx, source.Name(), stats.RemainingTokens, err)
 			return nil, err
@@ -284,10 +305,16 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 			stats.IncludedSourceCount++
 			var tokenStats promptPartTokenStats
 			if b.TokenBudget > 0 {
-				tokens, err := b.partTokens(ctx, part, map[string]any{
+				fields := map[string]any{
 					"source": source.Name(),
 					"part":   part.Name(),
-				})
+				}
+				var tokens int
+				if counted {
+					tokens, err = b.validateTokenCount(ctx, sourceTokens, fields)
+				} else {
+					tokens, err = b.partTokens(ctx, part, fields)
+				}
 				if err != nil {
 					return nil, err
 				}
@@ -452,9 +479,15 @@ func (b *Builder) partTokens(ctx context.Context, part Part, fields map[string]a
 		obs.TokenCountFailed(ctx, fields, err)
 		return 0, err
 	}
+	return b.validateTokenCount(ctx, tokens, fields)
+}
+
+// validateTokenCount applies the same validation and diagnostics to counts
+// calculated by a part and build-local totals supplied by a context source.
+func (b *Builder) validateTokenCount(ctx context.Context, tokens int, fields map[string]any) (int, error) {
 	if tokens < 0 {
 		err := fmt.Errorf("%w: %d", ErrInvalidTokenCount, tokens)
-		obs.TokenCountFailed(ctx, fields, err)
+		newPromptBuilderDebugObserver(b).TokenCountFailed(ctx, fields, err)
 		return 0, err
 	}
 	return tokens, nil

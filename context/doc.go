@@ -15,6 +15,9 @@
 // Agents inject their resolved counter, and compatible history/context sources
 // receive it through TokenCounterSetter. Custom Part.Tokens implementations take
 // ai.TokenCounter, the local budgeting dependency.
+// Sources implementing ContextSourceWithTokenCount can return their selection
+// total for the builder to consume without counting the same snapshot again.
+// That total is local to the invocation; later builds count fresh content.
 // SystemInstructionsTokens now returns (int, error), and BuildContext propagates
 // counting errors when budgeting is enabled. With a non-positive TokenBudget,
 // the builder skips its own counts; context sources still run and may perform
