@@ -59,6 +59,12 @@ type Loop struct {
 	MaxLoopIterations int
 	// MaxTokens limits model output for each generation request.
 	MaxTokens int
+	// RequestBudget replaces the prompt builder's inherited request window.
+	// Nil inherits a builder exposing RequestBudget; zero limits disable checks.
+	RequestBudget *ai.RequestBudgetConfig
+	// TokenCounter is the local request estimator override. Nil selects the
+	// builder counter, model counter, then generic estimator.
+	TokenCounter ai.TokenCounter
 	// ResponseFormat requests the output shape for each model generation.
 	ResponseFormat ai.ResponseFormat
 	// Reasoning configures model reasoning/thinking behavior for each model generation.
@@ -84,6 +90,14 @@ func (l *Loop) Validate() error {
 	}
 	if l.PromptBuilder == nil {
 		return ErrPromptNotConfigured
+	}
+	if l.RequestBudget != nil {
+		if err := l.RequestBudget.Validate(); err != nil {
+			return err
+		}
+	}
+	if l.MaxTokens < 0 {
+		return fmt.Errorf("%w: negative output limit", ai.ErrInvalidRequestBudget)
 	}
 	if l.RetryPolicy != nil {
 		if err := l.RetryPolicy.Validate(); err != nil {

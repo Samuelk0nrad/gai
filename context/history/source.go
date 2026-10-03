@@ -148,6 +148,13 @@ func (s *HistorySource) FunctionWithTokens(ctx context.Context, tokenBudget int)
 	return s.build(ctx, tokenBudget)
 }
 
+// FunctionWithBudget selects canonical history whose build-local count already
+// includes emitted message framing. History bypasses the arbitrary-part renderer,
+// so its existing projection is identical to the builder's project callback.
+func (s *HistorySource) FunctionWithBudget(ctx context.Context, tokenBudget int, _ func(context.Context, gaictx.Part) (int, error)) (gaictx.Part, int, error) {
+	return s.build(ctx, tokenBudget)
+}
+
 // build selects and counts one snapshot. Its token total is local to this call.
 func (s *HistorySource) build(ctx context.Context, tokenBudget int) (result gaictx.Part, tokens int, err error) {
 	ctx, obs := newHistoryBuildObserver(ctx, s.debug, s.sessionID, tokenBudget, s.summarize)

@@ -91,17 +91,23 @@ func RetryEvent(iteration, attempt, retry int, reason string, delay time.Duratio
 
 // DiscardEvent reports a rejected attempt without exposing its response content.
 func DiscardEvent(iteration, attempt, retry int, attemptIteration Iteration) Event {
-	return Event{
+	event := Event{
 		Type:           EventDiscard,
 		IterationCount: iteration,
 		AttemptID:      attempt,
 		RetryCount:     retry,
 		PartCount:      len(attemptIteration.Parts),
 		Iteration: &Iteration{
-			Count: attemptIteration.Count,
-			Usage: attemptIteration.Usage,
+			Count:         attemptIteration.Count,
+			Usage:         attemptIteration.Usage,
+			UsageReported: attemptIteration.UsageReported,
 		},
 	}
+	if attemptIteration.RequestBudget != nil {
+		budget := *attemptIteration.RequestBudget
+		event.Iteration.RequestBudget = &budget
+	}
+	return event
 }
 
 func IterationDoneEvent(iteration Iteration, attempt, retry int) Event {

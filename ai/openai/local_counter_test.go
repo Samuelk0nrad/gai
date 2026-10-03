@@ -4,14 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"testing"
 
 	"github.com/lace-ai/gai/ai"
 	tiktoken "github.com/tiktoken-go/tokenizer"
 )
 
-func TestNewTokenizerResolvesKnownOpenAIModels(t *testing.T) {
+func TestNewTokenCounterResolvesKnownOpenAIModels(t *testing.T) {
 	tests := []struct {
 		model  string
 		wantID string
@@ -28,66 +27,56 @@ func TestNewTokenizerResolvesKnownOpenAIModels(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.model, func(t *testing.T) {
-			tokenizer, err := NewTokenizer(tt.model)
+			counter, err := NewTokenCounter(tt.model)
 			if err != nil {
-				t.Fatalf("NewTokenizer(%q) error: %v", tt.model, err)
+				t.Fatalf("NewTokenCounter(%q) error: %v", tt.model, err)
 			}
-			if tokenizer.ID() != tt.wantID {
-				t.Fatalf("ID() = %q, want %q", tokenizer.ID(), tt.wantID)
+			if counter.ID() != tt.wantID {
+				t.Fatalf("ID() = %q, want %q", counter.ID(), tt.wantID)
 			}
-			got, err := tokenizer.CountTokens(context.Background(), tt.text)
+			got, err := counter.CountTokens(context.Background(), tt.text)
 			if err != nil || got != tt.want {
 				t.Fatalf("CountTokens(%q) = %d, %v; want %d, nil", tt.text, got, err, tt.want)
-			}
-			tokens, err := tokenizer.Tokenize(context.Background(), tt.text)
-			if err != nil {
-				t.Fatalf("Tokenize(%q) error: %v", tt.text, err)
-			}
-			if len(tokens) != got {
-				t.Fatalf("len(Tokenize(%q)) = %d, want CountTokens result %d", tt.text, len(tokens), got)
 			}
 		})
 	}
 }
 
-func TestNewTokenizerRejectsUnknownModelWithTypedUnavailability(t *testing.T) {
-	_, err := NewTokenizer("gpt-future-999")
+func TestNewTokenCounterRejectsUnknownModelWithTypedUnavailability(t *testing.T) {
+	_, err := NewTokenCounter("gpt-future-999")
 	if err == nil {
-		t.Fatal("NewTokenizer() error = nil, want unavailable error")
+		t.Fatal("NewTokenCounter() error = nil, want unavailable error")
 	}
-	var unavailable *TokenizerUnavailableError
+	var unavailable *TokenCounterUnavailableError
 	if !errors.As(err, &unavailable) {
-		t.Fatalf("NewTokenizer() error = %T %v, want *TokenizerUnavailableError", err, err)
+		t.Fatalf("NewTokenCounter() error = %T %v, want *TokenCounterUnavailableError", err, err)
 	}
 	if unavailable.Model != "gpt-future-999" {
 		t.Fatalf("unavailable model = %q, want %q", unavailable.Model, "gpt-future-999")
 	}
-	if !errors.Is(err, ai.ErrTokenizerUnsupported) {
-		t.Fatalf("NewTokenizer() error = %v, want ai.ErrTokenizerUnsupported", err)
+	if !errors.Is(err, ai.ErrTokenCounterUnsupported) {
+		t.Fatalf("NewTokenCounter() error = %v, want ai.ErrTokenCounterUnsupported", err)
 	}
 }
 
-func TestModelTokenizerUsesExplicitResolverAndPreservesUnavailableFallback(t *testing.T) {
-	if tokenizer := (&Model{name: GPT41}).Tokenizer(); tokenizer == nil {
-		t.Fatal("Tokenizer() = nil for a supported model")
+func TestModelCounterUsesExplicitResolverAndPreservesUnavailableFallback(t *testing.T) {
+	if counter := (&Model{name: GPT41}).TokenCounter(); counter == nil {
+		t.Fatal("TokenCounter() = nil for a supported model")
 	}
-	if tokenizer := (&Model{name: "gpt-future-999"}).Tokenizer(); tokenizer != nil {
-		t.Fatalf("Tokenizer() = %T for an unsupported model, want nil", tokenizer)
+	if counter := (&Model{name: "gpt-future-999"}).TokenCounter(); counter != nil {
+		t.Fatalf("TokenCounter() = %T for an unsupported model, want nil", counter)
 	}
 }
 
-func TestTokenizerHonorsCanceledContextWithoutProviderIO(t *testing.T) {
-	tokenizer, err := NewTokenizer(GPT41)
+func TestCounterHonorsCanceledContextWithoutProviderIO(t *testing.T) {
+	counter, err := NewTokenCounter(GPT41)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := tokenizer.CountTokens(ctx, "hello"); !errors.Is(err, context.Canceled) {
+	if _, err := counter.CountTokens(ctx, "hello"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("CountTokens() error = %v, want context.Canceled", err)
-	}
-	if _, err := tokenizer.Tokenize(ctx, "hello"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Tokenize() error = %v, want context.Canceled", err)
 	}
 }
 
@@ -113,8 +102,8 @@ var realisticToolSchemaJSONFixtures = []struct {
 	},
 }
 
-func TestTokenizerCountsRealisticToolSchemaJSONFixtures(t *testing.T) {
-	tokenizer, err := NewTokenizer(GPT41)
+func TestCounterCountsRealisticToolSchemaJSONFixtures(t *testing.T) {
+	counter, err := NewTokenCounter(GPT41)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,23 +112,9 @@ func TestTokenizerCountsRealisticToolSchemaJSONFixtures(t *testing.T) {
 			if !json.Valid([]byte(fixture.json)) {
 				t.Fatal("fixture is not valid JSON")
 			}
-			first, err := tokenizer.Tokenize(t.Context(), fixture.json)
-			if err != nil {
-				t.Fatal(err)
-			}
-			second, err := tokenizer.Tokenize(t.Context(), fixture.json)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(first, second) {
-				t.Fatalf("Tokenize() is not deterministic: first=%q second=%q", first, second)
-			}
-			count, err := tokenizer.CountTokens(t.Context(), fixture.json)
+			count, err := counter.CountTokens(t.Context(), fixture.json)
 			if err != nil || count != fixture.want {
 				t.Fatalf("CountTokens() = %d, %v; want %d, nil", count, err, fixture.want)
-			}
-			if len(first) != count {
-				t.Fatalf("len(Tokenize()) = %d, want CountTokens result %d", len(first), count)
 			}
 		})
 	}

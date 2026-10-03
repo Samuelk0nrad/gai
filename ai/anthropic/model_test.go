@@ -404,31 +404,6 @@ func TestGenerateStreamPrefersStreamErrorOverOpenBlock(t *testing.T) {
 	}
 }
 
-func TestCountTokens(t *testing.T) {
-	m := testModel(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/messages/count_tokens" {
-			t.Fatalf("path = %q", r.URL.Path)
-		}
-		if r.Header.Get("x-api-key") != "test-key" || r.Header.Get("anthropic-version") != "2023-06-01" {
-			t.Fatal("missing Anthropic headers")
-		}
-		body := decodeRequest(t, r)
-		messages := array(t, body["messages"])
-		content := array(t, object(t, messages[0])["content"])
-		if body["model"] != ClaudeSonnet4_6 || len(messages) != 1 || len(content) != 1 || object(t, content[0])["type"] != "text" || object(t, content[0])["text"] != "hello" {
-			t.Fatalf("body = %#v", body)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"input_tokens":42}`))
-	})
-	if got, err := m.Tokenizer().CountTokens(context.Background(), "hello"); err != nil || got != 42 {
-		t.Fatalf("CountTokens = %d, %v", got, err)
-	}
-	if _, err := m.Tokenizer().Tokenize(context.Background(), "hello"); !errors.Is(err, ai.ErrTokenizerUnsupported) {
-		t.Fatalf("Tokenize error = %v", err)
-	}
-}
-
 func TestGenerateStreamClassifiesProviderRateLimit(t *testing.T) {
 	recorder := obstest.Install(t)
 	m := testModel(t, func(w http.ResponseWriter, _ *http.Request) {

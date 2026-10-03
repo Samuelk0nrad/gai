@@ -265,14 +265,14 @@ func TestAgentWorkflowStreamsRetriedAttemptTokens(t *testing.T) {
 		scripts: [][]ai.Token{
 			{
 				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "partial"}},
-				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
-				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 4, OutputTokens: 3}}},
+				{Completion: &ai.Completion{UsageReported: true, Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
+				{Completion: &ai.Completion{UsageReported: true, Usage: ai.Usage{InputTokens: 4, OutputTokens: 3}}},
 				{Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("retriable stream error")}},
 			},
 			{
 				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "final"}},
-				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 5, OutputTokens: 4}}},
-				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 6, OutputTokens: 5}}},
+				{Completion: &ai.Completion{UsageReported: true, Usage: ai.Usage{InputTokens: 5, OutputTokens: 4}}},
+				{Completion: &ai.Completion{UsageReported: true, Usage: ai.Usage{InputTokens: 6, OutputTokens: 5}}},
 			},
 		},
 	}
@@ -326,15 +326,15 @@ func TestAgentWorkflowBillsRejectedRequiredToolAttemptWithoutExposingIt(t *testi
 		scripts: [][]ai.Token{
 			{
 				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "rejected response"}},
-				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
+				{Completion: &ai.Completion{UsageReported: true, Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
 			},
 			{
 				{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-1", Type: "function", Name: "echo", Args: []byte(`{"text":"payload"}`)}}},
-				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 5, OutputTokens: 4}}},
+				{Completion: &ai.Completion{UsageReported: true, Usage: ai.Usage{InputTokens: 5, OutputTokens: 4}}},
 			},
 			{
 				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "final answer"}},
-				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 7, OutputTokens: 6}}},
+				{Completion: &ai.Completion{UsageReported: true, Usage: ai.Usage{InputTokens: 7, OutputTokens: 6}}},
 			},
 		},
 	}
@@ -386,15 +386,15 @@ func TestAgentWorkflowRunEventsBillsRejectedRequiredToolAttempt(t *testing.T) {
 		scripts: [][]ai.Token{
 			{
 				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "rejected response"}},
-				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
+				{Completion: &ai.Completion{UsageReported: true, Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
 			},
 			{
 				{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-1", Type: "function", Name: "echo", Args: []byte(`{"text":"payload"}`)}}},
-				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 5, OutputTokens: 4}}},
+				{Completion: &ai.Completion{UsageReported: true, Usage: ai.Usage{InputTokens: 5, OutputTokens: 4}}},
 			},
 			{
 				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "final answer"}},
-				{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 7, OutputTokens: 6}}},
+				{Completion: &ai.Completion{UsageReported: true, Usage: ai.Usage{InputTokens: 7, OutputTokens: 6}}},
 			},
 		},
 	}
@@ -438,7 +438,7 @@ func TestAgentWorkflowRunEventsBillsTerminalErrorAttempt(t *testing.T) {
 	model := &scriptedWorkflowModel{
 		scripts: [][]ai.Token{{
 			{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "partial response"}},
-			{Completion: &ai.Completion{Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
+			{Completion: &ai.Completion{UsageReported: true, Usage: ai.Usage{InputTokens: 3, OutputTokens: 2}}},
 			{Err: errors.New("terminal stream error")},
 		}},
 	}

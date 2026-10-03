@@ -31,7 +31,6 @@ type TokenCounter interface {
 // TokenCounterProvider is an optional model capability for automatic budgeting.
 // Return a cheap local counter, a model-specific local estimator, or nil when
 // neither is available. Returning nil selects GAI's generic estimator. Legacy
-// Tokenizer methods are never consulted automatically.
 type TokenCounterProvider interface {
 	TokenCounter() TokenCounter
 }

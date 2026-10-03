@@ -266,7 +266,8 @@ func TestHistorySourceIncludesNewestFittingTurnsInChronologicalOrder(t *testing.
 	source := history.NewHistory("session-1", store)
 	source.SetTokenCounter(&mocks.MockTokenCounter{})
 
-	result, err := source.Function(context.Background(), 2)
+	// Each short message costs one text token and four framing tokens.
+	result, err := source.Function(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("Function failed: %v", err)
 	}

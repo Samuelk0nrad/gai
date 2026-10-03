@@ -2059,10 +2059,12 @@ func TestIterationCompletionUsageUsesLatestProviderValues(t *testing.T) {
 
 	var iteration loop.Iteration
 	iteration.AppendToken(ai.Token{Completion: &ai.Completion{
-		Usage: ai.Usage{InputTokens: 10, OutputTokens: 4, ReasoningTokens: 2},
+		UsageReported: true,
+		Usage:         ai.Usage{InputTokens: 10, OutputTokens: 4, ReasoningTokens: 2},
 	}})
 	iteration.AppendToken(ai.Token{Completion: &ai.Completion{
-		Usage: ai.Usage{InputTokens: 12, OutputTokens: 6, ReasoningTokens: 3},
+		UsageReported: true,
+		Usage:         ai.Usage{InputTokens: 12, OutputTokens: 6, ReasoningTokens: 3},
 	}})
 
 	if iteration.Usage != (ai.Usage{InputTokens: 12, OutputTokens: 6, ReasoningTokens: 3}) {

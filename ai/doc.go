@@ -60,10 +60,23 @@
 // Block boundaries can change counts, so this has estimated fidelity and a
 // distinct counter ID. Anthropic, Gemini, Mistral, and unknown mappings use the
 // generic estimate.
-// Counter selection and counting must not make network requests. Legacy
-// Tokenizer methods remain available explicitly on concrete built-in models;
-// some of these APIs can make provider requests or download tokenizer data.
-// They are never consulted for automatic budgeting.
+// Counter selection and counting must not make network requests. Token-splitting
+// APIs have been removed; openai.NewTokenCounter provides an explicit local count.
+//
+// # Request budgets
+//
+// RequestBudgetConfig sets total-window and input-only limits, output capacity,
+// safety margin, and opt-in accurate mode. The loop checks finalized requests
+// before every generation attempt. Accepted reported input usage anchors a
+// run-owned checkpoint; unchanged bases count only appended messages locally.
+// Changed messages/model/options/tools invalidate reuse. Counts are never written
+// into semantic history. RequestBudgetResult travels through existing execution
+// events/results and observations and remains distinct from billed attempt usage.
+//
+// InputTokenCounter is the optional complete-request preflight capability. Only
+// explicit RequestCountAccurate selects it; unsupported/failed preflight stops
+// generation. Anthropic shares its generation mapper with native count_tokens.
+// Provider preflight may still be estimated; reported usage remains authoritative.
 //
 // # Pre-v1 migration
 //
@@ -86,7 +99,8 @@
 // no token-splitting method is required. Clearing an agent counter override with
 // Optional[TokenCounter]{Set: true} restores automatic local selection.
 //
-// Calculated text counts are not stored on messages, turns, parts, or summaries.
-// They do not represent a full model request budget. Request framing and complete
-// input/conversation budgeting remain separate work.
+// Replace openai.NewTokenizer with openai.NewTokenCounter and concrete Tokenizer
+// methods with TokenCounter or explicit InputTokenCounter. Calculated text counts
+// are not stored on messages, turns, parts, or summaries. Complete request budgets
+// belong to the loop; local text fidelity does not imply exact request accuracy.
 package ai

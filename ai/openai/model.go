@@ -44,16 +44,6 @@ func (m *Model) Name() string { return m.name }
 
 func (m *Model) Close() error { return nil }
 
-// Tokenizer returns a local tokenizer only when this model has a known encoding.
-// Unknown models remain nil so callers retain their configured fallback behavior.
-func (m *Model) Tokenizer() ai.Tokenizer {
-	tokenizer, err := NewTokenizer(m.name)
-	if err != nil {
-		return nil
-	}
-	return tokenizer
-}
-
 func (m *Model) Descriptor() ai.ModelDescriptor {
 	if facts, ok := m.provider.catalog.Lookup(m.name); ok {
 		return effectiveOpenAIDescriptor(m.name, facts)

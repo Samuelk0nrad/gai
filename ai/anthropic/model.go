@@ -14,7 +14,6 @@ import (
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
 	"github.com/lace-ai/gai/internal/modelcatalog"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -36,13 +35,8 @@ var _ ai.ModelDescriber = (*Model)(nil)
 func (m *Model) Name() string { return m.name }
 func (m *Model) Close() error { return nil }
 
-// TokenCounter uses a local estimate for automatic budgeting. Tokenizer is
-// still available explicitly, but may perform network I/O.
+// TokenCounter supplies the generic local estimator without provider I/O.
 func (m *Model) TokenCounter() ai.TokenCounter { return ai.TextTokenEstimator{} }
-
-func (m *Model) Tokenizer() ai.Tokenizer {
-	return &Tokenizer{modelName: m.name, client: m.client, debug: m.debug}
-}
 
 func (m *Model) Descriptor() ai.ModelDescriptor {
 	if facts, ok := m.client.catalog.Lookup(m.name); ok {
@@ -717,30 +711,6 @@ func anthropicHTTPStatus(err error) int {
 		return anthropicErr.StatusCode
 	}
 	return 0
-}
-
-type Tokenizer struct {
-	modelName string
-	client    *Provider
-	debug     gai.ObservationSink
-}
-
-func (t *Tokenizer) ID() string { return "anthropic." + t.modelName }
-func (t *Tokenizer) Tokenize(ctx context.Context, text string) (tokens []string, err error) {
-	_, span := gai.StartOperationSpan(ctx, anthropicTracerName, "ai.anthropic", "ai.operation", "tokenizer.tokenize", attribute.String("ai.provider", "anthropic"), attribute.String("ai.model", t.modelName))
-	err = ai.ErrTokenizerUnsupported
-	defer gai.EndSpan(span, err)
-	return nil, err
-}
-func (t *Tokenizer) CountTokens(ctx context.Context, text string) (tokens int, err error) {
-	ctx, span := gai.StartOperationSpan(ctx, anthropicTracerName, "ai.anthropic", "ai.operation", "tokenizer.count_tokens", attribute.String("ai.provider", "anthropic"), attribute.String("ai.model", t.modelName), attribute.Int("ai.input_length", len(text)))
-	defer func() { span.SetAttributes(attribute.Int("ai.input_tokens", tokens)); gai.EndSpan(span, err) }()
-	client := t.client.sdkClient()
-	count, err := client.Messages.CountTokens(ctx, antropic.MessageCountTokensParams{Model: antropic.Model(t.modelName), Messages: []antropic.MessageParam{antropic.NewUserMessage(antropic.NewTextBlock(text))}})
-	if err != nil {
-		return 0, localError(err)
-	}
-	return int(count.InputTokens), nil
 }
 
 // observationPrompt respects the prompt capture category without mixing in

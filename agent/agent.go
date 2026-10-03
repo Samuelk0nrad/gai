@@ -90,6 +90,9 @@ type Definition struct {
 	// TokenCounter supplies a local-only text counter. Nil selects the optional
 	// model counter, then ai.TextTokenEstimator if no model counter is available.
 	TokenCounter ai.TokenCounter
+	// RequestBudget atomically replaces the prompt builder's window/reserve.
+	// Nil inherits standard Builder settings; explicit zero limits disable checks.
+	RequestBudget *ai.RequestBudgetConfig
 	// ToolResponseProcessor can transform tool responses before they enter the transcript.
 	ToolResponseProcessor loop.ToolResponseProcessor
 	// ObservationSink receives agent and workflow lifecycle events.
@@ -272,6 +275,8 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 		l.MaxLoopIterations = execution.limits.MaxLoopIterations
 	}
 	l.MaxTokens = execution.limits.MaxTokens
+	l.RequestBudget = execution.requestBudget
+	l.TokenCounter = execution.counter
 	l.ResponseFormat = execution.responseFormat
 	l.Reasoning = execution.reasoning
 	l.ToolChoice = execution.toolChoice

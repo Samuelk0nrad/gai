@@ -17,19 +17,25 @@ func TestPartAndSummaryTokensRecountCurrentContent(t *testing.T) {
 	t.Parallel()
 	part := Part{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "one")}}
 	summary := Summary{Content: ai.ContentPart{Kind: ai.ContentText, Text: "one"}}
-	for _, count := range []func(context.Context, ai.TokenCounter) (int, error){part.Tokens, summary.Tokens} {
+	for _, tc := range []struct {
+		count   func(context.Context, ai.TokenCounter) (int, error)
+		framing int
+	}{
+		{part.Tokens, 4},    // A selected plain message includes framing.
+		{summary.Tokens, 0}, // Summary.Tokens counts its stored text alone.
+	} {
 		counter := &mocks.MockTokenCounter{Count: 6}
-		got, err := count(t.Context(), counter)
-		if err != nil || got != 6 {
+		got, err := tc.count(t.Context(), counter)
+		if err != nil || got != 6+tc.framing {
 			t.Fatalf("first count = %d, %v", got, err)
 		}
 		counter.Count = 8
-		got, err = count(t.Context(), counter)
-		if err != nil || got != 8 || counter.CountCalls != 2 {
+		got, err = tc.count(t.Context(), counter)
+		if err != nil || got != 8+tc.framing || counter.CountCalls != 2 {
 			t.Fatalf("second count = %d, %v; calls %d", got, err, counter.CountCalls)
 		}
 		counter.Err = errors.New("failed")
-		if _, err := count(t.Context(), counter); !errors.Is(err, counter.Err) {
+		if _, err := tc.count(t.Context(), counter); !errors.Is(err, counter.Err) {
 			t.Fatalf("later error = %v", err)
 		}
 	}
@@ -40,7 +46,7 @@ func TestPartAndSummaryTokensRecountCurrentContent(t *testing.T) {
 		count func(context.Context, ai.TokenCounter) (int, error)
 		want  int
 	}{
-		{part.Tokens, 1}, {summary.Tokens, 1}, {copyPart.Tokens, 3}, {copySummary.Tokens, 3},
+		{part.Tokens, 5}, {summary.Tokens, 1}, {copyPart.Tokens, 7}, {copySummary.Tokens, 3},
 	} {
 		got, err := tc.count(t.Context(), &mocks.MockTokenCounter{})
 		if err != nil || got != tc.want {

@@ -11,8 +11,10 @@ import (
 
 const contextTracerName = "github.com/lace-ai/gai/context"
 
-// ContextSource produces one prompt part using the remaining context budget.
-// Sources are evaluated in declaration order by Builder.BuildContext.
+// ContextSource produces one prompt part using a remaining-capacity hint.
+// Sources are evaluated once in declaration order by Builder.BuildContext.
+// Raw part counts can differ from rendered message costs. Sources that select
+// optional content for a request budget can use ContextSourceWithBudgetProjection.
 type ContextSource interface {
 	Name() string
 	Function(ctx context.Context, TokenBudget int) (Part, error)
@@ -30,10 +32,26 @@ type TokenCounterSetter interface {
 // with the injected counter. Counts accompanying a nil part are ignored.
 // It belongs only to this invocation, not to the part or persisted state.
 // Builders use Function when budgeting is disabled or no counter is available.
+// Request-budget allocation counts the emitted message projection separately;
+// ContextSourceWithBudgetProjection can hand off that complete cost instead.
 type ContextSourceWithTokenCount interface {
 	ContextSource
 	TokenCounterSetter
 	FunctionWithTokens(ctx context.Context, tokenBudget int) (Part, int, error)
+}
+
+// ContextSourceWithBudgetProjection selects a part using the cost of its emitted
+// messages, including renderer markup and message framing. Builder calls this
+// capability instead of Function when request-budget allocation is enabled.
+// project uses the current local counter and renderer; a source can test its own
+// candidates without being invoked again. It must not retain the build-local
+// callback, and the returned part must preserve the selected content. The returned
+// total must equal project(ctx, part); nil-part counts are ignored. This build-local
+// count avoids recounting the selected candidate. Exact-fit selection requires a
+// stable renderer; the finalized request guard still applies.
+type ContextSourceWithBudgetProjection interface {
+	ContextSource
+	FunctionWithBudget(ctx context.Context, tokenBudget int, project func(context.Context, Part) (int, error)) (Part, int, error)
 }
 
 // PromptBuilder is the prompt-construction contract consumed by agent loops.
@@ -89,7 +107,12 @@ type Builder struct {
 	debugSink          gai.ObservationSink
 	input              PromptInput
 	counter            ai.TokenCounter
+	configuredCounter  ai.TokenCounter
 	OutputTokenReserve int
+	allocationOverride bool
+	allocationLimit    int
+	allocationOutput   int
+	allocationReserve  int
 }
 
 // New creates a prompt builder from def. A nil TokenCounter selects the
@@ -120,6 +143,7 @@ func New(def Definition) *Builder {
 		debugSink:          def.ObservationSink,
 		input:              def.PromptInput.Clone(),
 		counter:            counter,
+		configuredCounter:  def.TokenCounter,
 	}
 }
 
@@ -246,11 +270,17 @@ func (b *Builder) AppendSystemInstructions(ctx context.Context, instructions ...
 
 func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err error) {
 	ctx, obs := newPromptBuilderContextObserver(ctx, b)
+	limit, outputReserve := b.TokenBudget, b.OutputTokenReserve
+	additionalReserve := 0
+	if b.allocationOverride {
+		limit, outputReserve = b.allocationLimit, b.allocationOutput
+		additionalReserve = b.allocationReserve
+	}
 	stats := promptContextBuildStats{
 		SourceCount:            len(b.ContextSources),
 		SystemInstructionCount: len(b.SystemInstructions),
-		TokenBudget:            b.TokenBudget,
-		OutputTokenReserve:     b.OutputTokenReserve,
+		TokenBudget:            limit,
+		OutputTokenReserve:     outputReserve,
 		TokenCounterPresent:    b.counter != nil,
 	}
 	defer func() {
@@ -261,12 +291,50 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 		return nil, err
 	}
 
-	if b.TokenBudget > 0 {
-		stats.SystemTokens, err = b.SystemInstructionsTokens(ctx)
+	if limit > 0 {
+		if b.allocationOverride && b.counter != nil && len(b.SystemInstructions) > 0 {
+			var messages []ai.Message
+			messages, err = b.renderMessages(ctx, []Part{NewSystemPart(b.SystemInstructions)}, ai.RoleSystem, true)
+			if err == nil {
+				stats.SystemTokens, err = ai.EstimateMessageTokens(ctx, messages, b.counter)
+			}
+		} else {
+			stats.SystemTokens, err = b.SystemInstructionsTokens(ctx)
+		}
 		if err != nil {
 			return nil, err
 		}
-		stats.RemainingTokens = b.TokenBudget - b.OutputTokenReserve - stats.SystemTokens
+		stats.RemainingTokens = spendBudget(limit, outputReserve)
+		stats.RemainingTokens = spendBudget(stats.RemainingTokens, additionalReserve)
+		stats.RemainingTokens = spendBudget(stats.RemainingTokens, stats.SystemTokens)
+		// Required user/machine input takes priority over optional sources. These
+		// use their emitted messages during request-budget allocation; the loop
+		// checks the final rendered request before every generation attempt.
+		if b.counter != nil && len(b.input.User) > 0 {
+			tokens, countErr := ai.EstimateMessageTokens(ctx, []ai.Message{{Role: ai.RoleUser, Parts: b.input.User}}, b.counter)
+			if countErr != nil {
+				return nil, countErr
+			}
+			stats.RemainingTokens = spendBudget(stats.RemainingTokens, tokens)
+		}
+		for _, part := range b.input.Context {
+			if part == nil {
+				continue
+			}
+			var tokens int
+			var countErr error
+			if b.allocationOverride && b.counter != nil {
+				tokens, countErr = b.projectPartTokens(ctx, part)
+			} else {
+				tokens, countErr = b.partTokens(ctx, part, map[string]any{"source": "prompt_input", "part": part.Name()})
+			}
+			if countErr != nil {
+				return nil, countErr
+			}
+			if b.counter != nil {
+				stats.RemainingTokens = spendBudget(stats.RemainingTokens, tokens)
+			}
+		}
 	} else {
 		obs.TokenBudgetSkipped(ctx)
 		stats.RemainingTokens = 1000000 // effectively unlimited
@@ -287,8 +355,13 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 		var part Part
 		var sourceTokens int
 		countedSource, counted := source.(ContextSourceWithTokenCount)
-		counted = counted && b.TokenBudget > 0 && b.counter != nil
-		if counted {
+		counted = counted && limit > 0 && b.counter != nil
+		projectedSource, projected := source.(ContextSourceWithBudgetProjection)
+		projected = projected && b.allocationOverride && limit > 0 && b.counter != nil
+		if projected {
+			counted = false
+			part, sourceTokens, err = projectedSource.FunctionWithBudget(ctx, stats.RemainingTokens, b.projectPartTokens)
+		} else if counted {
 			part, sourceTokens, err = countedSource.FunctionWithTokens(ctx, stats.RemainingTokens)
 		} else {
 			part, err = source.Function(ctx, stats.RemainingTokens)
@@ -304,15 +377,18 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 			contextParts = append(contextParts, part)
 			stats.IncludedSourceCount++
 			var tokenStats promptPartTokenStats
-			if b.TokenBudget > 0 {
+			if limit > 0 {
 				fields := map[string]any{
 					"source": source.Name(),
 					"part":   part.Name(),
 				}
 				var tokens int
-				if counted {
+				if counted || projected {
 					tokens, err = b.validateTokenCount(ctx, sourceTokens, fields)
-				} else {
+				}
+				if err == nil && b.allocationOverride && b.counter != nil && !projected {
+					tokens, err = b.projectPartTokens(ctx, part)
+				} else if !counted && !projected {
 					tokens, err = b.partTokens(ctx, part, fields)
 				}
 				if err != nil {
@@ -320,7 +396,7 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 				}
 				tokenStats = promptPartTokenStats{Tokens: tokens, TokensCounted: b.counter != nil}
 				if tokenStats.TokensCounted {
-					stats.RemainingTokens -= tokens
+					stats.RemainingTokens = spendBudget(stats.RemainingTokens, tokens)
 				}
 			}
 			obs.SourceIncluded(ctx, source.Name(), part.Name(), tokenStats, stats.RemainingTokens)
@@ -334,19 +410,6 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 			continue
 		}
 		contextParts = append(contextParts, part)
-		if b.TokenBudget <= 0 {
-			continue
-		}
-		tokens, err := b.partTokens(ctx, part, map[string]any{
-			"source": "prompt_input",
-			"part":   part.Name(),
-		})
-		if err != nil {
-			return nil, err
-		}
-		if b.counter != nil {
-			stats.RemainingTokens -= tokens
-		}
 	}
 	if err = ctx.Err(); err != nil {
 		return nil, err
@@ -365,11 +428,11 @@ func (b *Builder) BuildRequest(ctx context.Context, conv Conversation) (ai.AIReq
 	}
 	var messages []ai.Message
 	if len(b.SystemInstructions) > 0 {
-		text, err := b.Renderer.Render(ctx, []Part{NewSystemPart(b.SystemInstructions)})
+		system, err := b.renderMessages(ctx, []Part{NewSystemPart(b.SystemInstructions)}, ai.RoleSystem, false)
 		if err != nil {
 			return ai.AIRequest{}, err
 		}
-		messages = append(messages, ai.TextMessage(ai.RoleSystem, text))
+		messages = append(messages, system...)
 	}
 	for _, part := range b.ContextParts {
 		if err := ctx.Err(); err != nil {
@@ -378,15 +441,11 @@ func (b *Builder) BuildRequest(ctx context.Context, conv Conversation) (ai.AIReq
 		if part == nil {
 			continue
 		}
-		if canonical, ok := part.(ConversationPart); ok {
-			messages = append(messages, ai.CloneMessages(canonical.ConversationMessages())...)
-			continue
-		}
-		text, err := b.Renderer.Render(ctx, []Part{part})
+		projected, err := b.partMessages(ctx, part, false)
 		if err != nil {
 			return ai.AIRequest{}, err
 		}
-		messages = append(messages, ai.TextMessage(ai.RoleUser, text))
+		messages = append(messages, projected...)
 	}
 	if len(b.input.User) > 0 {
 		messages = append(messages, ai.Message{Role: ai.RoleUser, Parts: ai.CloneParts(b.input.User)})
@@ -404,6 +463,43 @@ func (b *Builder) BuildRequest(ctx context.Context, conv Conversation) (ai.AIReq
 	return request, nil
 }
 
+// partMessages is shared by source allocation and final request construction.
+// Canonical conversation parts already carry their message envelopes.
+func (b *Builder) partMessages(ctx context.Context, part Part, preview bool) ([]ai.Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if part == nil {
+		return nil, nil
+	}
+	if canonical, ok := part.(ConversationPart); ok {
+		return ai.CloneMessages(canonical.ConversationMessages()), nil
+	}
+	return b.renderMessages(ctx, []Part{part}, ai.RoleUser, preview)
+}
+
+func (b *Builder) renderMessages(ctx context.Context, parts []Part, role ai.Role, preview bool) ([]ai.Message, error) {
+	var text string
+	var err error
+	if preview {
+		text, err = renderPreview(ctx, b.Renderer, parts)
+	} else {
+		text, err = b.Renderer.Render(ctx, parts)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return []ai.Message{ai.TextMessage(role, text)}, nil
+}
+
+func (b *Builder) projectPartTokens(ctx context.Context, part Part) (int, error) {
+	messages, err := b.partMessages(ctx, part, true)
+	if err != nil {
+		return 0, err
+	}
+	return ai.EstimateMessageTokens(ctx, messages, b.counter)
+}
+
 func (b *Builder) Input() PromptInput {
 	return b.input.Clone()
 }
@@ -413,6 +509,7 @@ func (b *Builder) SetTokenLimit(limit int) error {
 		return fmt.Errorf("%w: %d", ErrInvalideTokenLimit, limit)
 	}
 	b.TokenBudget = limit
+	b.allocationOverride = false
 	return nil
 }
 
@@ -424,8 +521,49 @@ func (b *Builder) TokenCounter() ai.TokenCounter {
 	return b.counter
 }
 
+// ConfiguredTokenCounter returns an explicit application counter, or nil when
+// the loop should resolve its model's counter before the generic fallback.
+func (b *Builder) ConfiguredTokenCounter() ai.TokenCounter {
+	return b.configuredCounter
+}
+
+// RequestBudget supplies the configured window to the loop's final guard.
+// Allocation-only native overhead is deliberately excluded from inheritance.
+func (b *Builder) RequestBudget() ai.RequestBudgetConfig {
+	return ai.RequestBudgetConfig{Limit: max(0, b.TokenBudget), OutputReserve: b.OutputTokenReserve}
+}
+
+// SetBudgetAllocation applies the run's effective window and output reserve,
+// plus separate native overhead/margin for source selection. It does not change
+// the authoritative loop policy or perform source construction.
+func (b *Builder) SetBudgetAllocation(limit, outputReserve, additionalReserve int) error {
+	if limit < 0 {
+		return ai.ErrInvalidRequestBudget
+	}
+	if _, err := ai.AddTokenCounts(outputReserve, additionalReserve); err != nil {
+		return fmt.Errorf("%w: %w", ai.ErrInvalidRequestBudget, err)
+	}
+	b.allocationLimit, b.allocationOutput, b.allocationReserve = limit, outputReserve, additionalReserve
+	b.allocationOverride = true
+	return nil
+}
+
+func spendBudget(remaining, tokens int) int {
+	if remaining <= 0 || tokens >= remaining {
+		return 0
+	}
+	return remaining - tokens
+}
+
 // SetTokenCounter replaces the local counter; nil selects the generic estimator.
 func (b *Builder) SetTokenCounter(counter ai.TokenCounter) {
+	b.configuredCounter = counter
+	b.SetBudgetTokenCounter(counter)
+}
+
+// SetBudgetTokenCounter injects the current run's effective local counter while
+// preserving the application's configured override for future runs.
+func (b *Builder) SetBudgetTokenCounter(counter ai.TokenCounter) {
 	if counter == nil {
 		counter = ai.TextTokenEstimator{}
 	}
@@ -437,6 +575,7 @@ func (b *Builder) SetOutputTokenReserve(reserve int) error {
 		return fmt.Errorf("%w: %d", ErrInvalidOutputReserve, reserve)
 	}
 	b.OutputTokenReserve = reserve
+	b.allocationOverride = false
 	return nil
 }
 
@@ -461,7 +600,10 @@ func (b *Builder) SystemInstructionsTokens(ctx context.Context) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		count += tokens
+		count, err = ai.AddTokenCounts(count, tokens)
+		if err != nil {
+			return 0, err
+		}
 	}
 	return count, nil
 }

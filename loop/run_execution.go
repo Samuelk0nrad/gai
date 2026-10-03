@@ -20,6 +20,9 @@ type runExecution struct {
 	toolDefinitions           []ai.ToolDefinition
 	userMessage               *ai.Message
 	requiredToolCallSatisfied bool
+	budget                    ai.RequestBudgetConfig
+	counter                   ai.TokenCounter
+	checkpoint                *requestCheckpoint
 }
 
 type iterationOutcome uint8
@@ -49,6 +52,10 @@ type attemptExecution struct {
 	cancel         context.CancelFunc
 	cancelOnce     sync.Once
 	finishOnce     sync.Once
+	request        ai.AIRequest
+	model          ai.Model
+	modelName      string
+	counterID      string
 }
 
 func (l *Loop) executeRun(ctx context.Context, events chan<- Event) {
@@ -112,6 +119,14 @@ func (r *runExecution) prepareValidatedRun() bool {
 		}
 	}
 
+	if err = r.prepareRequestBudget(); err != nil {
+		if cancelErr := cancellationError(r.ctx, err); cancelErr != nil {
+			sendLoopCanceled(r.ctx, r.events, r.state, cancelErr)
+		} else {
+			sendLoopError(r.ctx, r.events, r.state, err)
+		}
+		return false
+	}
 	if _, err = r.owner.PromptBuilder.BuildContext(r.ctx); err != nil {
 		if cancelErr := cancellationError(r.ctx, err); cancelErr != nil {
 			sendLoopCanceled(r.ctx, r.events, r.state, cancelErr)
@@ -184,6 +199,25 @@ func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferToken
 		return attempt, attempt.terminateError(fmt.Errorf("%w: %w", ErrBuildPrompt, err))
 	}
 
+	// Capture independently before a model or explicit request counter can
+	// mutate its own request argument. Neither can alter checkpoint identity.
+	attempt.model = r.owner.Model
+	attempt.modelName = ai.ModelName(attempt.model)
+	attempt.counterID = ai.RequestEstimateID + ":" + r.counter.ID()
+	activeBudget := r.budget.Limit > 0 || r.budget.InputLimit > 0 || r.budget.Mode == ai.RequestCountAccurate
+	if activeBudget {
+		attempt.request = request.Copy()
+	}
+	budget, err := r.checkRequestBudget(attemptCtx, request)
+	if activeBudget {
+		attempt.iteration.RequestBudget = &budget
+	}
+	if err != nil {
+		if cancelErr := cancellationError(attemptCtx, err); cancelErr != nil {
+			return attempt, attempt.terminateCanceled(cancelErr)
+		}
+		return attempt, attempt.terminateError(err)
+	}
 	modelCtx := attemptCtx
 	if r.owner.RetryPolicy != nil && r.owner.RetryPolicy.AttemptTimeout > 0 {
 		var deadlineCancel context.CancelFunc
@@ -217,7 +251,7 @@ func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferToken
 }
 
 func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request ai.AIRequest, deferTokens bool) (bool, attemptOutcome, error) {
-	tokens := a.run.owner.Model.GenerateStream(modelCtx, request)
+	tokens := a.model.GenerateStream(modelCtx, request)
 	for token := range tokens {
 		token = token.Clone()
 		if err := token.Validate(); err != nil {
@@ -357,6 +391,12 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 	}
 	// Persistence deliberately follows IterationDone emission.
 	r.owner.Iterations = append(r.owner.Iterations, attempt.iteration)
+	if attempt.iteration.RequestBudget != nil && attempt.iteration.UsageReported && attempt.iteration.Usage.InputTokens >= 0 {
+		r.checkpoint = &requestCheckpoint{
+			request: attempt.request, model: attempt.model, modelName: attempt.modelName,
+			counterID: attempt.counterID, input: attempt.iteration.Usage.InputTokens,
+		}
+	}
 	r.userMessage = nil
 	if hasPermittedToolCall(attempt.toolCalls, r.owner.Tools, r.owner.ToolChoice.Names) {
 		r.requiredToolCallSatisfied = true

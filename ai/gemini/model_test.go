@@ -448,14 +448,3 @@ func TestCanonicalResponseProjectsTextReasoningAndToolCalls(t *testing.T) {
 		t.Fatalf("unexpected tool calls: %#v", toolCalls)
 	}
 }
-
-func TestModelTokenizer(t *testing.T) {
-	m := &Model{name: "gemini-2.5-flash"}
-	tokenizer := m.Tokenizer()
-	if tokenizer == nil {
-		t.Fatal("expected tokenizer")
-	}
-	if tokenizer.ID() != "gemini.gemini-2.5-flash" {
-		t.Fatalf("unexpected tokenizer ID: %q", tokenizer.ID())
-	}
-}

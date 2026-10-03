@@ -43,12 +43,50 @@ func (debugTestTokenCounter) ID() string {
 	return "debug.test"
 }
 
-func (debugTestTokenCounter) Tokenize(ctx context.Context, text string) ([]string, error) {
-	return strings.Fields(text), nil
-}
-
 func (debugTestTokenCounter) CountTokens(ctx context.Context, text string) (int, error) {
 	return len(strings.Fields(text)), nil
+}
+
+func TestBuilderConfigurationResetClearsTemporaryAllocation(t *testing.T) {
+	for _, reset := range []func(*Builder) error{
+		func(b *Builder) error { return b.SetTokenLimit(100) },
+		func(b *Builder) error { return b.SetOutputTokenReserve(0) },
+	} {
+		source := &testContextSource{name: "source"}
+		builder := New(Definition{TokenBudget: 100, ContextSources: []ContextSource{source}})
+		if err := builder.SetBudgetAllocation(50, 10, 7); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := builder.BuildContext(t.Context()); err != nil || source.budget != 33 {
+			t.Fatalf("temporary allowance=%d, %v", source.budget, err)
+		}
+		if err := reset(builder); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := builder.BuildContext(t.Context()); err != nil || source.budget != 100 {
+			t.Fatalf("configured allowance=%d, %v", source.budget, err)
+		}
+	}
+}
+
+type overflowingSystemCounter struct{}
+
+func (overflowingSystemCounter) ID() string                      { return "test/overflow-v1" }
+func (overflowingSystemCounter) Fidelity() ai.TokenCountFidelity { return ai.TokenCountEstimated }
+func (overflowingSystemCounter) CountTokens(context.Context, string) (int, error) {
+	return int(^uint(0) >> 1), nil
+}
+
+func TestBuilderSystemCountOverflowFailsBeforeSources(t *testing.T) {
+	source := &testContextSource{name: "source", budget: -1}
+	builder := New(Definition{
+		TokenBudget: 100, TokenCounter: overflowingSystemCounter{},
+		SystemInstructions: []Part{NewTextPart("one"), NewTextPart("two")},
+		ContextSources:     []ContextSource{source},
+	})
+	if _, err := builder.BuildContext(t.Context()); err == nil || source.budget != -1 {
+		t.Fatalf("overflow error=%v, source allowance=%d", err, source.budget)
+	}
 }
 
 func TestNewPromptBuilderFromDefinition(t *testing.T) {
@@ -73,8 +111,8 @@ func TestNewPromptBuilderFromDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildContext failed: %v", err)
 	}
-	if source.budget != 10 {
-		t.Fatalf("expected source token budget 10 after estimating system instructions, got %d", source.budget)
+	if source.budget != 5 {
+		t.Fatalf("expected source token budget 5 after reserving system and user input, got %d", source.budget)
 	}
 
 	prompt, err := renderBuilderRequest(builder, context.Background(), emptyConversation{})
