@@ -140,7 +140,34 @@ func TestApprovalFailureAbortsWholeBatch(t *testing.T) {
 				panic("unreachable")
 			})}
 			iteration, calls := schedulerCalls("write", "write")
-			err := l.executeToolCalls(ctx, iteration, calls, l.Tools, nil, 1, 1, 0)
+			events := make(chan Event, 16)
+			err := l.executeToolCalls(ctx, iteration, calls, l.Tools, events, 1, 1, 0)
+			close(events)
+			var requested, resolved int
+			for event := range events {
+				switch event.Type {
+				case EventToolApprovalRequested:
+					requested++
+				case EventToolApprovalResolved:
+					resolved++
+					if requested != resolved || event.ToolExecution.ApprovalID != event.ToolApproval.ID {
+						t.Fatal("approval outcome lost ordering or correlation")
+					}
+					if resolved == 2 && (event.Err == nil || event.ToolExecution.Approval.Action != ToolDeny) {
+						t.Fatalf("missing failure outcome: %#v", event)
+					}
+				}
+			}
+			if requested != 2 || resolved != 2 {
+				t.Fatalf("requested=%d resolved=%d", requested, resolved)
+			}
+			wantCode := "approval_failed"
+			if mode == "canceled" {
+				wantCode = "approval_canceled"
+			}
+			if iteration.Parts[1].ToolExecution.Approval.Code != wantCode {
+				t.Fatal("failure absent from retained execution")
+			}
 			if err == nil || invoked.Load() != 0 {
 				t.Fatalf("err=%v invoked=%d", err, invoked.Load())
 			}
@@ -201,5 +228,26 @@ func TestMissingApprovalResolverProducesResolvedRefusal(t *testing.T) {
 	}
 	if !resolved {
 		t.Fatal("approval event left apparently pending")
+	}
+}
+
+func TestApprovalCancellationDoesNotBlockOnFullEventBuffer(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	l := &Loop{ToolApprovalResolver: ToolApprovalResolverFunc(func(context.Context, ToolApprovalRequest) (ToolApprovalDecision, error) {
+		cancel()
+		return ToolApprovalDecision{}, context.Canceled
+	})}
+	tasks := []scheduledTool{{execution: ToolExecution{State: ToolNotStarted, Decision: ToolDecision{Action: ToolRequireApproval}}, pending: pendingToolCall{call: ai.ToolCall{ID: "call", Name: "write", Type: "function", Args: []byte(`{}`)}}}}
+	events := make(chan Event, 1)
+	if err := l.preflightToolApprovals(ctx, tasks, events, 1, 1, 0); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || tasks[0].execution.Approval.Code != "approval_canceled" || tasks[0].execution.ApprovalID == "" {
+		t.Fatal("canceled approval lost its retained outcome")
+	}
+	request := <-events
+	if request.ToolExecution.Approval.Action != "" {
+		t.Fatal("request event aliases later failure decision")
 	}
 }

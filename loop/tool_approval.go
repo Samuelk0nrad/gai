@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 )
 
@@ -14,6 +15,7 @@ type ToolApprovalRequest struct {
 	Decision ToolDecision
 }
 
+// Clone copies the request and its mutable call arguments and extensions.
 func (r ToolApprovalRequest) Clone() ToolApprovalRequest {
 	r.Input.Call = r.Input.Call.Clone()
 	return r
@@ -35,8 +37,10 @@ type ToolApprovalResolver interface {
 	ResolveToolApproval(context.Context, ToolApprovalRequest) (ToolApprovalDecision, error)
 }
 
+// ToolApprovalResolverFunc adapts a function to ToolApprovalResolver.
 type ToolApprovalResolverFunc func(context.Context, ToolApprovalRequest) (ToolApprovalDecision, error)
 
+// ResolveToolApproval calls the adapter after checking for a nil function.
 func (f ToolApprovalResolverFunc) ResolveToolApproval(ctx context.Context, request ToolApprovalRequest) (ToolApprovalDecision, error) {
 	if f == nil {
 		return ToolApprovalDecision{}, fmt.Errorf("%w: nil resolver", ErrToolApproval)
@@ -77,13 +81,42 @@ func (l *Loop) preflightToolApprovals(ctx context.Context, tasks []scheduledTool
 		}
 		request := ToolApprovalRequest{ID: rand.Text(), Input: ToolPolicyInput{Call: task.pending.call.Clone(), Traits: task.options.Traits}, Decision: task.execution.Decision}
 		task.execution.ApprovalID = request.ID
+		eventFor := func(kind EventType, err error) Event {
+			return Event{Type: kind, IterationCount: iteration, AttemptID: attempt, RetryCount: retry, ToolCall: &task.pending.call, ToolApproval: &request, ToolExecution: &task.execution, Err: err}
+		}
 		emit := func(kind EventType) error {
 			if events == nil {
 				return nil
 			}
-			return sendEvent(ctx, events, Event{Type: kind, IterationCount: iteration, AttemptID: attempt, RetryCount: retry, ToolCall: &task.pending.call, ToolApproval: &request, ToolExecution: &task.execution})
+			return sendEvent(ctx, events, eventFor(kind, nil))
+		}
+		failed := func(err error, requested bool) {
+			safeErr := ErrToolApproval
+			task.execution.Approval = ToolDecision{Action: ToolDeny, Code: "approval_failed", Reason: "tool approval failed"}
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				safeErr = context.Canceled
+				if errors.Is(err, context.DeadlineExceeded) {
+					safeErr = context.DeadlineExceeded
+				}
+				if ctx.Err() != nil {
+					safeErr = ctx.Err()
+				}
+				task.execution.Approval.Code = "approval_canceled"
+				task.execution.Approval.Reason = "tool approval canceled"
+			}
+			if !requested || events == nil {
+				return
+			}
+			event := eventFor(EventToolApprovalResolved, safeErr)
+			if ctx.Err() == nil && sendEvent(ctx, events, event) == nil {
+				return
+			}
+			// Cancellation must not wait for a consumer that has stopped reading.
+			// The execution snapshot retains this outcome if the buffer is full.
+			sendTerminalEvent(ctx, events, cloneToolEventPayload(event))
 		}
 		if err := emit(EventToolApprovalRequested); err != nil {
+			failed(err, false)
 			return err
 		}
 		if l.ToolApprovalResolver == nil {
@@ -91,6 +124,7 @@ func (l *Loop) preflightToolApprovals(ctx context.Context, tasks []scheduledTool
 		} else {
 			decision, err := resolveToolApproval(ctx, l.ToolApprovalResolver, request)
 			if err != nil {
+				failed(err, true)
 				return err
 			}
 			task.execution.Approval = ToolDecision{Action: ToolDeny, Code: "approval_denied", Reason: decision.Reason}
