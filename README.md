@@ -350,7 +350,7 @@ See [request budgets and migration](docs/request-budgets.md).
 
 ## History and summarization
 
-`context/history` provides a `ContextSource` backed by a `HistoryStore`. It loads persisted state, selects recent turns that fit the available budget, and counts candidate turns locally on demand. Calculated counts are not persisted.
+`context/history` provides a `ContextSource` backed by a `HistoryStore`. It loads persisted state, selects recent turns that fit the available budget, and counts candidate turns locally on demand. Calculated counts are not persisted. Builds that do not generate a new summary do not save history.
 
 Use `history.NewHistory(sessionID, store)` for budgeted history selection. Use `history.New(sessionID, store, summarizerDefinition)` when older turns should be summarized under token pressure. The built-in `agent/summary` package can supply the summarizer agent.
 

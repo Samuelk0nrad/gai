@@ -65,7 +65,7 @@ func TestPlainSavedAndGeneratedSummariesFitTightBudget(t *testing.T) {
 				if generated && model.Count != 1 {
 					t.Fatalf("summarizer calls = %d, want 1", model.Count)
 				}
-				if len(store.saved) != 1 || store.saved[0].Summary == nil || store.saved[0].Summary.Content.Text != "x" {
+				if generated && (len(store.saved) != 1 || store.saved[0].Summary == nil || store.saved[0].Summary.Content.Text != "x") {
 					t.Fatal("semantic summary was not saved")
 				}
 			})

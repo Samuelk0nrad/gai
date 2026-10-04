@@ -62,9 +62,9 @@ func NewSummary(id, startTurnID, endTurnID string, startTurnCount, endTurnCount 
 	}
 }
 
-func (s *HistorySource) summarizeState(ctx context.Context, state *HistoryState, maxTokens int) (*HistoryState, error) {
+func (s *HistorySource) summarizeState(ctx context.Context, state *HistoryState, maxTokens int) (*HistoryState, bool, error) {
 	if s == nil {
-		return nil, ErrHistorySourceNil
+		return nil, false, ErrHistorySourceNil
 	}
 	ctx, obs := newHistorySummaryObserver(ctx, s.debug, s.sessionID, maxTokens, s.summaryAmount)
 	var err error
@@ -72,20 +72,32 @@ func (s *HistorySource) summarizeState(ctx context.Context, state *HistoryState,
 		obs.Finish(err)
 	}()
 
+	var next *HistoryState
+	var changed bool
+	next, changed, err = summarizeHistory(ctx, state, s.summarizer, s.counter, s.summaryAmount, s.summaryMaxTokens, obs)
+	return next, changed, err
+}
+
+// summarizeHistory creates a detached replacement without accessing a store.
+func summarizeHistory(ctx context.Context, state *HistoryState, summarizer *summary.Summarizer, counter ai.TokenCounter, amount float32, summaryMaxTokens int, obs *historyObserver) (*HistoryState, bool, error) {
+	var err error
 	if state == nil {
 		err = ErrHistoryStateRequired
-		return nil, err
+		return nil, false, err
 	}
-	if s.summarizer == nil {
+	if summarizer == nil {
 		err = ErrSummarizerMissing
-		return nil, err
+		return nil, false, err
 	}
 	obs.ObserveState(len(state.Turns), state.Summary != nil)
-	obs.SetTokenCounterID(s.counter.ID())
+	obs.SetTokenCounterID(counter.ID())
 	if len(state.Turns) == 0 {
 		obs.SummarySkippedNoTurns(ctx)
-		return state, nil
+		return nil, false, nil
 	}
+
+	state = state.Clone()
+	state.Turns = sortTurnsByCount(state.Turns)
 
 	var builder strings.Builder
 
@@ -93,33 +105,33 @@ func (s *HistorySource) summarizeState(ctx context.Context, state *HistoryState,
 		text, renderErr := ai.RenderMessages(ctx, []ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{state.Summary.Content}}})
 		if renderErr != nil {
 			err = renderErr
-			return nil, err
+			return nil, false, err
 		}
 		builder.WriteString(text)
 		builder.WriteString("\n")
 	}
 
-	summarizedTurnCount := s.summarizedTurnCount(len(state.Turns))
+	summarizedTurnCount := summaryTurnCount(len(state.Turns), amount)
 	if summarizedTurnCount == 0 {
 		obs.SummarySkippedAmountZero(ctx)
-		return state, nil
+		return nil, false, nil
 	}
 	summarizedTurns := state.Turns[:summarizedTurnCount]
 	for i := range summarizedTurns {
 		if err = writeTurn(ctx, &builder, &summarizedTurns[i]); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
 	req := summary.Request{
 		ID:        "history",
 		Text:      builder.String(),
-		MaxTokens: s.summaryMaxTokens,
+		MaxTokens: summaryMaxTokens,
 	}
 
-	res, err := s.summarizer.Summarize(ctx, req)
+	res, err := summarizer.Summarize(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	firstTurn := summarizedTurns[0]
@@ -135,25 +147,26 @@ func (s *HistorySource) summarizeState(ctx context.Context, state *HistoryState,
 		nextSummary.StartTurnID = state.Summary.StartTurnID
 		nextSummary.StartTurnCount = state.Summary.StartTurnCount
 	}
-	tokenCount, err := s.counter.CountTokens(ctx, nextSummary.Content.Text)
+	tokenCount, err := counter.CountTokens(ctx, nextSummary.Content.Text)
 	if err != nil {
 		obs.SummaryTokenCountFailed(ctx, nextSummary, err)
-		return nil, err
+		return nil, false, err
 	}
 	obs.SummaryGenerated(ctx, nextSummary, tokenCount, summarizedTurnCount, len(state.Turns)-summarizedTurnCount, state.Summary != nil)
 
 	nextState := &HistoryState{
-		Summary: nextSummary,
-		Turns:   append([]gaictx.Turn(nil), state.Turns[summarizedTurnCount:]...),
+		SchemaVersion: HistorySchemaVersion,
+		Summary:       nextSummary,
+		Turns:         append([]gaictx.Turn(nil), state.Turns[summarizedTurnCount:]...),
 	}
-	return nextState, nil
+	return nextState, true, nil
 }
 
-func (s *HistorySource) summarizedTurnCount(turnCount int) int {
-	if turnCount == 0 || s.summaryAmount <= 0 {
+func summaryTurnCount(turnCount int, amount float32) int {
+	if turnCount == 0 || amount <= 0 {
 		return 0
 	}
-	count := int(float32(turnCount) * s.summaryAmount)
+	count := int(float32(turnCount) * amount)
 	if count == 0 {
 		return 1
 	}

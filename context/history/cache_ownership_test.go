@@ -74,14 +74,10 @@ func TestConcurrentHistoryBuildsLeaveLoadedStateUntouched(t *testing.T) {
 	if err != nil || string(after) != string(before) || state.SchemaVersion != 0 {
 		t.Fatal("build changed the store's loaded value")
 	}
-	if len(store.saved) != 16 {
-		t.Fatalf("saves = %d, want 16", len(store.saved))
+	if len(store.saved) != 0 {
+		t.Fatalf("unchanged builds saved %d states", len(store.saved))
 	}
-	for _, saved := range store.saved {
-		if saved == state || saved.SchemaVersion != history.HistorySchemaVersion || saved.Turns[0].ID != "old" || saved.Turns[1].ID != "new" {
-			t.Fatal("wrong saved snapshot")
-		}
-	}
+
 }
 
 func TestLegacyCalculatedCountsAreIgnoredAndNotPersisted(t *testing.T) {
@@ -105,7 +101,7 @@ func TestLegacyCalculatedCountsAreIgnoredAndNotPersisted(t *testing.T) {
 	if len(part.Messages) != 2 || part.Messages[1].Text() != "hello" || counter.CountCalls != 2 {
 		t.Fatalf("old counts affected selection: %#v; calls %d", part, counter.CountCalls)
 	}
-	encoded, err := json.Marshal(store.saved[0])
+	encoded, err := json.Marshal(&state)
 	if err != nil {
 		t.Fatal(err)
 	}

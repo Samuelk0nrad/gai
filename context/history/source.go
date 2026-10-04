@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/agent/summary"
@@ -177,167 +176,43 @@ func (s *HistorySource) build(ctx context.Context, tokenBudget int) (result gaic
 		obs.StateLoadFailed(ctx, err)
 		return nil, 0, err
 	}
-	var part Part
-	summaryIncluded := false
-	budgetReached := false
-	tokenCount := 0
-	turnCount := 0
-	messageCount := 0
-	includedTurnCount := 0
-	if lastHistoryState == nil {
+	state := lastHistoryState
+	if state == nil {
 		obs.StateMissing(ctx)
 	} else {
-		// The loaded state belongs to the store. Sorting and setting the storage
-		// version apply only to this build's copy; counting reads shared content.
-		stateCopy := *lastHistoryState
-		stateCopy.Turns = sortTurnsByCount(append([]gaictx.Turn(nil), lastHistoryState.Turns...))
-		lastHistoryState = &stateCopy
 		obs.MarkStatePresent()
-		state := lastHistoryState
-		summarized := false
-		for {
-			part = Part{}
-			summaryIncluded = false
-			budgetReached = false
-			tokenCount = 0
-			turnCount = 0
-			messageCount = 0
-			includedTurnCount = 0
-
-			buildBudgetReached, err := s.buildPart(ctx, state, tokenBudget, s.counter, &part, obs, &tokenCount, &turnCount, &messageCount, &includedTurnCount, &summaryIncluded)
+	}
+	selected, err := selectHistory(ctx, state, tokenBudget, s.counter)
+	obs.Selection(ctx, state, selected, err)
+	if err != nil {
+		return nil, 0, err
+	}
+	if selected.budgetReached && s.summarize {
+		obs.SummaryAttempted(ctx, len(state.Turns))
+		next, changed, summaryErr := s.summarizeState(ctx, state, tokenBudget)
+		if summaryErr != nil {
+			obs.SummaryFailed(ctx, summaryErr)
+			return nil, 0, summaryErr
+		}
+		if changed {
+			obs.MarkSummaryGenerated()
+			selected, err = selectHistory(ctx, next, tokenBudget, s.counter)
+			obs.Selection(ctx, next, selected, err)
 			if err != nil {
 				return nil, 0, err
 			}
-			budgetReached = buildBudgetReached
-
-			if budgetReached && s.summarize && !summarized {
-				obs.SummaryAttempted(ctx, len(lastHistoryState.Turns))
-				state, err = s.summarizeState(ctx, lastHistoryState, tokenBudget)
-				if err != nil {
-					obs.SummaryFailed(ctx, err)
-					return nil, 0, err
-				}
-				if state != lastHistoryState && state.Summary != nil {
-					obs.MarkSummaryGenerated()
-				}
-				summarized = true
-				continue
+			if err = ctx.Err(); err != nil {
+				return nil, 0, err
 			}
-			if budgetReached && !s.summarize {
-				obs.SummarySkippedDisabled(ctx)
+			if err = s.historyStateStore.SaveHistoryState(ctx, s.sessionID, next); err != nil {
+				obs.StateSaveFailed(ctx, err)
+				return nil, 0, err
 			}
-
-			if state.Summary != nil || len(state.Turns) > 0 {
-				state.SchemaVersion = HistorySchemaVersion
-				if err := s.historyStateStore.SaveHistoryState(ctx, s.sessionID, state); err != nil {
-					obs.StateSaveFailed(ctx, err)
-					return nil, 0, err
-				}
-				obs.MarkStateSaved()
-			}
-			break
+			obs.MarkStateSaved()
 		}
+	} else if selected.budgetReached {
+		obs.SummarySkippedDisabled(ctx)
 	}
-	obs.BuildFinished(ctx, &part, tokenCount, turnCount, includedTurnCount, messageCount)
-	result = &part
-	return result, tokenCount, nil
-}
-
-func (s *HistorySource) buildPart(
-	ctx context.Context,
-	state *HistoryState,
-	tokenBudget int,
-	counter ai.TokenCounter,
-	part *Part,
-	obs *historyObserver,
-	tokenCount,
-	turnCount,
-	messageCount,
-	includedTurnCount *int,
-	summaryIncluded *bool,
-) (bool, error) {
-	if state.Summary != nil {
-		if state.Summary.Content.Kind != ai.ContentText {
-			return false, fmt.Errorf("summary requires a text content part")
-		}
-		if err := state.Summary.Content.Validate(); err != nil {
-			return false, err
-		}
-		// Count the same prefixed summary message returned in the prompt.
-		summaryParts := ai.TextParts("Conversation summary:\n" + state.Summary.Content.Text)
-		if len(state.Summary.Content.Extensions) > 0 {
-			// Opaque state belongs to the original part, whose text must stay
-			// unchanged. Only plain summaries can coalesce the prefix.
-			summaryParts = ai.TextParts("Conversation summary:\n")
-			summaryParts = append(summaryParts, ai.CloneParts([]ai.ContentPart{state.Summary.Content})...)
-		}
-		summaryPart := Part{Messages: []ai.Message{{Role: ai.RoleUser, Parts: summaryParts}}}
-		summaryTokenCount, err := summaryPart.Tokens(ctx, counter)
-		if err != nil {
-			obs.SummaryTokenCountFailed(ctx, state.Summary, err)
-			return false, err
-		}
-		if *tokenCount+summaryTokenCount > tokenBudget {
-			obs.BudgetReached(ctx, *tokenCount, nil)
-			return true, nil
-		}
-		*summaryIncluded = true
-		part.Messages = append(part.Messages, summaryPart.Messages...)
-		*tokenCount += summaryTokenCount
-		obs.SummaryIncluded(ctx, state.Summary, summaryTokenCount)
-	} else {
-		obs.SummaryMissing(ctx)
-	}
-
-	firstIncluded := len(state.Turns)
-	budgetReached := false
-	for i := len(state.Turns) - 1; i >= 0; i-- {
-		turn := &state.Turns[i]
-		*turnCount++
-		// Selection and final accounting use the same preview projection. The
-		// candidate owns no token cache and only reads the stored messages.
-		candidate := Part{}
-		if turn.UserMessage != nil {
-			candidate.Messages = append(candidate.Messages, turn.UserMessage.Message)
-		}
-		for _, message := range turn.Messages {
-			candidate.Messages = append(candidate.Messages, message.Message)
-		}
-		tokens, err := candidate.Tokens(ctx, counter)
-		if err != nil {
-			turnCopy := *turn
-			obs.TurnTokenizeFailed(ctx, &turnCopy, err)
-			return false, err
-		}
-		if *tokenCount+tokens > tokenBudget {
-			turnCopy := *turn
-			obs.BudgetReached(ctx, *tokenCount, &turnCopy)
-			budgetReached = true
-			break
-		}
-		*tokenCount += tokens
-		firstIncluded = i
-		*includedTurnCount++
-	}
-
-	for _, turn := range state.Turns[firstIncluded:] {
-		if turn.UserMessage != nil {
-			part.Messages = append(part.Messages, turn.UserMessage.Message.Clone())
-			*messageCount++
-		}
-		for _, message := range turn.Messages {
-			part.Messages = append(part.Messages, message.Message.Clone())
-			*messageCount++
-		}
-	}
-
-	return budgetReached, nil
-}
-
-// sortTurnsByCount() Sort turns by Count in ascending order (oldest first)
-func sortTurnsByCount(turns []gaictx.Turn) []gaictx.Turn {
-	sort.SliceStable(turns, func(i, j int) bool {
-		return turns[i].Count < turns[j].Count
-	})
-	return turns
+	obs.BuildFinished(ctx, &selected.part, selected.tokens, selected.turnsVisited, selected.turnsIncluded, selected.messages)
+	return &selected.part, selected.tokens, nil
 }
