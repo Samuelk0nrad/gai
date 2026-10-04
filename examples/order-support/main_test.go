@@ -8,6 +8,8 @@ import (
 	"github.com/lace-ai/gai/ai"
 )
 
+// TestLookupOrderToolReturnsKnownOrder verifies that case-insensitive order lookup returns the
+// canonical identifier and expected order status.
 func TestLookupOrderToolReturnsKnownOrder(t *testing.T) {
 	t.Parallel()
 
@@ -36,6 +38,8 @@ func TestLookupOrderToolReturnsKnownOrder(t *testing.T) {
 	}
 }
 
+// TestLookupOrderToolReturnsStructuredMiss keeps an unknown order as a structured successful
+// lookup result with Found set to false.
 func TestLookupOrderToolReturnsStructuredMiss(t *testing.T) {
 	t.Parallel()
 
