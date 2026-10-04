@@ -12,12 +12,14 @@ import (
 // ToolExecutionConfig controls admission within one loop run. Zero preserves
 // unlimited concurrency and inherits the caller's deadline without adding one.
 type ToolExecutionConfig struct {
+	// MaxConcurrent bounds active handler/processor pipelines; zero is unlimited.
 	MaxConcurrent int
-	// DefaultTimeout bounds handler execution, excluding approval, queueing,
-	// and result processing. Cancellation is cooperative; started handlers are joined.
+	// DefaultTimeout requests handler cancellation, excluding approval, queueing,
+	// and result processing. Returned handler results are preserved; started work is joined.
 	DefaultTimeout time.Duration
 }
 
+// Validate rejects negative concurrency and deadline settings.
 func (c ToolExecutionConfig) Validate() error {
 	if c.MaxConcurrent < 0 || c.DefaultTimeout < 0 {
 		return fmt.Errorf("%w: concurrency and timeout must be non-negative", ErrToolExecutionConfig)
@@ -39,6 +41,7 @@ type ToolOptions struct {
 	Guard *ToolGuard
 }
 
+// Validate rejects negative timeouts and unknown effect declarations.
 func (o ToolOptions) Validate() error {
 	if o.Timeout != nil && *o.Timeout < 0 {
 		return fmt.Errorf("%w: tool timeout must be non-negative", ErrToolExecutionConfig)
@@ -51,6 +54,7 @@ func (o ToolOptions) Validate() error {
 	return nil
 }
 
+// clone snapshots pointer-valued registration settings while sharing the guard.
 func (o ToolOptions) clone() ToolOptions {
 	if o.Timeout != nil {
 		value := *o.Timeout
@@ -68,6 +72,7 @@ type configuredTool struct {
 	options ToolOptions
 }
 
+// ToolOptions returns a copy of the registration settings.
 func (t *configuredTool) ToolOptions() ToolOptions { return t.options.clone() }
 
 // WithToolOptions wraps a tool with validated copied options. Nested wrappers
@@ -85,6 +90,7 @@ func WithToolOptions(tool Tool, options ToolOptions) (Tool, error) {
 	return &configuredTool{Tool: tool, options: options.clone()}, nil
 }
 
+// optionsForTool validates a captured registration or supplies default settings.
 func optionsForTool(tool Tool) (ToolOptions, error) {
 	if provider, ok := tool.(ToolOptionsProvider); ok {
 		options := provider.ToolOptions().clone()
@@ -101,6 +107,7 @@ type ToolGuard struct {
 	changed chan struct{}
 }
 
+// tryAcquire returns ownership or a generation channel to await without reserving a worker.
 func (g *ToolGuard) tryAcquire() (release func(), changed <-chan struct{}) {
 	if g == nil {
 		return func() {}, nil

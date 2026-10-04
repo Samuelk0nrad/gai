@@ -350,6 +350,7 @@ func processObservedTool(ctx context.Context, input ToolPolicyInput, tools []Too
 	return processObservedToolDeadline(ctx, input, tools, processor, 0, sinks...)
 }
 
+// processObservedToolDeadline applies a cooperative handler deadline before output processing.
 func processObservedToolDeadline(ctx context.Context, input ToolPolicyInput, tools []Tool, processor ToolResultProcessor, timeout time.Duration, sinks ...gai.ObservationSink) (response *ToolResult, duration time.Duration, processErr error) {
 	toolCtx, observation := startToolSpan(ctx, input.Call, sinks...)
 	started := time.Now()
@@ -371,9 +372,6 @@ func processObservedToolDeadline(ctx context.Context, input ToolPolicyInput, too
 	}
 	defer cancel()
 	result := CallTool(invokeCtx, input.Call, tools)
-	if timeout > 0 && errors.Is(invokeCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-		result = ToolResult{Err: context.DeadlineExceeded}
-	}
 	cancel()
 	duration = time.Since(started)
 	if processor != nil {
