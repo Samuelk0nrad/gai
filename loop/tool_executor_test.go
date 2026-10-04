@@ -157,7 +157,7 @@ func TestToolDeadlineFiltersWithParentAndPreservesSiblingSuccess(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		slow := schedulerTool(t, "slow", ToolOptions{}, func(ctx context.Context, _ ai.ToolCall) (string, error) {
 			<-ctx.Done()
-			return "late apparent success", nil
+			return "", ctx.Err()
 		})
 		fast := schedulerTool(t, "fast", ToolOptions{}, func(context.Context, ai.ToolCall) (string, error) { return "ok", nil })
 		l := &Loop{Tools: []Tool{slow, fast}, ToolExecution: ToolExecutionConfig{MaxConcurrent: 2, DefaultTimeout: time.Second}, ToolResultProcessor: ToolResultProcessorFunc(func(ctx context.Context, _ ToolPolicyInput, r ToolResult) (ToolResult, error) {
@@ -328,6 +328,62 @@ func TestSerialMalformedCallProcessingWaitsForEarlierCall(t *testing.T) {
 		}
 		if first := <-processed; first != "0" {
 			t.Fatalf("processor order starts with %s", first)
+		}
+	})
+}
+
+func TestSchedulerDeduplicatesLargeSharedGuardBatch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		guard := &ToolGuard{}
+		release, _ := guard.tryAcquire()
+		defer release()
+		tool := schedulerTool(t, "test", ToolOptions{Guard: guard}, func(context.Context, ai.ToolCall) (string, error) {
+			t.Error("held guard admitted handler")
+			return "", nil
+		})
+		names := make([]string, 65535)
+		for i := range names {
+			names[i] = "test"
+		}
+		iteration, calls := schedulerCalls(names...)
+		l := &Loop{Tools: []Tool{tool}, ToolExecution: ToolExecutionConfig{MaxConcurrent: 1}}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- l.executeToolCalls(ctx, iteration, calls, l.Tools, nil, 1, 1, 0) }()
+		synctest.Wait()
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v", err)
+		}
+	})
+}
+
+func TestGuardCountRejectsTooManyDistinctWaiters(t *testing.T) {
+	guards := make([]ToolGuard, maxToolGuardWaits+1)
+	tasks := make([]scheduledTool, len(guards))
+	for i := range tasks {
+		tasks[i].options.Guard = &guards[i]
+	}
+	if err := validateToolGuardCount(tasks); !errors.Is(err, ErrToolExecutionConfig) {
+		t.Fatalf("err=%v", err)
+	}
+	if err := validateToolGuardCount(tasks[:maxToolGuardWaits]); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestHandlerResultSurvivesItsExpiredDeadline avoids replacing successful side effects with a false error.
+func TestHandlerResultSurvivesItsExpiredDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tool := schedulerTool(t, "test", ToolOptions{}, func(ctx context.Context, _ ai.ToolCall) (string, error) { <-ctx.Done(); return "completed", nil })
+		l := &Loop{Tools: []Tool{tool}, ToolExecution: ToolExecutionConfig{DefaultTimeout: time.Second}}
+		iteration, calls := schedulerCalls("test")
+		if err := l.executeToolCalls(t.Context(), iteration, calls, l.Tools, nil, 1, 1, 0); err != nil {
+			t.Fatal(err)
+		}
+		if result := iteration.Parts[0].ToolResp; result.Err != nil || result.Text != "completed" {
+			t.Fatalf("result=%#v", result)
 		}
 	})
 }
