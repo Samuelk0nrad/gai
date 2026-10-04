@@ -45,7 +45,9 @@ type ExecutionOverrides struct {
 	Limits LimitsOverrides
 	// Tools inherits when nil; a non-nil slice replaces membership and order.
 	// A non-nil empty slice disables all tools.
-	Tools          []loop.Tool
+	Tools []loop.Tool
+	// ToolPolicy set to nil clears authorization; omitted values inherit.
+	ToolPolicy     Optional[loop.ToolPolicy]
 	ToolChoice     *ai.ToolChoice
 	ResponseFormat *ai.ResponseFormat
 	Reasoning      *ai.ReasoningConfig
@@ -66,6 +68,7 @@ type resolvedExecution struct {
 	model                     ai.Model
 	limits                    Limits
 	tools                     []loop.Tool
+	toolPolicy                loop.ToolPolicy
 	toolChoice                ai.ToolChoice
 	responseFormat            ai.ResponseFormat
 	reasoning                 ai.ReasoningConfig
@@ -82,7 +85,7 @@ type resolvedExecution struct {
 // validates after overlaying, so a valid override can replace an invalid default.
 func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedExecution, error) {
 	r := resolvedExecution{
-		model: def.Model, limits: def.Limits, tools: def.Tools,
+		model: def.Model, limits: def.Limits, tools: def.Tools, toolPolicy: def.ToolPolicy,
 		toolChoice: def.ToolChoice, responseFormat: def.ResponseFormat,
 		reasoning: def.Reasoning, counter: def.TokenCounter,
 		requestBudget: def.RequestBudget,
@@ -104,6 +107,9 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 		if overrides.Tools != nil {
 			r.tools = overrides.Tools
 			r.reconfigureTools = true
+		}
+		if overrides.ToolPolicy.Set {
+			r.toolPolicy = overrides.ToolPolicy.Value
 		}
 		if overrides.ToolChoice != nil {
 			r.toolChoice = *overrides.ToolChoice
@@ -131,6 +137,9 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 	}
 	if nilDependency(r.model) {
 		return resolvedExecution{}, loop.ErrModelNotConfigured
+	}
+	if r.toolPolicy != nil && nilDependency(r.toolPolicy) {
+		return resolvedExecution{}, fmt.Errorf("%w: %w: typed nil policy", ErrInvalidExecutionConfig, loop.ErrToolPolicy)
 	}
 	if r.limits.MaxTokens < 0 {
 		return resolvedExecution{}, fmt.Errorf("%w: MaxTokens must be non-negative", ErrInvalidExecutionConfig)

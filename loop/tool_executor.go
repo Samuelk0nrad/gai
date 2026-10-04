@@ -34,7 +34,7 @@ const maxToolGuardWaits = 65534
 func validateToolGuardCount(tasks []scheduledTool) error {
 	guards := make(map[*ToolGuard]struct{})
 	for _, task := range tasks {
-		if task.options.Guard != nil {
+		if task.result == nil && task.options.Guard != nil {
 			guards[task.options.Guard] = struct{}{}
 		}
 	}
@@ -91,15 +91,15 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 	if err != nil {
 		return err
 	}
-	if err := validateToolGuardCount(tasks); err != nil {
-		return err
-	}
 	preflightErr := l.preflightToolPolicies(ctx, tasks, events, iterationCount, attemptID, retryCount)
 	for _, task := range tasks {
 		iteration.Parts[task.pending.partIndex].ToolExecution = cloneToolExecution(&task.execution)
 	}
 	if preflightErr != nil {
 		return preflightErr
+	}
+	if err := validateToolGuardCount(tasks); err != nil {
+		return err
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -170,11 +170,17 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 					position++
 					continue
 				}
-				release, changed := task.options.Guard.tryAcquire()
+				// Synthetic refusals do not use the handler's shared resource.
+				// Keep local Serial/capacity rules for their result processors.
+				guard := task.options.Guard
+				if task.result != nil {
+					guard = nil
+				}
+				release, changed := guard.tryAcquire()
 				if release == nil {
-					if !waitingGuards[task.options.Guard] {
+					if !waitingGuards[guard] {
 						guards = append(guards, changed)
-						waitingGuards[task.options.Guard] = true
+						waitingGuards[guard] = true
 					}
 					if task.options.Serial {
 						blockedNames[name] = true

@@ -34,6 +34,9 @@ const (
 	toolOutcomeDeadline     = "deadline"
 	toolOutcomeCancellation = "cancellation"
 	toolOutcomeProcessing   = "processing_error"
+	toolOutcomeDenied       = "denied"
+	toolOutcomeApproval     = "approval_required"
+	toolOutcomeInvalidCall  = "invalid_call"
 )
 
 var (
@@ -477,6 +480,12 @@ func toolResult(response *ToolResult) (outcome string, output string, spanErr er
 	}
 	output = responseErr.Error()
 	switch {
+	case errors.Is(responseErr, ErrToolDenied):
+		return toolOutcomeDenied, output, ErrToolDenied
+	case errors.Is(responseErr, ErrToolApprovalRequired):
+		return toolOutcomeApproval, output, ErrToolApprovalRequired
+	case errors.Is(responseErr, ErrToolCallMalformed), errors.Is(responseErr, ErrToolReqValidation), errors.Is(responseErr, ErrToolNotFound), errors.Is(responseErr, ai.ErrInvalidToolCall):
+		return toolOutcomeInvalidCall, output, errObservedToolExecution
 	case errors.Is(responseErr, context.DeadlineExceeded):
 		return toolOutcomeDeadline, output, errObservedToolDeadline
 	case errors.Is(responseErr, context.Canceled):

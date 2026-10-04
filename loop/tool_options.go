@@ -37,6 +37,7 @@ type ToolOptions struct {
 	// Parent context deadlines always apply. The pointed value is copied.
 	Timeout *time.Duration
 	// Guard is an explicit shared gate across registrations and concurrent runs.
+	// Synthetic preflight results bypass it; invoked handlers retain it through processing.
 	// A nil guard imposes no cross-run limit. Do not copy a ToolGuard after use.
 	Guard *ToolGuard
 }
