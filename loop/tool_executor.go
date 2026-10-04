@@ -116,16 +116,20 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 		task := tasks[done.index]
 		iteration.Parts[task.pending.partIndex].ToolResp = done.result
 		if task.result != nil {
-			outcome, _, safeErr := toolResult(task.result)
+			outcome, _, safeErr := toolResult(done.result)
 			if done.err != nil {
 				outcome, safeErr = toolOutcomeProcessing, errObservedToolProcessing
 				if done.err == ErrToolPanic {
 					outcome, safeErr = toolOutcomePanic, errObservedToolPanic
 				}
 			}
+			fields := map[string]any{"tool_name": task.pending.call.Name, "tool_call_id": task.pending.call.ID, "tool_type": task.pending.call.Type, "outcome": outcome, "tool_outcome": outcome, "status": "success", "duration_ms": int64(0), "invoked": false}
+			if safeErr != nil {
+				fields["status"] = "error"
+				fields["error_code"] = "gai.tool." + outcome
+			}
 			gai.EmitObservation(ctx, l.ObservationSink, gai.Observation{
-				Name: "loop_tool_finished", Source: "loop:Tool", Err: safeErr,
-				Fields: map[string]any{"tool_name": task.pending.call.Name, "tool_call_id": task.pending.call.ID, "tool_type": task.pending.call.Type, "outcome": outcome, "tool_outcome": outcome, "status": "error", "error_code": "gai.tool." + outcome, "duration_ms": int64(0), "invoked": false},
+				Name: "loop_tool_finished", Source: "loop:Tool", Err: safeErr, Fields: fields,
 			})
 		}
 		if events != nil && firstErr == nil {

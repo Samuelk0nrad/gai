@@ -271,3 +271,78 @@ func TestRunUnknownToolPublishesErrorAndFinishedObservation(t *testing.T) {
 		t.Fatal("unknown-tool result did not continue to final answer")
 	}
 }
+
+func TestRunSyntheticResultObservationUsesProcessedResult(t *testing.T) {
+	var finished []gai.Observation
+	l := loop.New(eventModel("missing"), nil, testPromptBuilder(), nil)
+	l.ToolResultProcessor = loop.ToolResultProcessorFunc(func(context.Context, loop.ToolPolicyInput, loop.ToolResult) (loop.ToolResult, error) {
+		return loop.ToolResult{Text: "recovered"}, nil
+	})
+	l.ObservationSink = gai.ObservationSinkFunc(func(_ context.Context, o gai.Observation) {
+		if o.Name == "loop_tool_finished" {
+			finished = append(finished, o)
+		}
+	})
+	events := collectLoopEvents(t, l, t.Context())
+	var recovered bool
+	for _, e := range events {
+		if e.Type == loop.EventToolResult && e.ToolResult.Text == "recovered" {
+			recovered = true
+		}
+		if e.Type == loop.EventToolError {
+			t.Fatalf("unexpected error: %v", e.Err)
+		}
+	}
+	if !recovered || len(finished) != 1 {
+		t.Fatalf("recovered=%v observations=%v", recovered, finished)
+	}
+	observation := finished[0]
+	if observation.Err != nil || observation.Fields["tool_outcome"] != "success" || observation.Fields["status"] != "success" || observation.Fields["invoked"] != false {
+		t.Fatalf("observation contradicts processed result: %#v", observation)
+	}
+	if _, exists := observation.Fields["error_code"]; exists {
+		t.Fatal("successful result has an error code")
+	}
+	if got := l.Iterations[0].Conversation; len(got) == 0 || got[len(got)-1].Parts[0].ToolResult.Text() != "recovered" {
+		t.Fatalf("processed result absent from transcript: %#v", got)
+	}
+}
+
+func TestRunCancellationUnblocksFullToolEventBuffer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var invoked atomic.Int32
+		tool := eventTool(t, "test", false, func(context.Context, ai.ToolCall) (string, error) {
+			invoked.Add(1)
+			return "ok", nil
+		})
+		names := make([]string, 100)
+		for i := range names {
+			names[i] = "test"
+		}
+		model := eventModel(names...)
+		l := loop.New(model, []loop.Tool{tool}, testPromptBuilder(), nil)
+		l.ToolExecution.MaxConcurrent = 1
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		stream := l.Run(ctx)
+		for e := range stream {
+			if e.Type == loop.EventToolStart {
+				break
+			}
+		}
+		// The first result plus subsequent start/result pairs fill the buffer.
+		// With no handlers blocking, Wait leaves the scheduler blocked on delivery.
+		synctest.Wait()
+		before := invoked.Load()
+		if len(stream) != cap(stream) || before == 0 || before == int32(len(names)) {
+			t.Fatalf("did not reach blocked delivery: buffer=%d/%d invoked=%d", len(stream), cap(stream), before)
+		}
+		cancel()
+		synctest.Wait()
+		for range stream {
+		}
+		if invoked.Load() != before || len(model.Requests()) != 1 {
+			t.Fatal("canceled delivery admitted another call or model request")
+		}
+	})
+}
