@@ -72,6 +72,8 @@ func (m *scriptedWorkflowModel) Requests() []ai.AIRequest {
 	return append([]ai.AIRequest(nil), m.requests...)
 }
 
+// TestAgentWorkflowEndToEndWithToolCall checks that tool events, retained results, reconstructed
+// messages, and response-format snapshots agree across a complete workflow.
 func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 	model := &scriptedWorkflowModel{
 		scripts: [][]ai.Token{
