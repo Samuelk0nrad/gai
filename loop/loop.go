@@ -61,6 +61,8 @@ type Loop struct {
 	Tools []Tool
 	// ToolExecution controls run-local tool admission and handler deadlines.
 	ToolExecution ToolExecutionConfig
+	// ToolPolicy authorizes calls before scheduling. Nil allows registered tools.
+	ToolPolicy ToolPolicy
 	// ToolChoice controls whether and how the model may call Tools.
 	ToolChoice ai.ToolChoice
 	// ToolTransport controls whether Tools are serialized into AIRequest.Tools.
@@ -109,6 +111,9 @@ func (l *Loop) Validate() error {
 	}
 	if l.MaxTokens < 0 {
 		return fmt.Errorf("%w: negative output limit", ai.ErrInvalidRequestBudget)
+	}
+	if l.ToolPolicy != nil && nilImplementation(l.ToolPolicy) {
+		return fmt.Errorf("%w: typed nil policy", ErrToolPolicy)
 	}
 	if err := l.ToolExecution.Validate(); err != nil {
 		return err

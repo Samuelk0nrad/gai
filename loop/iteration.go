@@ -38,6 +38,7 @@ type Iteration struct {
 
 // IterationPart contains one response, tool call, or tool result segment.
 type IterationPart struct {
+	ToolExecution *ToolExecution
 	// Type identifies which fields are meaningful.
 	Type IterationType
 	// Response contains generated text for IterationTypeResponse.
@@ -78,6 +79,7 @@ func (i Iteration) Clone() Iteration {
 	i.Parts = append([]IterationPart(nil), i.Parts...)
 	for n := range i.Parts {
 		p := &i.Parts[n]
+		p.ToolExecution = cloneToolExecution(p.ToolExecution)
 		if p.Response != nil {
 			r := *p.Response
 			r.Message = r.Message.Clone()

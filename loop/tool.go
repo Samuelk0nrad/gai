@@ -87,25 +87,30 @@ func (t *functionTool) Function(ctx context.Context, call ai.ToolCall) (string, 
 // This low-level helper bypasses Loop execution policy and result processing.
 // Invalid calls and missing tools return ordinary tool errors.
 func CallTool(ctx context.Context, req ai.ToolCall, tools []Tool) ToolResult {
+	result, _ := invokeTool(ctx, req, tools)
+	return result
+}
+
+func invokeTool(ctx context.Context, req ai.ToolCall, tools []Tool) (ToolResult, bool) {
 	if err := req.Validate(); err != nil {
-		return ToolResult{Err: err}
+		return ToolResult{Err: err}, false
 	}
 	if !json.Valid(req.Args) {
-		return ToolResult{Err: ErrToolCallMalformed}
+		return ToolResult{Err: ErrToolCallMalformed}, false
 	}
 	if err := ctx.Err(); err != nil {
-		return ToolResult{Err: err}
+		return ToolResult{Err: err}, false
 	}
 	for index, tool := range tools {
 		if nilImplementation(tool) {
-			return ToolResult{Err: fmt.Errorf("%w: tool at index %d is nil", ai.ErrInvalidToolDefinition, index)}
+			return ToolResult{Err: fmt.Errorf("%w: tool at index %d is nil", ai.ErrInvalidToolDefinition, index)}, false
 		}
 		if tool.Name() == req.Name {
 			text, err := tool.Function(ctx, req.Clone())
-			return normalizeToolResult(text, err)
+			return normalizeToolResult(text, err), true
 		}
 	}
-	return ToolResult{Err: fmt.Errorf("%w: %s", ErrToolNotFound, req.Name)}
+	return ToolResult{Err: fmt.Errorf("%w: %s", ErrToolNotFound, req.Name)}, false
 }
 
 func nilImplementation(tool any) bool {

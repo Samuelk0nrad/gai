@@ -7,21 +7,24 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
 )
 
 type scheduledTool struct {
-	pending pendingToolCall
-	tool    Tool
-	options ToolOptions
-	result  *ToolResult
+	execution ToolExecution
+	pending   pendingToolCall
+	tool      Tool
+	options   ToolOptions
+	result    *ToolResult
 }
 
 type toolCompletion struct {
-	index    int
-	result   *ToolResult
-	duration time.Duration
-	err      error
+	execution ToolExecution
+	index     int
+	result    *ToolResult
+	duration  time.Duration
+	err       error
 }
 
 func prepareToolCalls(calls []pendingToolCall, tools []Tool) ([]scheduledTool, error) {
@@ -44,7 +47,7 @@ func prepareToolCalls(calls []pendingToolCall, tools []Tool) ([]scheduledTool, e
 	tasks := make([]scheduledTool, len(calls))
 	for i, pending := range calls {
 		pending.call = pending.call.Clone()
-		task := scheduledTool{pending: pending, tool: registry[pending.call.Name], options: options[pending.call.Name]}
+		task := scheduledTool{execution: ToolExecution{State: ToolNotStarted}, pending: pending, tool: registry[pending.call.Name], options: options[pending.call.Name]}
 		err := pending.call.Validate()
 		if err == nil && !json.Valid(pending.call.Args) {
 			err = ErrToolCallMalformed
@@ -70,6 +73,13 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 	if err != nil {
 		return err
 	}
+	preflightErr := l.preflightToolPolicies(ctx, tasks, events, iterationCount, attemptID, retryCount)
+	for _, task := range tasks {
+		iteration.Parts[task.pending.partIndex].ToolExecution = cloneToolExecution(&task.execution)
+	}
+	if preflightErr != nil {
+		return preflightErr
+	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	limit := l.ToolExecution.MaxConcurrent
@@ -93,6 +103,10 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 	publish := func(done toolCompletion) {
 		task := tasks[done.index]
 		iteration.Parts[task.pending.partIndex].ToolResp = done.result
+		iteration.Parts[task.pending.partIndex].ToolExecution = cloneToolExecution(&done.execution)
+		if task.result != nil {
+			gai.EmitObservation(ctx, l.ObservationSink, gai.Observation{Name: "loop_tool_finished", Source: "loop:Tool", Fields: map[string]any{"tool_name": task.pending.call.Name, "tool_call_id": task.pending.call.ID, "execution": string(done.execution.State), "decision": string(done.execution.Decision.Action), "output": string(done.execution.Output)}})
+		}
 		if events != nil && firstErr == nil {
 			var event Event
 			if done.err != nil {
@@ -100,6 +114,7 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 			} else {
 				event = ToolResultEvent(iterationCount, attemptID, retryCount, task.pending.call, done.result, done.duration)
 			}
+			event.ToolExecution = cloneToolExecution(&done.execution)
 			if err := sendEvent(ctx, events, event); err != nil {
 				fail(err)
 			}
@@ -155,24 +170,29 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 					busy[name] = true
 				}
 				go func(index int, task scheduledTool, release func()) {
-					done := toolCompletion{index: index}
+					done := toolCompletion{index: index, execution: task.execution}
 					defer func() {
 						if recover() != nil {
 							done.result = nil
 							done.err = ErrToolPanic
+							done.execution.Output = ToolOutputRejected
+							if done.execution.State == ToolRunning {
+								done.execution.State = ToolFailed
+							}
 						}
 						release()
 						completions <- done
 					}()
 					if task.result != nil {
 						done.result, done.err = l.processUninvoked(workerCtx, task)
+						done.execution.Output = outputState(*task.result, done.result)
 						return
 					}
 					timeout := l.ToolExecution.DefaultTimeout
 					if task.options.Timeout != nil {
 						timeout = *task.options.Timeout
 					}
-					done.result, done.duration, done.err = processObservedToolDeadline(workerCtx, ToolPolicyInput{Call: task.pending.call, Traits: task.options.Traits}, []Tool{task.tool}, l.ToolResultProcessor, timeout, l.ObservationSink)
+					done.result, done.duration, done.err = processObservedToolExecution(workerCtx, ToolPolicyInput{Call: task.pending.call, Traits: task.options.Traits}, []Tool{task.tool}, l.ToolResultProcessor, timeout, &done.execution, l.ObservationSink)
 				}(index, task, release)
 			}
 		}
@@ -230,4 +250,44 @@ func (l *Loop) processUninvoked(ctx context.Context, task scheduledTool) (respon
 		result = normalizeToolResult(processed.Text, processed.Err)
 	}
 	return &result, nil
+}
+
+func (l *Loop) preflightToolPolicies(ctx context.Context, tasks []scheduledTool, events chan<- Event, iteration, attempt, retry int) error {
+	for i := range tasks {
+		task := &tasks[i]
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if task.result != nil {
+			continue
+		}
+		decision := ToolDecision{Action: ToolAllow}
+		if l.ToolPolicy != nil {
+			var err error
+			decision, err = evaluateToolPolicy(ctx, l.ToolPolicy, ToolPolicyInput{Call: task.pending.call, Traits: task.options.Traits})
+			if err != nil {
+				return err
+			}
+		}
+		task.execution.Decision = decision
+		if l.ToolPolicy != nil && events != nil {
+			event := Event{Type: EventToolDecision, IterationCount: iteration, AttemptID: attempt, RetryCount: retry, ToolCall: &task.pending.call, ToolExecution: cloneToolExecution(&task.execution)}
+			if err := sendEvent(ctx, events, event); err != nil {
+				return err
+			}
+		}
+		switch decision.Action {
+		case ToolDeny:
+			task.result = &ToolResult{Err: decisionError(decision, ErrToolDenied)}
+		case ToolRequireApproval:
+			task.result = &ToolResult{Err: decisionError(decision, ErrToolApprovalRequired)}
+		}
+	}
+	return nil
+}
+func decisionError(decision ToolDecision, kind error) error {
+	if decision.Reason == "" {
+		return kind
+	}
+	return safeToolError{text: decision.Reason, kind: kind}
 }

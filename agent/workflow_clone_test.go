@@ -51,3 +51,20 @@ func TestCloneWorkflowResultOwnsMutableExecutionData(t *testing.T) {
 		t.Fatalf("iteration data was shared with clone: %+v", part)
 	}
 }
+
+func TestToolExecutionMetadataIsCopiedAtWorkflowBoundary(t *testing.T) {
+	low := loop.Event{Type: loop.EventToolDecision, ToolExecution: &loop.ToolExecution{Decision: loop.ToolDecision{Action: loop.ToolDeny}, State: loop.ToolNotStarted}}
+	mapped, ok := mapLoopEvent(low, EventSource{Kind: SourcePrimary})
+	if !ok || mapped.Type != EventToolDecision || mapped.ToolExecution == nil {
+		t.Fatalf("mapping=%#v", mapped)
+	}
+	mapped.ToolExecution.Decision.Action = loop.ToolAllow
+	if low.ToolExecution.Decision.Action != loop.ToolDeny {
+		t.Fatal("mapped metadata aliases low-level event")
+	}
+	copy := cloneEvent(mapped)
+	copy.ToolExecution.State = loop.ToolSucceeded
+	if mapped.ToolExecution.State != loop.ToolNotStarted {
+		t.Fatal("workflow clone aliases execution metadata")
+	}
+}

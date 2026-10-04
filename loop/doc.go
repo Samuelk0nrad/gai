@@ -19,6 +19,15 @@
 // joins admitted work before returning. Handler panics terminate the run without
 // exposing panic payloads. Model retries never retry a tool invocation.
 //
+// ToolPolicy runs before scheduling using copied plain call metadata. Nil policy
+// allows registered tools; NewToolPolicy supplies name/effect rules with explicit
+// precedence. Workflow middleware is not this authorization boundary. Policies
+// can allow, deny, or require approval. Result processors run after invocation and
+// before any outer result publication; ChainToolResultProcessors composes them.
+// RedactToolResult sanitizes errors as well as text. Put LimitToolResultBytes last.
+// ToolExecution records authorization, invocation, and output disposition
+// independently: rejected output never undoes a successful external side effect.
+//
 // Only accepted iterations enter Loop.Messages; retries and discards stay in events.
 // Message views clone the retained ai.Message values instead of reconstructing
 // different native and rendered transcripts from execution records.
