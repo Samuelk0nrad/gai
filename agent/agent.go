@@ -200,6 +200,7 @@ func (a *Agent) middleware() []Middleware {
 	return a.def.Middleware
 }
 
+// newLoop builds the run-owned loop from validated effective settings.
 func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedExecution) (*loop.Loop, error) {
 	if a.def.Prompt == nil {
 		return nil, loop.ErrPromptNotConfigured

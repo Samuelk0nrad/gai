@@ -74,6 +74,7 @@ func (t *lookupOrderTool) Params() ai.ToolParameters {
 	}
 }
 
+// Function validates an order ID and returns the local order record as JSON.
 func (t *lookupOrderTool) Function(ctx context.Context, req ai.ToolCall) (string, error) {
 	select {
 	case <-ctx.Done():
