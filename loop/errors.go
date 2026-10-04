@@ -17,8 +17,6 @@ var (
 	ErrToolCallMalformed = errors.New("tool call payload is malformed")
 	// ErrToolNotFound indicates that no configured tool matches a call.
 	ErrToolNotFound = errors.New("tool not found")
-	// ErrToolErrorMissing indicates that a tool error response has no error.
-	ErrToolErrorMissing = errors.New("tool error missing")
 	// ErrMaxIterations indicates that the loop reached its iteration limit.
 	ErrMaxIterations = errors.New("max loop iterations exceeded")
 	// ErrPromptPathEmpty indicates that no prompt file path was provided.
@@ -29,8 +27,8 @@ var (
 	ErrPromptMissing = errors.New("prompt file is missing")
 	// ErrArgsDecodeTarget indicates a nil target passed to DecodeToolArgs.
 	ErrArgsDecodeTarget = errors.New("tool args decode target is nil")
-	// ErrToolResponseProcess indicates that tool-response processing failed.
-	ErrToolResponseProcess = errors.New("tool response process error")
+	// ErrToolResultProcess indicates that tool-response processing failed.
+	ErrToolResultProcess = errors.New("tool response process error")
 	// ErrBuildPrompt indicates that prompt construction failed.
 	ErrBuildPrompt = errors.New("build prompt error")
 	// ErrMaxRetries indicates that model generation exhausted its retry limit.

@@ -1,99 +1,127 @@
 package loop
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/lace-ai/gai/ai"
 )
 
-// ToolResponse is the result of a tool invocation.
-type ToolResponse struct {
-	// Status indicates whether the tool invocation was successful or resulted in an error.
-	Status string // "success" or "error"
-	// Text contains successful tool output to return to the model.
-	Text *string
-	// Err contains an invocation or tool error.
-	Err *error
+// ToolResult is the normalized result of an invocation or result processor.
+// Err takes precedence over Text. Errors are immutable caller-owned values.
+type ToolResult struct {
+	Text string
+	Err  error
 }
 
-func NewToolSuccess(text string) *ToolResponse {
-	return &ToolResponse{
-		Status: "success",
-		Text:   &text,
+// String returns the model-facing text, giving errors precedence over output.
+func (r ToolResult) String() string {
+	if r.Err != nil {
+		return r.Err.Error()
 	}
+	return r.Text
 }
 
-func NewToolError(err error) *ToolResponse {
-	if err == nil {
-		err = ErrToolErrorMissing
+func normalizeToolResult(text string, err error) ToolResult {
+	if err != nil {
+		return ToolResult{Err: err}
 	}
-	return &ToolResponse{
-		Status: "error",
-		Err:    &err,
-	}
-}
-
-func (r *ToolResponse) TextValue() string {
-	if r == nil || r.Text == nil {
-		return ""
-	}
-	return *r.Text
-}
-
-func (r *ToolResponse) ErrorValue() error {
-	if r == nil || r.Err == nil {
-		return nil
-	}
-	return *r.Err
+	return ToolResult{Text: text}
 }
 
 // Tool defines a function that a model may request during a loop run.
-// Implementations must be safe for concurrent use.
+// Implementations must be safe for concurrent use and honor context cancellation.
 type Tool interface {
-	// Name returns the function name exposed to the model.
 	Name() string
-	// Description explains when and how the model should use the tool.
 	Description() string
-	// Params returns the structured tool argument schema.
 	Params() ai.ToolParameters
-	// Function invokes the tool for req.
-	Function(ctx context.Context, req *ai.ToolCall) *ToolResponse
+	// Function receives a call owned by this invocation. Err takes precedence over text.
+	Function(context.Context, ai.ToolCall) (string, error)
 }
 
-// CallTool validates req and invokes the matching tool by name.
-// It returns an error response when validation fails, no tool matches, or a
-// tool returns nil.
-func CallTool(ctx context.Context, req *ai.ToolCall, tools []Tool) *ToolResponse {
-	response, _ := callTool(ctx, req, tools)
-	return response
+// ToolFunc is the implementation of a text tool, without its declaration.
+type ToolFunc func(context.Context, ai.ToolCall) (string, error)
+
+type functionTool struct {
+	name, description string
+	paramsJSON        []byte
+	function          ToolFunc
 }
 
-func callTool(ctx context.Context, req *ai.ToolCall, tools []Tool) (*ToolResponse, bool) {
-	if err := req.Validate(); err != nil {
-		return NewToolError(err), false
+// NewTool combines declaration metadata and a function. It validates the
+// declaration and snapshots parameters; subsequent caller mutations are isolated.
+func NewTool(name, description string, params ai.ToolParameters, function ToolFunc) (Tool, error) {
+	if function == nil {
+		return nil, fmt.Errorf("%w: tool function is nil", ai.ErrInvalidToolDefinition)
 	}
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("%w: parameters: %w", ai.ErrInvalidToolDefinition, err)
+	}
+	tool := &functionTool{name: name, description: description, paramsJSON: raw, function: function}
+	if _, err := ToolDefinitions([]Tool{tool}); err != nil {
+		return nil, err
+	}
+	return tool, nil
+}
+func (t *functionTool) Name() string        { return t.name }
+func (t *functionTool) Description() string { return t.description }
+func (t *functionTool) Params() ai.ToolParameters {
+	var params ai.ToolParameters
+	decoder := json.NewDecoder(bytes.NewReader(t.paramsJSON))
+	decoder.UseNumber()
+	if err := decoder.Decode(&params); err != nil {
+		panic("loop: invalid private tool parameter snapshot")
+	}
+	return params
+}
+func (t *functionTool) Function(ctx context.Context, call ai.ToolCall) (string, error) {
+	return t.function(ctx, call)
+}
 
+// CallTool validates a call and invokes the matching tool with an isolated copy.
+// This low-level helper bypasses Loop execution policy and result processing.
+// Invalid calls and missing tools return ordinary tool errors.
+func CallTool(ctx context.Context, req ai.ToolCall, tools []Tool) ToolResult {
+	if err := req.Validate(); err != nil {
+		return ToolResult{Err: err}
+	}
+	if !json.Valid(req.Args) {
+		return ToolResult{Err: ErrToolCallMalformed}
+	}
+	if err := ctx.Err(); err != nil {
+		return ToolResult{Err: err}
+	}
 	for index, tool := range tools {
-		if tool == nil {
-			return NewToolError(fmt.Errorf("%w: tool at index %d is nil", ai.ErrInvalidToolDefinition, index)), false
+		if nilImplementation(tool) {
+			return ToolResult{Err: fmt.Errorf("%w: tool at index %d is nil", ai.ErrInvalidToolDefinition, index)}
 		}
 		if tool.Name() == req.Name {
-			res := tool.Function(ctx, req)
-			if res == nil {
-				return NewToolError(fmt.Errorf("tool %s returned nil response", req.Name)), true
-			}
-			return res, false
+			text, err := tool.Function(ctx, req.Clone())
+			return normalizeToolResult(text, err)
 		}
 	}
-
-	return NewToolError(fmt.Errorf("%w: %s", ErrToolNotFound, req.Name)), false
+	return ToolResult{Err: fmt.Errorf("%w: %s", ErrToolNotFound, req.Name)}
 }
 
-// DecodeToolArgs validates req and decodes its JSON arguments into target.
-func DecodeToolArgs[T any](req *ai.ToolCall, target *T) error {
+func nilImplementation(tool any) bool {
+	if tool == nil {
+		return true
+	}
+	v := reflect.ValueOf(tool)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	}
+	return false
+}
+
+// DecodeToolArgs validates the call and decodes its JSON arguments into target.
+func DecodeToolArgs[T any](req ai.ToolCall, target *T) error {
 	if err := req.Validate(); err != nil {
 		return err
 	}
@@ -112,7 +140,7 @@ func ToolDefinitions(tools []Tool) ([]ai.ToolDefinition, error) {
 	definitions := make([]ai.ToolDefinition, 0, len(tools))
 	names := make(map[string]struct{}, len(tools))
 	for index, tool := range tools {
-		if tool == nil {
+		if nilImplementation(tool) {
 			return nil, fmt.Errorf("%w: tool at index %d is nil", ai.ErrInvalidToolDefinition, index)
 		}
 		params, err := tool.Params().JSONSchema()
@@ -148,18 +176,4 @@ func ToolCallToString(tc ai.ToolCall) string {
 	builder.WriteString(",arguments: ")
 	builder.Write(tc.Args)
 	return builder.String()
-}
-
-// String returns the response text.
-func (r *ToolResponse) String() string {
-	if r == nil {
-		return ""
-	}
-	if r.Text != nil {
-		return *r.Text
-	}
-	if err := r.ErrorValue(); err != nil {
-		return err.Error()
-	}
-	return ""
 }

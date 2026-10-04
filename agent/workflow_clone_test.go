@@ -22,7 +22,7 @@ func TestCloneWorkflowResultOwnsMutableExecutionData(t *testing.T) {
 				Parts: []loop.IterationPart{{
 					Response: &ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "original"}}}},
 					ToolReq:  call,
-					ToolResp: loop.NewToolSuccess("original"),
+					ToolResp: &loop.ToolResult{Text: "original"},
 				}},
 			}},
 		},
@@ -34,7 +34,7 @@ func TestCloneWorkflowResultOwnsMutableExecutionData(t *testing.T) {
 	cloned.Primary.Messages[0].Parts[0].Text = "changed"
 	cloned.Primary.Iterations[0].Parts[0].Response.Message.Parts[0].Text = "changed"
 	cloned.Primary.Iterations[0].Parts[0].ToolReq.Args[0] = 'X'
-	*cloned.Primary.Iterations[0].Parts[0].ToolResp.Text = "changed"
+	cloned.Primary.Iterations[0].Parts[0].ToolResp.Text = "changed"
 	originalPromptNode, err := result.Input.Prompt.Context[0].Render(t.Context())
 	if err != nil || originalPromptNode.Value != "original" {
 		t.Fatalf("prompt context slice was shared with clone: %+v", result.Input.Prompt.Context)
@@ -47,7 +47,7 @@ func TestCloneWorkflowResultOwnsMutableExecutionData(t *testing.T) {
 		t.Fatalf("message token counts were shared with clone: %+v", result.Primary.Messages[0].Parts)
 	}
 	part := result.Primary.Iterations[0].Parts[0]
-	if part.Response.Text() != "original" || string(part.ToolReq.Args) != `{"query":"original"}` || part.ToolResp.TextValue() != "original" {
+	if part.Response.Text() != "original" || string(part.ToolReq.Args) != `{"query":"original"}` || part.ToolResp.Text != "original" {
 		t.Fatalf("iteration data was shared with clone: %+v", part)
 	}
 }

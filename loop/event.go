@@ -49,12 +49,12 @@ type Event struct {
 	// RetryDelay is the backoff selected before the next attempt.
 	RetryDelay time.Duration
 
-	Token        *ai.Token
-	Iteration    *Iteration
-	ToolCall     *ai.ToolCall
-	ToolResponse *ToolResponse
-	Duration     time.Duration
-	Err          error
+	Token      *ai.Token
+	Iteration  *Iteration
+	ToolCall   *ai.ToolCall
+	ToolResult *ToolResult
+	Duration   time.Duration
+	Err        error
 }
 
 func AttemptStartEvent(iteration, attempt, retry int) Event {
@@ -129,17 +129,17 @@ func ToolStartEvent(iteration, attempt, retry int, call ai.ToolCall) Event {
 	return Event{Type: EventToolStart, IterationCount: iteration, AttemptID: attempt, RetryCount: retry, ToolCall: &call}
 }
 
-func ToolResultEvent(iteration, attempt, retry int, call ai.ToolCall, response *ToolResponse, duration time.Duration) Event {
+func ToolResultEvent(iteration, attempt, retry int, call ai.ToolCall, response *ToolResult, duration time.Duration) Event {
 	eventType := EventToolResult
 	var err error
-	if response != nil && response.ErrorValue() != nil {
-		eventType, err = EventToolError, response.ErrorValue()
+	if response != nil && response.Err != nil {
+		eventType, err = EventToolError, response.Err
 	}
-	return Event{Type: eventType, IterationCount: iteration, AttemptID: attempt, RetryCount: retry, ToolCall: &call, ToolResponse: response, Duration: duration, Err: err}
+	return Event{Type: eventType, IterationCount: iteration, AttemptID: attempt, RetryCount: retry, ToolCall: &call, ToolResult: response, Duration: duration, Err: err}
 }
 
-func ToolErrorEvent(iteration, attempt, retry int, call ai.ToolCall, response *ToolResponse, duration time.Duration, err error) Event {
-	return Event{Type: EventToolError, IterationCount: iteration, AttemptID: attempt, RetryCount: retry, ToolCall: &call, ToolResponse: response, Duration: duration, Err: err}
+func ToolErrorEvent(iteration, attempt, retry int, call ai.ToolCall, response *ToolResult, duration time.Duration, err error) Event {
+	return Event{Type: EventToolError, IterationCount: iteration, AttemptID: attempt, RetryCount: retry, ToolCall: &call, ToolResult: response, Duration: duration, Err: err}
 }
 
 func ErrorEvent(err error) Event {
@@ -189,17 +189,9 @@ func sendEvent(ctx context.Context, ch chan<- Event, event Event) error {
 		c := event.ToolCall.Clone()
 		event.ToolCall = &c
 	}
-	if event.ToolResponse != nil {
-		r := *event.ToolResponse
-		if r.Text != nil {
-			v := *r.Text
-			r.Text = &v
-		}
-		if r.Err != nil {
-			v := *r.Err
-			r.Err = &v
-		}
-		event.ToolResponse = &r
+	if event.ToolResult != nil {
+		r := *event.ToolResult
+		event.ToolResult = &r
 	}
 
 	select {

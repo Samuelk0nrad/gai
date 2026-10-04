@@ -195,7 +195,7 @@ type Tool interface {
   Name() string
   Description() string
   Params() ai.ToolParameters
-  Function(ctx context.Context, req *ai.ToolCall) *ToolResponse
+  Function(ctx context.Context, req ai.ToolCall) (string, error)
 }
 ```
 
@@ -218,17 +218,32 @@ func (t *LookupOrderTool) Params() ai.ToolParameters {
 
 func (t *LookupOrderTool) Function(
   ctx context.Context,
-  req *ai.ToolCall,
-) *loop.ToolResponse {
+  req ai.ToolCall,
+) (string, error) {
   var args struct {
     OrderID string `json:"order_id"`
   }
   if err := loop.DecodeToolArgs(req, &args); err != nil {
-    return loop.NewToolError(err)
+    return "", err
   }
-  return loop.NewToolSuccess(`{"status":"in_transit"}`)
+  return `{"status":"in_transit"}`, nil
 }
 ```
+
+For a small tool, use `loop.NewTool(name, description, params, handler)` with a
+`loop.ToolFunc` instead of implementing a custom struct. The constructor validates
+and snapshots the declaration. Handlers receive their own copy of arguments and
+provider extensions. An empty string is a valid success; a non-nil error takes
+precedence over text and becomes a model-visible tool error.
+
+The pre-v1 migration replaces `ToolResponse` with `ToolResult{Text string, Err error}`,
+renames event payloads to `ToolResult`, and replaces `ToolResponseProcessor` with
+`ToolResultProcessor`. Its `Process(ctx, input, result) (ToolResult, error)` method
+returns a replacement result; a processing error terminates the run without
+publishing the unfiltered output. Loop telemetry captures only processed output.
+Handlers and nested provider telemetry still need the request's content-capture
+policy. `loop.CallTool` is a direct invocation helper and bypasses loop policies
+and processing.
 
 Attach tools to an agent definition:
 

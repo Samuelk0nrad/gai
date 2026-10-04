@@ -229,15 +229,9 @@ type searchContents struct {
 	Highlights bool `json:"highlights"`
 }
 
-func (t *SearchTool) Function(ctx context.Context, call *ai.ToolCall) (response *loop.ToolResponse) {
+func (t *SearchTool) Function(ctx context.Context, call ai.ToolCall) (text string, err error) {
 	ctx, observer := newSearchObserver(ctx, t.debug, t.searchType, t.numResults)
-	defer func() {
-		if response == nil {
-			observer.Finish(errors.New("exa search returned no tool response"))
-			return
-		}
-		observer.Finish(response.ErrorValue())
-	}()
+	defer func() { observer.Finish(err) }()
 
 	var args searchArgs
 	if err := loop.DecodeToolArgs(call, &args); err != nil {
@@ -300,7 +294,7 @@ func (t *SearchTool) Function(ctx context.Context, call *ai.ToolCall) (response 
 	}
 	observer.Succeeded(ctx, metadata.RequestID, len(metadata.Results), len(body))
 
-	return loop.NewToolSuccess(string(body))
+	return string(body), nil
 }
 
 func decodeAPIError(statusCode int, requestID string, body []byte) *APIError {

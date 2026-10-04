@@ -22,11 +22,11 @@ func TestCanonicalCanceledToolStartWaitsForAlreadyRunningTool(t *testing.T) {
 		unblock := func() { releaseOnce.Do(func() { close(release) }) }
 		defer unblock()
 		var executed atomic.Int32
-		tool := observedTestTool{name: "gated", call: func(context.Context, *ai.ToolCall) *ToolResponse {
+		tool := observedTestTool{name: "gated", call: func(context.Context, ai.ToolCall) (string, error) {
 			executed.Add(1)
 			close(entered)
 			<-release
-			return NewToolSuccess("completed first")
+			return "completed first", nil
 		}}
 		l := &Loop{Tools: []Tool{tool}}
 		iteration := &Iteration{Parts: make([]IterationPart, 2)}
@@ -61,11 +61,11 @@ func TestCanonicalCanceledToolStartWaitsForAlreadyRunningTool(t *testing.T) {
 		}
 		// Terminal snapshots must only be read after all writers have stopped.
 		snapshot := iteration.Clone()
-		if snapshot.Parts[0].ToolResp == nil || snapshot.Parts[0].ToolResp.TextValue() != "completed first" || snapshot.Parts[1].ToolResp != nil {
+		if snapshot.Parts[0].ToolResp == nil || snapshot.Parts[0].ToolResp.Text != "completed first" || snapshot.Parts[1].ToolResp != nil {
 			t.Fatalf("terminal snapshot = %#v", snapshot.Parts)
 		}
-		*snapshot.Parts[0].ToolResp.Text = "mutated snapshot"
-		if iteration.Parts[0].ToolResp.TextValue() != "completed first" {
+		snapshot.Parts[0].ToolResp.Text = "mutated snapshot"
+		if iteration.Parts[0].ToolResp.Text != "completed first" {
 			t.Fatal("terminal tool response snapshot aliases execution state")
 		}
 	})

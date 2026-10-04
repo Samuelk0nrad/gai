@@ -45,15 +45,15 @@ type echoArgs struct {
 }
 
 // Function decodes and returns the requested text.
-func (t *EchoTool) Function(ctx context.Context, req *ai.ToolCall) *ToolResponse {
+func (t *EchoTool) Function(ctx context.Context, req ai.ToolCall) (string, error) {
 	var args echoArgs
 	if err := DecodeToolArgs(req, &args); err != nil {
-		return NewToolError(err)
+		return "", err
 	}
 
 	text := strings.TrimSpace(args.Text)
 	if text == "" {
 		text = "(empty)"
 	}
-	return NewToolSuccess(text)
+	return text, nil
 }

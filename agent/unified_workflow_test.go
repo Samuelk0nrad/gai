@@ -40,12 +40,12 @@ type gatedWorkflowTool struct {
 	release <-chan struct{}
 }
 
-func (t gatedWorkflowTool) Function(ctx context.Context, call *ai.ToolCall) *loop.ToolResponse {
+func (t gatedWorkflowTool) Function(ctx context.Context, call ai.ToolCall) (string, error) {
 	select {
 	case <-t.release:
 		return t.Tool.Function(ctx, call)
 	case <-ctx.Done():
-		return loop.NewToolError(ctx.Err())
+		return "", ctx.Err()
 	}
 }
 

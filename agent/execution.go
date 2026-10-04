@@ -58,8 +58,8 @@ type ExecutionOverrides struct {
 	RequestBudget Optional[*ai.RequestBudgetConfig]
 	// RetryPolicy set to nil disables the entire policy, including its timeouts.
 	RetryPolicy Optional[*loop.RetryPolicy]
-	// ToolResponseProcessor set to nil disables the inherited processor.
-	ToolResponseProcessor Optional[loop.ToolResponseProcessor]
+	// ToolResultProcessor set to nil disables the inherited processor.
+	ToolResultProcessor Optional[loop.ToolResultProcessor]
 }
 
 type resolvedExecution struct {
@@ -72,7 +72,7 @@ type resolvedExecution struct {
 	counter                   ai.TokenCounter
 	requestBudget             *ai.RequestBudgetConfig
 	retryPolicy               *loop.RetryPolicy
-	toolResponseProcessor     loop.ToolResponseProcessor
+	toolResultProcessor       loop.ToolResultProcessor
 	nativeTools               bool
 	reconfigureTools          bool
 	requireTokenCounterSetter bool
@@ -86,7 +86,7 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 		toolChoice: def.ToolChoice, responseFormat: def.ResponseFormat,
 		reasoning: def.Reasoning, counter: def.TokenCounter,
 		requestBudget: def.RequestBudget,
-		retryPolicy:   def.RetryPolicy, toolResponseProcessor: def.ToolResponseProcessor,
+		retryPolicy:   def.RetryPolicy, toolResultProcessor: def.ToolResultProcessor,
 		reconfigureTools: def.ToolChoice.Mode != "" || len(def.ToolChoice.Names) != 0,
 	}
 	if overrides != nil {
@@ -125,8 +125,8 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 		if overrides.RetryPolicy.Set {
 			r.retryPolicy = overrides.RetryPolicy.Value
 		}
-		if overrides.ToolResponseProcessor.Set {
-			r.toolResponseProcessor = overrides.ToolResponseProcessor.Value
+		if overrides.ToolResultProcessor.Set {
+			r.toolResultProcessor = overrides.ToolResultProcessor.Value
 		}
 	}
 	if nilDependency(r.model) {
@@ -150,7 +150,7 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 		}
 		r.requireTokenCounterSetter = true
 	}
-	if r.toolResponseProcessor != nil && nilDependency(r.toolResponseProcessor) {
+	if r.toolResultProcessor != nil && nilDependency(r.toolResultProcessor) {
 		return resolvedExecution{}, fmt.Errorf("%w: tool response processor is a typed nil", ErrInvalidExecutionConfig)
 	}
 	if r.retryPolicy != nil {

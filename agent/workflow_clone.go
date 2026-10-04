@@ -75,19 +75,11 @@ func cloneIterations(iterations []loop.Iteration) []loop.Iteration {
 	return out
 }
 
-func cloneToolResponse(response *loop.ToolResponse) *loop.ToolResponse {
+func cloneToolResult(response *loop.ToolResult) *loop.ToolResult {
 	if response == nil {
 		return nil
 	}
 	cloned := *response
-	if response.Text != nil {
-		text := *response.Text
-		cloned.Text = &text
-	}
-	if response.Err != nil {
-		err := *response.Err
-		cloned.Err = &err
-	}
 	return &cloned
 }
 

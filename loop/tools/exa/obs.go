@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/loop"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -106,7 +105,7 @@ func (o *searchObserver) Succeeded(ctx context.Context, requestID string, result
 	o.emit(ctx, "exa_search_finished", fields, nil)
 }
 
-func (o *searchObserver) Failure(ctx context.Context, stage string, err error) *loop.ToolResponse {
+func (o *searchObserver) Failure(ctx context.Context, stage string, err error) (string, error) {
 	fields := o.baseFields()
 	fields["stage"] = stage
 	if o != nil && o.statusCode != 0 {
@@ -120,7 +119,7 @@ func (o *searchObserver) Failure(ctx context.Context, stage string, err error) *
 	}
 	observedErr := error(errObservedExaSearch)
 	o.emit(ctx, "exa_search_failed", fields, observedErr)
-	return loop.NewToolError(err)
+	return "", err
 }
 
 func (o *searchObserver) baseFields() map[string]any {
