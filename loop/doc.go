@@ -38,6 +38,9 @@
 // tokens, not durable invocation identities. A missing resolver refuses the call
 // with ErrToolApprovalRequired and does not suspend the run. Applications own UI,
 // transport, and persistence; durable workflow pause/resume is a separate concern.
+// Resolver failures retain a failed approval decision and emit a resolved event
+// before the terminal failure. Cancellation attempts nonblocking delivery; the
+// retained execution metadata remains available if the event buffer is full.
 //
 // Only accepted iterations enter Loop.Messages; retries and discards stay in events.
 // Message views clone the retained ai.Message values instead of reconstructing
