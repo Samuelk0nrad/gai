@@ -39,6 +39,7 @@ type ToolResultProcessor interface {
 // ToolResultProcessorFunc adapts a function to ToolResultProcessor.
 type ToolResultProcessorFunc func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error)
 
+// Process invokes the adapter or rejects a nil processor function.
 func (f ToolResultProcessorFunc) Process(ctx context.Context, input ToolPolicyInput, result ToolResult) (ToolResult, error) {
 	if f == nil {
 		return ToolResult{}, fmt.Errorf("%w: processor function is nil", ErrToolResultProcess)
@@ -276,6 +277,7 @@ func hasPermittedToolCall(toolCalls []pendingToolCall, tools []Tool, allowedName
 	return hasPermittedCall
 }
 
+// toolsNamed selects registered tools without changing their configured order.
 func toolsNamed(tools []Tool, names []string) []Tool {
 	selected := make([]Tool, 0, len(names))
 	for _, tool := range tools {

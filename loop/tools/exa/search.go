@@ -229,9 +229,16 @@ type searchContents struct {
 	Highlights bool `json:"highlights"`
 }
 
+// Function searches Exa and returns JSON; it honors ctx and preserves direct panic behavior.
 func (t *SearchTool) Function(ctx context.Context, call ai.ToolCall) (text string, err error) {
 	ctx, observer := newSearchObserver(ctx, t.debug, t.searchType, t.numResults)
-	defer func() { observer.Finish(err) }()
+	defer func() {
+		if value := recover(); value != nil {
+			observer.Finish(errObservedExaSearch)
+			panic(value)
+		}
+		observer.Finish(err)
+	}()
 
 	var args searchArgs
 	if err := loop.DecodeToolArgs(call, &args); err != nil {

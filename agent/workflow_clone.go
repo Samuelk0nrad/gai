@@ -75,6 +75,7 @@ func cloneIterations(iterations []loop.Iteration) []loop.Iteration {
 	return out
 }
 
+// cloneToolResult copies a result while retaining its immutable error value.
 func cloneToolResult(response *loop.ToolResult) *loop.ToolResult {
 	if response == nil {
 		return nil
