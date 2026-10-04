@@ -74,10 +74,14 @@ type sentinelErrorTool struct{}
 func (sentinelErrorTool) Name() string              { return "failure" }
 func (sentinelErrorTool) Description() string       { return "Returns a test error." }
 func (sentinelErrorTool) Params() ai.ToolParameters { return loop.NewEchoTool().Params() }
+// Function returns a recognizable private error to detect accidental disclosure through
+// telemetry.
 func (sentinelErrorTool) Function(context.Context, ai.ToolCall) (string, error) {
 	return "", errors.New("tool-output-sentinel-secret")
 }
 
+// Process injects a processor failure so tests can inspect wrapping, events, and retained
+// snapshots.
 func (p failingToolResultProcessor) Process(_ context.Context, _ loop.ToolPolicyInput, _ loop.ToolResult) (loop.ToolResult, error) {
 	return loop.ToolResult{}, p.err
 }
@@ -109,6 +113,8 @@ func (t *deadlineRecordingTool) Description() string {
 func (t *deadlineRecordingTool) Params() ai.ToolParameters {
 	return loop.NewEchoTool().Params()
 }
+// Function records whether a tool inherits a deadline so tests can distinguish generation and
+// run timeout scopes.
 func (t *deadlineRecordingTool) Function(ctx context.Context, _ ai.ToolCall) (string, error) {
 	_, hasDeadline := ctx.Deadline()
 	t.hasDeadline.Store(hasDeadline)
@@ -118,6 +124,8 @@ func (t *deadlineRecordingTool) Function(ctx context.Context, _ ai.ToolCall) (st
 func (t *countingTool) Name() string              { return "count" }
 func (t *countingTool) Description() string       { return "Counts invocations." }
 func (t *countingTool) Params() ai.ToolParameters { return loop.NewEchoTool().Params() }
+// Function counts actual invocations atomically to detect execution of calls that should have
+// been discarded.
 func (t *countingTool) Function(context.Context, ai.ToolCall) (string, error) {
 	t.calls.Add(1)
 	return "ok", nil
@@ -711,6 +719,8 @@ func TestLoopTextTransportDoesNotSatisfyNamedRequiredToolChoiceWithDifferentConf
 	}
 }
 
+// TestLoopTextTransportDiscardsMixedRequiredToolResult ensures a mixed required-tool response is
+// retried without executing unselected tools or publishing rejected content.
 func TestLoopTextTransportDiscardsMixedRequiredToolResult(t *testing.T) {
 	t.Parallel()
 
@@ -1063,6 +1073,8 @@ func TestLoopHandlesManyToolCallsInOneIteration(t *testing.T) {
 	}
 }
 
+// TestLoopWrapsToolPreprocessErrors preserves framework error identity and attempt metadata
+// without retaining an unfiltered result or accepting the failed iteration.
 func TestLoopWrapsToolPreprocessErrors(t *testing.T) {
 	t.Parallel()
 

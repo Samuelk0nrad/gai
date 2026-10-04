@@ -402,6 +402,8 @@ func (t namedTool) Description() string { return "test tool" }
 func (t namedTool) Params() ai.ToolParameters {
 	return ai.ToolParameters{}
 }
+// Function returns a fixed result so registration tests can focus on tool names and
+// declarations.
 func (t namedTool) Function(context.Context, ai.ToolCall) (string, error) {
 	return "ok", nil
 }
@@ -416,6 +418,8 @@ func (t *recordingTool) Description() string { return "test tool" }
 func (t *recordingTool) Params() ai.ToolParameters {
 	return ai.ToolParameters{}
 }
+// Function counts handler invocations so tests can distinguish registration from actual
+// execution.
 func (t *recordingTool) Function(context.Context, ai.ToolCall) (string, error) {
 	t.calls++
 	return "called", nil

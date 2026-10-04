@@ -8,6 +8,8 @@ import (
 	"github.com/lace-ai/gai/loop"
 )
 
+// TestWorkflowOutputAccumulatorDoesNotRetainLargeExecutionEvents ensures the output reducer
+// neither retains large execution payloads nor allocates for unrelated events.
 func TestWorkflowOutputAccumulatorDoesNotRetainLargeExecutionEvents(t *testing.T) {
 	payload := bytes.Repeat([]byte("x"), 64<<10)
 	response := string(payload)

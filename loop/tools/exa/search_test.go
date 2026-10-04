@@ -20,6 +20,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
+// TestSearchTool checks authenticated request construction, query normalization, JSON output,
+// and metadata-only search observations.
 func TestSearchTool(t *testing.T) {
 	t.Parallel()
 
@@ -114,6 +116,8 @@ func TestSearchToolAllowsCustomPromptMetadata(t *testing.T) {
 	}
 }
 
+// TestSearchToolReturnsAPIError preserves typed API error details for callers while emitting
+// safe failure observations without the provider error payload.
 func TestSearchToolReturnsAPIError(t *testing.T) {
 	t.Parallel()
 
@@ -154,6 +158,8 @@ func TestSearchToolReturnsAPIError(t *testing.T) {
 	}
 }
 
+// TestSearchToolPolicyCaptureIncludesQuery verifies that explicit input-capture policy permits
+// the query in search observations.
 func TestSearchToolPolicyCaptureIncludesQuery(t *testing.T) {
 	t.Parallel()
 
@@ -179,6 +185,8 @@ func TestSearchToolPolicyCaptureIncludesQuery(t *testing.T) {
 	}
 }
 
+// TestSearchToolTracing ensures failed search spans retain status and request identifiers
+// without exposing provider response text.
 func TestSearchToolTracing(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
@@ -294,8 +302,12 @@ func attributeMap(attrs []attribute.KeyValue) map[string]attribute.Value {
 
 type panicTransport struct{}
 
+// RoundTrip panics with a recognizable private marker to exercise search cleanup and telemetry
+// privacy.
 func (panicTransport) RoundTrip(*http.Request) (*http.Response, error) { panic("private-panic-marker") }
 
+// TestSearchPanicClosesSpanWithSafeError verifies that direct search invocation propagates a
+// panic after closing its span without leaking the panic value.
 func TestSearchPanicClosesSpanWithSafeError(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
