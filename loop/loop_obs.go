@@ -32,6 +32,10 @@ const (
 	toolOutcomePanic        = "panic"
 	toolOutcomeDeadline     = "deadline"
 	toolOutcomeCancellation = "cancellation"
+	toolOutcomeProcessing   = "processing_error"
+	toolOutcomeDenied       = "denied"
+	toolOutcomeApproval     = "approval_required"
+	toolOutcomeInvalidCall  = "invalid_call"
 )
 
 var (
@@ -39,6 +43,7 @@ var (
 	errObservedToolPanic        = errors.New("tool execution panicked")
 	errObservedToolDeadline     = errors.New("tool execution deadline exceeded")
 	errObservedToolCancellation = errors.New("tool execution canceled")
+	errObservedToolProcessing   = errors.New("tool result processing failed")
 )
 
 type loopRunState struct {
@@ -362,7 +367,11 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 			observation.finishPanic(time.Since(started))
 			panic(panicValue)
 		}
-		observation.finish(response, duration)
+		if processErr != nil {
+			observation.finishProcessingError(processErr, duration)
+		} else {
+			observation.finish(response, duration)
+		}
 	}()
 	invokeCtx := toolCtx
 	cancel := func() {}
@@ -427,6 +436,20 @@ func (o *toolObservation) finishPanic(duration time.Duration) {
 	})
 }
 
+func toolProcessingOutcome(err error) (string, error) {
+	if errors.Is(err, ErrToolPanic) {
+		return toolOutcomePanic, errObservedToolPanic
+	}
+	return toolOutcomeProcessing, errObservedToolProcessing
+}
+
+func (o *toolObservation) finishProcessingError(err error, duration time.Duration) {
+	o.finishOnce.Do(func() {
+		outcome, safeErr := toolProcessingOutcome(err)
+		o.setOutcome(outcome, safeErr, duration)
+	})
+}
+
 func (o *toolObservation) setOutcome(outcome string, spanErr error, duration time.Duration) {
 	status := "success"
 	attrs := []attribute.KeyValue{attribute.String("gai.tool.outcome", outcome)}
@@ -439,12 +462,7 @@ func (o *toolObservation) setOutcome(outcome string, spanErr error, duration tim
 		attrs = append(attrs, attribute.String("gai.tool.execution", string(o.execution.State)), attribute.String("gai.tool.output", string(o.execution.Output)), attribute.String("gai.tool.decision", string(o.execution.Decision.Action)))
 	}
 	o.span.SetAttributes(attrs...)
-	fields := map[string]any{"tool_name": o.call.Name, "tool_call_id": o.call.ID, "tool_type": o.call.Type, "outcome": outcome, "status": status, "duration_ms": duration.Milliseconds()}
-	if o.execution != nil {
-		fields["execution"] = string(o.execution.State)
-		fields["output"] = string(o.execution.Output)
-		fields["decision"] = string(o.execution.Decision.Action)
-	}
+	fields := toolObservationFields(o.call, o.execution, outcome, status, duration)
 	gai.EmitObservation(o.ctx, o.sink, gai.Observation{
 		Name:   "loop_tool_finished",
 		Source: "loop:Tool",
@@ -452,6 +470,22 @@ func (o *toolObservation) setOutcome(outcome string, spanErr error, duration tim
 		Err:    spanErr,
 	})
 	gai.EndSpan(o.span, spanErr)
+}
+
+// The shared observation finalizer normalizes outcome to "error" and removes
+// Err. Keep the safe tool-specific classification in a separate scalar field.
+func toolObservationFields(call ai.ToolCall, execution *ToolExecution, outcome, status string, duration time.Duration) map[string]any {
+	fields := map[string]any{"tool_name": call.Name, "tool_call_id": call.ID, "tool_type": call.Type, "outcome": outcome, "tool_outcome": outcome, "status": status, "duration_ms": duration.Milliseconds()}
+	if status == "error" {
+		fields["error_code"] = "gai.tool." + outcome
+	}
+	if execution != nil {
+		fields["execution"] = string(execution.State)
+		fields["output"] = string(execution.Output)
+		fields["decision"] = string(execution.Decision.Action)
+		fields["approval"] = string(execution.Approval.Action)
+	}
+	return fields
 }
 
 func toolResult(response *ToolResult) (outcome string, output string, spanErr error) {
@@ -464,6 +498,12 @@ func toolResult(response *ToolResult) (outcome string, output string, spanErr er
 	}
 	output = responseErr.Error()
 	switch {
+	case errors.Is(responseErr, ErrToolDenied):
+		return toolOutcomeDenied, output, ErrToolDenied
+	case errors.Is(responseErr, ErrToolApprovalRequired):
+		return toolOutcomeApproval, output, ErrToolApprovalRequired
+	case errors.Is(responseErr, ErrToolCallMalformed), errors.Is(responseErr, ErrToolReqValidation), errors.Is(responseErr, ErrToolNotFound), errors.Is(responseErr, ai.ErrInvalidToolCall):
+		return toolOutcomeInvalidCall, output, errObservedToolExecution
 	case errors.Is(responseErr, context.DeadlineExceeded):
 		return toolOutcomeDeadline, output, errObservedToolDeadline
 	case errors.Is(responseErr, context.Canceled):

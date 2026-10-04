@@ -233,3 +233,72 @@ func TestDeadlineBeforeInvocationRemainsNotStarted(t *testing.T) {
 		}
 	}
 }
+
+func TestOutputLimitPreservesOnlySafeRefusalCauses(t *testing.T) {
+	for _, refusal := range []error{ErrToolDenied, ErrToolApprovalRequired} {
+		secret := errors.New(strings.Repeat("secret", 100))
+		original := ToolResult{Err: safeToolError{text: secret.Error(), kind: errors.Join(refusal, secret)}}
+		limit, _ := LimitToolResultBytes(32)
+		redact, _ := RedactToolResult(func(_ context.Context, text string) (string, error) { return text, nil })
+		chain, _ := ChainToolResultProcessors(limit, redact)
+		result, err := chain.Process(t.Context(), ToolPolicyInput{}, original)
+		if err != nil || !errors.Is(result.Err, refusal) || !errors.Is(result.Err, ErrToolOutputLimit) || errors.Is(result.Err, secret) || len(result.String()) > 32 {
+			t.Fatalf("result=%#v err=%v", result, err)
+		}
+		if result.String() != refusal.Error() {
+			t.Fatalf("model refusal lost: %q", result.String())
+		}
+	}
+}
+
+func TestProcessorFailureTelemetryKeepsInvocationSuccess(t *testing.T) {
+	recorder := obstest.Install(t)
+	tool := schedulerTool(t, "test", ToolOptions{}, func(context.Context, ai.ToolCall) (string, error) { return "secret-marker", nil })
+	l := &Loop{Tools: []Tool{tool}, ToolResultProcessor: ToolResultProcessorFunc(func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error) {
+		return ToolResult{}, errors.New("processor-marker")
+	})}
+	iteration, calls := schedulerCalls("test")
+	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{ToolOutput: gai.CaptureEnabled})
+	if err := l.executeToolCalls(ctx, iteration, calls, l.Tools, nil, 1, 1, 0); !errors.Is(err, ErrToolResultProcess) {
+		t.Fatalf("err=%v", err)
+	}
+	span := requireToolSpans(t, recorder, 1)[0]
+	attrs := obstest.Attributes(span)
+	if attrs["gai.tool.outcome"].AsString() != toolOutcomeProcessing || attrs["gai.tool.execution"].AsString() != string(ToolSucceeded) {
+		t.Fatalf("attrs=%v", attrs)
+	}
+	if strings.Contains(toolSpanText(span), "marker") {
+		t.Fatal("raw handler/processor error leaked in tool telemetry")
+	}
+}
+
+func TestUninvokedObservationsRemainCompleteAndSafe(t *testing.T) {
+	for _, tc := range []struct {
+		policy        ToolPolicy
+		name, outcome string
+	}{
+		{controlTestPolicy(ToolDeny), "test", toolOutcomeDenied},
+		{controlTestPolicy(ToolRequireApproval), "test", toolOutcomeApproval},
+		{nil, "missing", toolOutcomeInvalidCall},
+	} {
+		var finished *gai.Observation
+		tool := schedulerTool(t, "test", ToolOptions{}, func(context.Context, ai.ToolCall) (string, error) { t.Error("uninvoked tool executed"); return "", nil })
+		l := &Loop{Tools: []Tool{tool}, ToolPolicy: tc.policy, ObservationSink: gai.ObservationSinkFunc(func(_ context.Context, event gai.Observation) {
+			if event.Name == "loop_tool_finished" {
+				finished = &event
+			}
+		})}
+		iteration, calls := schedulerCalls(tc.name)
+		if err := l.executeToolCalls(t.Context(), iteration, calls, l.Tools, nil, 1, 1, 0); err != nil {
+			t.Fatal(err)
+		}
+		if finished == nil || finished.Fields["tool_outcome"] != tc.outcome || finished.Fields["status"] != "error" || finished.Fields["duration_ms"] != int64(0) || finished.Err != nil || finished.Fields["error_code"] != "gai.tool."+tc.outcome {
+			t.Fatalf("observation=%#v", finished)
+		}
+	}
+}
+func controlTestPolicy(action ToolAction) ToolPolicy {
+	return ToolPolicyFunc(func(context.Context, ToolPolicyInput) (ToolDecision, error) {
+		return ToolDecision{Action: action, Reason: "private reason"}, nil
+	})
+}

@@ -65,15 +65,14 @@ func RedactToolResult(redact func(context.Context, string) (string, error)) (Too
 		if result.Err == nil {
 			return ToolResult{Text: text}, nil
 		}
-		var kind error
+		var kinds []error
 		// Preserve only known safe classifications, never arbitrary original causes.
 		for _, candidate := range []error{ErrToolOutputLimit, ErrToolResultRejected, ErrToolDenied, ErrToolApprovalRequired, context.DeadlineExceeded, context.Canceled} {
 			if errors.Is(result.Err, candidate) {
-				kind = candidate
-				break
+				kinds = append(kinds, candidate)
 			}
 		}
-		return ToolResult{Err: safeToolError{text: text, kind: kind}}, nil
+		return ToolResult{Err: safeToolError{text: text, kind: errors.Join(kinds...)}}, nil
 	}), nil
 }
 
@@ -87,10 +86,17 @@ func LimitToolResultBytes(maxBytes int) (ToolResultProcessor, error) {
 	return ToolResultProcessorFunc(func(_ context.Context, _ ToolPolicyInput, result ToolResult) (ToolResult, error) {
 		if maxBytes > 0 && len(result.String()) > maxBytes {
 			message := "tool output too large"
+			kinds := []error{ErrToolOutputLimit}
+			for _, refusal := range []error{ErrToolDenied, ErrToolApprovalRequired} {
+				if errors.Is(result.Err, refusal) {
+					kinds = append(kinds, refusal)
+					message = refusal.Error()
+				}
+			}
 			if len(message) > maxBytes {
 				message = message[:maxBytes]
 			} // Fixed ASCII diagnostic, never truncated handler output.
-			return ToolResult{Err: safeToolError{text: message, kind: ErrToolOutputLimit}}, nil
+			return ToolResult{Err: safeToolError{text: message, kind: errors.Join(kinds...)}}, nil
 		}
 		return result, nil
 	}), nil

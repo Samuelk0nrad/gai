@@ -331,3 +331,44 @@ func TestSerialMalformedCallProcessingWaitsForEarlierCall(t *testing.T) {
 		}
 	})
 }
+
+func TestSchedulerDeduplicatesLargeSharedGuardBatch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		guard := &ToolGuard{}
+		release, _ := guard.tryAcquire()
+		defer release()
+		tool := schedulerTool(t, "test", ToolOptions{Guard: guard}, func(context.Context, ai.ToolCall) (string, error) {
+			t.Error("held guard admitted handler")
+			return "", nil
+		})
+		names := make([]string, 65535)
+		for i := range names {
+			names[i] = "test"
+		}
+		iteration, calls := schedulerCalls(names...)
+		l := &Loop{Tools: []Tool{tool}, ToolExecution: ToolExecutionConfig{MaxConcurrent: 1}}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- l.executeToolCalls(ctx, iteration, calls, l.Tools, nil, 1, 1, 0) }()
+		synctest.Wait()
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v", err)
+		}
+	})
+}
+
+func TestGuardCountRejectsTooManyDistinctWaiters(t *testing.T) {
+	guards := make([]ToolGuard, maxToolGuardWaits+1)
+	tasks := make([]scheduledTool, len(guards))
+	for i := range tasks {
+		tasks[i].options.Guard = &guards[i]
+	}
+	if err := validateToolGuardCount(tasks); !errors.Is(err, ErrToolExecutionConfig) {
+		t.Fatalf("err=%v", err)
+	}
+	if err := validateToolGuardCount(tasks[:maxToolGuardWaits]); err != nil {
+		t.Fatal(err)
+	}
+}

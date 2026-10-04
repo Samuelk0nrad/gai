@@ -45,10 +45,17 @@ type ExecutionOverrides struct {
 	Limits LimitsOverrides
 	// Tools inherits when nil; a non-nil slice replaces membership and order.
 	// A non-nil empty slice disables all tools.
-	Tools          []loop.Tool
-	ToolChoice     *ai.ToolChoice
-	ResponseFormat *ai.ResponseFormat
-	Reasoning      *ai.ReasoningConfig
+	Tools []loop.Tool
+	// ToolExecution replaces the full scheduling configuration. An explicit
+	// zero config resets concurrency and default timeout; nil inherits.
+	ToolExecution *loop.ToolExecutionConfig
+	// ToolPolicy set to nil clears the inherited authorization policy.
+	ToolPolicy Optional[loop.ToolPolicy]
+	// ToolApprovalResolver set to nil refuses approval-required calls.
+	ToolApprovalResolver Optional[loop.ToolApprovalResolver]
+	ToolChoice           *ai.ToolChoice
+	ResponseFormat       *ai.ResponseFormat
+	Reasoning            *ai.ReasoningConfig
 	// TokenCounter set to nil clears a custom counter and selects from the
 	// effective model, falling back to ai.TextTokenEstimator. It never disables
 	// counting. Counters supplied here must perform only local work.
@@ -66,6 +73,9 @@ type resolvedExecution struct {
 	model                     ai.Model
 	limits                    Limits
 	tools                     []loop.Tool
+	toolExecution             loop.ToolExecutionConfig
+	toolPolicy                loop.ToolPolicy
+	toolApprovalResolver      loop.ToolApprovalResolver
 	toolChoice                ai.ToolChoice
 	responseFormat            ai.ResponseFormat
 	reasoning                 ai.ReasoningConfig
@@ -83,7 +93,9 @@ type resolvedExecution struct {
 func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedExecution, error) {
 	r := resolvedExecution{
 		model: def.Model, limits: def.Limits, tools: def.Tools,
-		toolChoice: def.ToolChoice, responseFormat: def.ResponseFormat,
+		toolExecution: def.ToolExecution, toolPolicy: def.ToolPolicy,
+		toolApprovalResolver: def.ToolApprovalResolver,
+		toolChoice:           def.ToolChoice, responseFormat: def.ResponseFormat,
 		reasoning: def.Reasoning, counter: def.TokenCounter,
 		requestBudget: def.RequestBudget,
 		retryPolicy:   def.RetryPolicy, toolResultProcessor: def.ToolResultProcessor,
@@ -104,6 +116,15 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 		if overrides.Tools != nil {
 			r.tools = overrides.Tools
 			r.reconfigureTools = true
+		}
+		if overrides.ToolExecution != nil {
+			r.toolExecution = *overrides.ToolExecution
+		}
+		if overrides.ToolPolicy.Set {
+			r.toolPolicy = overrides.ToolPolicy.Value
+		}
+		if overrides.ToolApprovalResolver.Set {
+			r.toolApprovalResolver = overrides.ToolApprovalResolver.Value
 		}
 		if overrides.ToolChoice != nil {
 			r.toolChoice = *overrides.ToolChoice
@@ -131,6 +152,15 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 	}
 	if nilDependency(r.model) {
 		return resolvedExecution{}, loop.ErrModelNotConfigured
+	}
+	if err := r.toolExecution.Validate(); err != nil {
+		return resolvedExecution{}, fmt.Errorf("%w: %w", ErrInvalidExecutionConfig, err)
+	}
+	if r.toolPolicy != nil && nilDependency(r.toolPolicy) {
+		return resolvedExecution{}, fmt.Errorf("%w: %w: typed nil policy", ErrInvalidExecutionConfig, loop.ErrToolPolicy)
+	}
+	if r.toolApprovalResolver != nil && nilDependency(r.toolApprovalResolver) {
+		return resolvedExecution{}, fmt.Errorf("%w: %w: typed nil resolver", ErrInvalidExecutionConfig, loop.ErrToolApproval)
 	}
 	if r.limits.MaxTokens < 0 {
 		return resolvedExecution{}, fmt.Errorf("%w: MaxTokens must be non-negative", ErrInvalidExecutionConfig)
@@ -234,6 +264,7 @@ func cloneExecution(overrides *ExecutionOverrides) *ExecutionOverrides {
 		return nil
 	}
 	copy := *overrides
+	copy.ToolExecution = clonePointer(overrides.ToolExecution)
 	copy.Limits.MaxTokens = clonePointer(overrides.Limits.MaxTokens)
 	copy.Limits.MaxLoopIterations = clonePointer(overrides.Limits.MaxLoopIterations)
 	copy.Tools = cloneTools(overrides.Tools)

@@ -69,14 +69,22 @@ type Definition struct {
 	// prompt. Otherwise, the protocol is added as the first prompt context
 	// source unless its builder already contains a tool_definitions source.
 	Tools []loop.Tool
-	// ToolChoice is the default tool-use policy. The zero value uses the
-	// loop/provider default. Run overrides replace this policy atomically.
+	// ToolExecution controls concurrency and handler deadlines. Zero preserves
+	// unlimited concurrency and no tool-specific deadline.
+	ToolExecution loop.ToolExecutionConfig
+	// ToolPolicy authorizes calls before admission. Nil allows registered tools.
+	ToolPolicy loop.ToolPolicy
+	// ToolApprovalResolver resolves approvals within a live workflow. Nil refuses
+	// approval-required calls. Shared policies/resolvers must be concurrency-safe.
+	ToolApprovalResolver loop.ToolApprovalResolver
+	// ToolChoice requests model tool selection; ToolPolicy authorizes execution.
+	// The zero value uses the loop/provider default. Run overrides replace it atomically.
 	ToolChoice ai.ToolChoice
 	// ResponseFormat is the default output shape for each model generation.
 	ResponseFormat ai.ResponseFormat
 	// ToolDefinitionOptions configure the auto-prepended tool-definitions prompt
 	// source used for Tools. The resolved ToolChoice takes precedence over
-	// WithToolChoice options; use the ToolChoice field for execution policy.
+	// WithToolChoice options; use the ToolChoice field for model tool selection.
 	ToolDefinitionOptions []tooldefinitions.Option
 	// Prompt builds run-specific instructions and context.
 	Prompt Prompt
@@ -106,8 +114,9 @@ type Agent struct {
 	def Definition
 }
 
-// New snapshots the definition's mutable configuration. Models, tools,
-// counters, processors, and callbacks remain caller-owned shared dependencies.
+// New snapshots the definition's mutable configuration, including tool options.
+// Models, tool handlers/guards, counters, policies, processors, resolvers, and
+// callbacks remain caller-owned shared dependencies.
 // The effective configuration is validated by NewRun.
 func New(def Definition) *Agent {
 	return &Agent{def: cloneDefinition(def)}
@@ -280,6 +289,9 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 	l.ResponseFormat = execution.responseFormat
 	l.Reasoning = execution.reasoning
 	l.ToolChoice = execution.toolChoice
+	l.ToolExecution = execution.toolExecution
+	l.ToolPolicy = execution.toolPolicy
+	l.ToolApprovalResolver = execution.toolApprovalResolver
 	l.RetryPolicy = execution.retryPolicy
 	return l, nil
 }
@@ -289,8 +301,34 @@ func cloneTools(tools []loop.Tool) []loop.Tool {
 		return nil
 	}
 	cloned := make([]loop.Tool, len(tools))
-	copy(cloned, tools)
+	for i, tool := range tools {
+		cloned[i] = tool
+		if nilDependency(tool) {
+			continue
+		}
+		if _, frozen := tool.(*toolOptionsSnapshot); frozen {
+			continue
+		}
+		if provider, ok := tool.(loop.ToolOptionsProvider); ok {
+			options := provider.ToolOptions()
+			options.Timeout = clonePointer(options.Timeout)
+			cloned[i] = &toolOptionsSnapshot{Tool: tool, options: options}
+		}
+	}
 	return cloned
+}
+
+// Capture registration values without validating here: run overrides may
+// replace invalid defaults. Handler dependencies and shared guards keep identity.
+type toolOptionsSnapshot struct {
+	loop.Tool
+	options loop.ToolOptions
+}
+
+func (t *toolOptionsSnapshot) ToolOptions() loop.ToolOptions {
+	options := t.options
+	options.Timeout = clonePointer(options.Timeout)
+	return options
 }
 
 func toolSignatures(tools []loop.Tool) []gaictx.ToolSignature {

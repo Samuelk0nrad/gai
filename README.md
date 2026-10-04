@@ -258,6 +258,15 @@ support := agent.New(agent.Definition{
 
 The loop sends definitions to the model, executes requested calls, appends tool results to the conversation, and continues until the model commits a normal response or the iteration limit is reached.
 
+Use `ToolExecution` to set concurrency and default handler deadlines, and
+`loop.WithToolOptions` for per-tool traits, serial execution, timeouts, or a shared
+guard. `ToolPolicy` authorizes before admission; `ToolApprovalResolver` handles
+in-process approval. `ToolResultProcessor` transforms output before it reaches
+events, conversation history, and loop telemetry. These settings are available
+on both `loop.Loop` and `agent.Definition`, with per-run agent overrides. See
+[tool execution and migration](docs/tool-execution.md) for examples, defaults,
+approval semantics, and cancellation guarantees.
+
 Use `RunInput.Execution` to override an agent's defaults for one run. Omitted
 fields inherit from `Definition`.
 
@@ -556,7 +565,7 @@ span. Direct calls to `CallTool` are not instrumented.
 | `gen_ai.tool.name`, `gen_ai.tool.call.id` | Stable tool name and model-issued call ID |
 | `gen_ai.tool.type` | `function` |
 | `langfuse.observation.type` | `tool` |
-| `gai.tool.outcome` | `success`, `tool_error`, `panic`, `deadline`, or `cancellation` |
+| `gai.tool.outcome` | `success`, `tool_error`, `processing_error`, `denied`, `approval_required`, `invalid_call`, `panic`, `deadline`, or `cancellation` |
 | `error.type` | Fixed `gai.tool.*` classification on failures |
 | `tool.name`, `tool.call_id`, `tool.status` | Legacy compatibility attributes |
 

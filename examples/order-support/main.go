@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
@@ -132,10 +133,27 @@ func run(ctx context.Context) error {
 		}()
 	}
 
+	lookup, err := loop.WithToolOptions(newLookupOrderTool(), loop.ToolOptions{
+		Traits: loop.ToolTraits{Effect: loop.ToolEffectReadOnly, Idempotent: true},
+	})
+	if err != nil {
+		return fmt.Errorf("configure lookup tool: %w", err)
+	}
+	policy, err := loop.NewToolPolicy(loop.ToolPolicyRules{Allow: []string{"lookup_order"}})
+	if err != nil {
+		return err
+	}
+	outputLimit, err := loop.LimitToolResultBytes(4096)
+	if err != nil {
+		return err
+	}
 	supportAgent := agent.New(agent.Definition{
-		Name:  "order-support",
-		Model: model,
-		Tools: []loop.Tool{newLookupOrderTool()},
+		Name:                "order-support",
+		Model:               model,
+		Tools:               []loop.Tool{lookup},
+		ToolExecution:       loop.ToolExecutionConfig{MaxConcurrent: 4, DefaultTimeout: 5 * time.Second},
+		ToolPolicy:          policy,
+		ToolResultProcessor: outputLimit,
 		RequestBudget: &ai.RequestBudgetConfig{
 			Limit: 2048, OutputReserve: 500, SafetyMargin: 128,
 		},
