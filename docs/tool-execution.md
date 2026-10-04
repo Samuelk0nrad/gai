@@ -138,11 +138,14 @@ request snapshots. `ToolExecution.Decision` retains the original policy;
 `ApprovalID` and `Approval` retain the resolution. Missing resolvers emit a
 resolved refusal. Resolver errors, panics, and mismatched IDs emit a resolved
 failure with `Approval.Code=approval_failed` before ending the run. Cancellation
-records `approval_canceled`. These outcomes retain the request ID and
-`ToolNotStarted`; they do not represent a human denial. On cancellation, resolved
+of the run context records `approval_canceled`. A resolver's own timeout or
+cancellation remains `approval_failed` and terminates with an error, preserving
+its cause without marking the workflow canceled. These outcomes retain the
+request ID and `ToolNotStarted`; they do not represent a human denial. On cancellation, resolved
 event delivery is nonblocking so a stopped consumer cannot prevent termination.
-If its buffer is full, use the retained execution metadata to reconcile pending
-requests after the run ends.
+Canceled delivery is best-effort: if the buffer is full, the resolved event and
+terminal snapshot may be omitted. Consumers must reconcile any pending approvals
+when the stream closes; they cannot rely on a final event after cancellation.
 Applications must consume the event stream while resolving approvals, or use
 `Workflow.Run`, which drains it automatically. Blocking the event consumer on an
 approval event while waiting for later events from the same run can deadlock.

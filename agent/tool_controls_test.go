@@ -269,3 +269,27 @@ func TestAgentPreservesGuardAcrossConcurrentWorkflows(t *testing.T) {
 		}
 	})
 }
+
+// TestAgentResolverContextFailureDoesNotCancelWorkflow preserves the approval
+// failure cause without changing the workflow's cancellation state.
+func TestAgentResolverContextFailureDoesNotCancelWorkflow(t *testing.T) {
+	for _, cause := range []error{context.DeadlineExceeded, context.Canceled} {
+		a := agent.New(agent.Definition{Model: toolControlModel("test"), Prompt: executionPrompt,
+			Tools: []loop.Tool{controlTool(t, func(context.Context, ai.ToolCall) (string, error) {
+				t.Error("resolver failure invoked handler")
+				return "unexpected", nil
+			})}, ToolPolicy: controlDecision(loop.ToolRequireApproval),
+			ToolApprovalResolver: loop.ToolApprovalResolverFunc(func(context.Context, loop.ToolApprovalRequest) (loop.ToolApprovalDecision, error) {
+				return loop.ToolApprovalDecision{}, cause
+			}),
+		})
+		workflow, err := a.NewRun(t.Context(), agent.RunInput{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := workflow.Run(t.Context())
+		if !errors.Is(err, loop.ErrToolApproval) || !errors.Is(err, cause) || result.Canceled || result.Primary.Canceled || result.CancellationErr != nil {
+			t.Fatalf("resolver failure misclassified: canceled=%v primaryCanceled=%v err=%v", result.Canceled, result.Primary.Canceled, err)
+		}
+	}
+}
