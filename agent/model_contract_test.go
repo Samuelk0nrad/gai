@@ -164,9 +164,6 @@ func TestAutomaticCounterDoesNotConsultPreflight(t *testing.T) {
 
 type localCountHistoryStore struct{}
 
-func (localCountHistoryStore) GetLastHistoryState(context.Context, string) (*history.HistoryState, error) {
-	return &history.HistoryState{Turns: []gaictx.Turn{{ID: "turn", Count: 1, UserMessage: &gaictx.StoredMessage{Message: ai.TextMessage(ai.RoleUser, "earlier question")}}}}, nil
-}
-func (localCountHistoryStore) SaveHistoryState(context.Context, string, *history.HistoryState) error {
-	return nil
+func (localCountHistoryStore) LoadHistory(context.Context, string) (history.HistorySnapshot, error) {
+	return history.HistorySnapshot{Revision: "test", State: &history.HistoryState{Turns: []gaictx.Turn{{ID: "turn", Count: 1, UserMessage: &gaictx.StoredMessage{Message: ai.TextMessage(ai.RoleUser, "earlier question")}}}}}, nil
 }

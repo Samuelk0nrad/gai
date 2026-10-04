@@ -364,9 +364,16 @@ See [request budgets and migration](docs/request-budgets.md).
 
 ## History and summarization
 
-`context/history` provides a `ContextSource` backed by a `HistoryStore`. It loads persisted state, selects recent turns that fit the available budget, and counts candidate turns locally on demand. Calculated counts are not persisted. Builds that do not generate a new summary do not save history.
+`history.NewHistory(sessionID, reader)` supplies read-only, budgeted history selection.
+Building context never invokes a summarizer or writes history. Token counts are local
+and are not persisted.
 
-Use `history.NewHistory(sessionID, store)` for budgeted history selection. Use `history.New(sessionID, store, summarizerDefinition)` when older turns should be summarized under token pressure. The built-in `agent/summary` package can supply the summarizer agent.
+Use `history.NewCompactor(sessionID, store, history.CompactorDefinition{Model: model})`
+and call `Compact(ctx, historyBudget)` explicitly when older completed turns should
+be summarized. Stores load revisioned snapshots and commit through atomic
+compare-and-swap; conflicts are returned to the application without retrying.
+See [history persistence and migration](docs/history.md) for the store contract,
+compaction results, and session ordering.
 
 Built-in summarization uses a text projection. If the selected turns contain media,
 signed reasoning, or other opaque provider state, it returns

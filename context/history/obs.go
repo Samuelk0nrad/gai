@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"strings"
 
 	"github.com/lace-ai/gai"
 	gaictx "github.com/lace-ai/gai/context"
@@ -22,13 +23,9 @@ type historyObserver struct {
 	tokenBudget   int
 	summaryAmount float32
 
-	summaryConfigured bool
-	statePresent      bool
-	summaryIncluded   bool
-	summaryAttempted  bool
-	summaryGenerated  bool
-	budgetReached     bool
-	stateSaved        bool
+	statePresent    bool
+	summaryIncluded bool
+	budgetReached   bool
 
 	totalTokens       int
 	turnCount         int
@@ -44,30 +41,29 @@ type historyObserver struct {
 	summarySkipReason     string
 }
 
-func newHistoryBuildObserver(ctx context.Context, debug gai.ObservationSink, sessionID string, tokenBudget int, summaryConfigured bool) (context.Context, *historyObserver) {
+func newHistoryBuildObserver(ctx context.Context, debug gai.ObservationSink, sessionID string, tokenBudget int) (context.Context, *historyObserver) {
 	ctx, operation := observe.Start(ctx, debug, contextTracerName, "context.history", "context.operation", "build", "context:HistorySource",
 		attribute.String("context.source", "history"),
 		attribute.String("context.session_id", sessionID),
 		attribute.Int("context.token_budget", tokenBudget),
 	)
 	return ctx, &historyObserver{
-		op:                "build",
-		debug:             debug,
-		operation:         operation,
-		sessionID:         sessionID,
-		tokenBudget:       tokenBudget,
-		summaryConfigured: summaryConfigured,
+		op:          "build",
+		debug:       debug,
+		operation:   operation,
+		sessionID:   sessionID,
+		tokenBudget: tokenBudget,
 	}
 }
 
-func newHistorySummaryObserver(ctx context.Context, debug gai.ObservationSink, sessionID string, tokenBudget int, summaryAmount float32) (context.Context, *historyObserver) {
-	ctx, operation := observe.Start(ctx, debug, contextTracerName, "context.history", "context.operation", "summarize", "context:HistorySource",
+func newHistoryCompactionObserver(ctx context.Context, debug gai.ObservationSink, sessionID string, tokenBudget int, summaryAmount float32) (context.Context, *historyObserver) {
+	ctx, operation := observe.Start(ctx, debug, contextTracerName, "context.history", "context.operation", "compact", "context:Compactor",
 		attribute.String("context.session_id", sessionID),
 		attribute.Int("context.token_budget", tokenBudget),
 		attribute.Float64("context.history.summary_amount", float64(summaryAmount)),
 	)
 	return ctx, &historyObserver{
-		op:            "summarize",
+		op:            "compact",
 		debug:         debug,
 		operation:     operation,
 		sessionID:     sessionID,
@@ -86,17 +82,13 @@ func (o *historyObserver) Finish(err error) {
 		o.operation.Set(
 			attribute.Bool("context.history.state_present", o.statePresent),
 			attribute.Bool("context.history.summary_included", o.summaryIncluded),
-			attribute.Bool("context.history.summary_configured", o.summaryConfigured),
-			attribute.Bool("context.history.summary_attempted", o.summaryAttempted),
-			attribute.Bool("context.history.summary_generated", o.summaryGenerated),
 			attribute.Bool("context.history.budget_reached", o.budgetReached),
-			attribute.Bool("context.history.state_saved", o.stateSaved),
 			attribute.Int("context.history.total_tokens", o.totalTokens),
 			attribute.Int("context.history.turn_count", o.turnCount),
 			attribute.Int("context.history.included_turn_count", o.includedTurnCount),
 			attribute.Int("context.history.message_count", o.messageCount),
 		)
-	case "summarize":
+	case "compact":
 		attrs := []attribute.KeyValue{
 			attribute.Int("context.history.turn_count", o.summaryTotalTurnCount),
 			attribute.Bool("context.history.existing_summary", o.summaryExisting),
@@ -134,32 +126,11 @@ func (o *historyObserver) MarkStatePresent() {
 	o.statePresent = true
 }
 
-func (o *historyObserver) MarkSummaryAttempted() {
-	if o == nil {
-		return
-	}
-	o.summaryAttempted = true
-}
-
-func (o *historyObserver) MarkSummaryGenerated() {
-	if o == nil {
-		return
-	}
-	o.summaryGenerated = true
-}
-
 func (o *historyObserver) MarkBudgetReached() {
 	if o == nil {
 		return
 	}
 	o.budgetReached = true
-}
-
-func (o *historyObserver) MarkStateSaved() {
-	if o == nil {
-		return
-	}
-	o.stateSaved = true
 }
 
 func (o *historyObserver) StoreMissing(ctx context.Context) {
@@ -186,40 +157,6 @@ func (o *historyObserver) StateMissing(ctx context.Context) {
 		"session_id": o.sessionID,
 		"counter_id": o.counterID,
 	}, nil)
-}
-
-func (o *historyObserver) SummaryAttempted(ctx context.Context, turnCount int) {
-	o.MarkSummaryAttempted()
-	o.emit(ctx, "history_source_summary_attempted", map[string]any{
-		"session_id":     o.sessionID,
-		"counter_id":     o.counterID,
-		"token_budget":   o.tokenBudget,
-		"turn_count":     turnCount,
-		"summary_amount": float64(o.summaryAmount),
-	}, nil)
-}
-
-func (o *historyObserver) SummaryFailed(ctx context.Context, err error) {
-	o.emit(ctx, "history_source_summary_failed", map[string]any{
-		"session_id":   o.sessionID,
-		"counter_id":   o.counterID,
-		"token_budget": o.tokenBudget,
-	}, err)
-}
-
-func (o *historyObserver) SummarySkippedDisabled(ctx context.Context) {
-	o.emit(ctx, "history_source_summary_skipped", map[string]any{
-		"session_id": o.sessionID,
-		"counter_id": o.counterID,
-		"reason":     "disabled",
-	}, nil)
-}
-
-func (o *historyObserver) StateSaveFailed(ctx context.Context, err error) {
-	o.emit(ctx, "history_source_state_save_failed", map[string]any{
-		"session_id": o.sessionID,
-		"counter_id": o.counterID,
-	}, err)
 }
 
 func (o *historyObserver) SummaryIncluded(ctx context.Context, summary *Summary, tokens int) {
@@ -320,7 +257,6 @@ func (o *historyObserver) SummaryGenerated(ctx context.Context, summary *Summary
 	if o == nil || summary == nil {
 		return
 	}
-	o.summaryGenerated = true
 	o.summaryTotalTurnCount = summarizedTurnCount + remainingTurnCount
 	o.summaryTurnCount = summarizedTurnCount
 	o.summaryRemainingCount = remainingTurnCount
@@ -375,6 +311,9 @@ func (o *historyObserver) emit(ctx context.Context, name string, fields map[stri
 	if o == nil || o.operation == nil {
 		return
 	}
+	if o.op == "compact" {
+		name = strings.Replace(name, "history_source_", "history_compactor_", 1)
+	}
 	o.operation.Emit(ctx, name, fields, err)
 }
 
@@ -399,4 +338,13 @@ func (o *historyObserver) Selection(ctx context.Context, state *HistoryState, re
 	if result.budgetReached {
 		o.BudgetReached(ctx, result.tokens, result.budgetTurn)
 	}
+}
+
+func (o *historyObserver) CompactionConflict(ctx context.Context, conflict *RevisionConflictError) {
+	o.emit(ctx, "history_compactor_conflict", map[string]any{"session_id": conflict.SessionID}, conflict)
+}
+
+func (o *historyObserver) CompactionFinished(ctx context.Context, result CompactionResult, err error) {
+	o.operation.Set(attribute.Bool("context.history.state_saved", result.Changed), attribute.Bool("context.history.pressure_remaining", result.PressureRemaining))
+	o.emit(ctx, "history_compactor_finished", map[string]any{"session_id": o.sessionID, "changed": result.Changed, "pressure_remaining": result.PressureRemaining}, err)
 }

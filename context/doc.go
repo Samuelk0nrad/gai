@@ -31,7 +31,9 @@
 //
 // Pre-v1 cache migration: remove TokenCount fields from StoredMessage and Turn.
 // Replace Turn.Tokenize(ctx, counter, store) with Turn.Tokens(ctx, counter).
-// HistoryStore no longer requires TurnTokenStore or UpdateTurnTokens. History
+// History persistence uses revisioned snapshots and atomic compare-and-swap;
+// HistorySource is read-only and Compactor is explicit. HistoryStore has no
+// TurnTokenStore or UpdateTurnTokens hooks. History
 // parts and summaries have no count maps or mutators. Replace
 // Summary.TokenCount(counter) with Summary.Tokens(ctx, counter). Versioned
 // canonical records with old token-count fields can

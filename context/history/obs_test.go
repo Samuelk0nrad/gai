@@ -36,7 +36,7 @@ func TestHistoryBuildObserverPreservesTelemetryContract(t *testing.T) {
 	sink := gai.ObservationSinkFunc(func(_ context.Context, event gai.Observation) {
 		events = append(events, event)
 	})
-	ctx, observer := newHistoryBuildObserver(t.Context(), sink, "session", 100, false)
+	ctx, observer := newHistoryBuildObserver(t.Context(), sink, "session", 100)
 	observer.SetTokenCounterID("test-counter")
 	observer.BuildFinished(ctx, nil, 80, 3, 2, 5)
 	observer.Finish(nil)
@@ -92,7 +92,7 @@ func TestSummaryObservationsUseBuildLocalCounts(t *testing.T) {
 	t.Parallel()
 	var events []gai.Observation
 	sink := gai.ObservationSinkFunc(func(_ context.Context, event gai.Observation) { events = append(events, event) })
-	ctx, observer := newHistoryBuildObserver(t.Context(), sink, "session", 100, false)
+	ctx, observer := newHistoryBuildObserver(t.Context(), sink, "session", 100)
 	defer observer.Finish(nil)
 	observer.SetTokenCounterID("counter")
 	summary := &Summary{ID: "summary"}
