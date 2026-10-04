@@ -65,14 +65,14 @@ func TestSearchTool(t *testing.T) {
 		t.Fatalf("default params invalid: %v", err)
 	}
 
-	response := tool.Function(context.Background(), &ai.ToolCall{
+	response, callErr := tool.Function(context.Background(), ai.ToolCall{
 		ID: "call-1", Type: "function", Name: tool.Name(), Args: json.RawMessage(`{"query":" current Go release "}`),
 	})
-	if err := response.ErrorValue(); err != nil {
+	if err := callErr; err != nil {
 		t.Fatalf("Function: %v", err)
 	}
-	if !json.Valid([]byte(response.TextValue())) {
-		t.Fatalf("tool response is not JSON: %s", response.TextValue())
+	if !json.Valid([]byte(response)) {
+		t.Fatalf("tool response is not JSON: %s", response)
 	}
 	events := sink.Events()
 	if len(events) != 2 || events[0].Name != "exa_search_started" || events[1].Name != "exa_search_finished" {
@@ -129,18 +129,18 @@ func TestSearchToolReturnsAPIError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSearchTool: %v", err)
 	}
-	response := tool.Function(context.Background(), &ai.ToolCall{
+	_, callErr := tool.Function(context.Background(), ai.ToolCall{
 		ID: "call-1", Type: "function", Name: tool.Name(), Args: json.RawMessage(`{"query":"news"}`),
 	})
-	if response.ErrorValue() == nil {
+	if callErr == nil {
 		t.Fatal("expected API error")
 	}
-	if !errors.Is(response.ErrorValue(), exa.ErrAPIRequest) {
-		t.Fatalf("error = %v, want ErrAPIRequest", response.ErrorValue())
+	if !errors.Is(callErr, exa.ErrAPIRequest) {
+		t.Fatalf("error = %v, want ErrAPIRequest", callErr)
 	}
 	var apiErr *exa.APIError
-	if !errors.As(response.ErrorValue(), &apiErr) {
-		t.Fatalf("error = %T, want *exa.APIError", response.ErrorValue())
+	if !errors.As(callErr, &apiErr) {
+		t.Fatalf("error = %T, want *exa.APIError", callErr)
 	}
 	if apiErr.StatusCode != http.StatusTooManyRequests || apiErr.RequestID != "request-429" || apiErr.Message != "rate limited" {
 		t.Fatalf("unexpected API error: %#v", apiErr)
@@ -168,10 +168,10 @@ func TestSearchToolPolicyCaptureIncludesQuery(t *testing.T) {
 		t.Fatalf("NewSearchTool: %v", err)
 	}
 	ctx := gai.WithContentCapturePolicy(context.Background(), gai.ContentCapturePolicy{ToolInput: gai.CaptureEnabled})
-	response := tool.Function(ctx, &ai.ToolCall{
+	_, callErr := tool.Function(ctx, ai.ToolCall{
 		ID: "call-1", Type: "function", Name: tool.Name(), Args: json.RawMessage(`{"query":"private query"}`),
 	})
-	if err := response.ErrorValue(); err != nil {
+	if err := callErr; err != nil {
 		t.Fatalf("Function: %v", err)
 	}
 	if got := sink.Events()[0].Fields["query"]; got != "private query" {
@@ -199,10 +199,10 @@ func TestSearchToolTracing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSearchTool: %v", err)
 	}
-	response := tool.Function(context.Background(), &ai.ToolCall{
+	_, callErr := tool.Function(context.Background(), ai.ToolCall{
 		ID: "call-1", Type: "function", Name: tool.Name(), Args: json.RawMessage(`{"query":"news"}`),
 	})
-	if response.ErrorValue() == nil {
+	if callErr == nil {
 		t.Fatal("expected API error")
 	}
 

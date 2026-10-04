@@ -11,7 +11,6 @@ import (
 	"github.com/lace-ai/gai/ai"
 	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/context/tooldefinitions"
-	"github.com/lace-ai/gai/loop"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -296,8 +295,8 @@ func (t staticTool) Description() string { return t.description }
 func (t staticTool) Params() ai.ToolParameters {
 	return t.params
 }
-func (t staticTool) Function(context.Context, *ai.ToolCall) *loop.ToolResponse {
-	return &loop.ToolResponse{}
+func (t staticTool) Function(context.Context, ai.ToolCall) (string, error) {
+	return "", nil
 }
 
 func testParams(name string) ai.ToolParameters {

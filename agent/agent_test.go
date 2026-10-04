@@ -402,8 +402,8 @@ func (t namedTool) Description() string { return "test tool" }
 func (t namedTool) Params() ai.ToolParameters {
 	return ai.ToolParameters{}
 }
-func (t namedTool) Function(context.Context, *ai.ToolCall) *loop.ToolResponse {
-	return loop.NewToolSuccess("ok")
+func (t namedTool) Function(context.Context, ai.ToolCall) (string, error) {
+	return "ok", nil
 }
 
 type recordingTool struct {
@@ -416,9 +416,9 @@ func (t *recordingTool) Description() string { return "test tool" }
 func (t *recordingTool) Params() ai.ToolParameters {
 	return ai.ToolParameters{}
 }
-func (t *recordingTool) Function(context.Context, *ai.ToolCall) *loop.ToolResponse {
+func (t *recordingTool) Function(context.Context, ai.ToolCall) (string, error) {
 	t.calls++
-	return loop.NewToolSuccess("called")
+	return "called", nil
 }
 
 func toolSignatures(tools []loop.Tool) []gaictx.ToolSignature {

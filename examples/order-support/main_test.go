@@ -11,18 +11,18 @@ import (
 func TestLookupOrderToolReturnsKnownOrder(t *testing.T) {
 	t.Parallel()
 
-	response := newLookupOrderTool().Function(context.Background(), &ai.ToolCall{
+	response, callErr := newLookupOrderTool().Function(context.Background(), ai.ToolCall{
 		ID:   "call_test",
 		Type: "function",
 		Name: "lookup_order",
 		Args: json.RawMessage(`{"order_id":"lace-1042"}`),
 	})
-	if err := response.ErrorValue(); err != nil {
+	if err := callErr; err != nil {
 		t.Fatalf("lookup order: %v", err)
 	}
 
 	var result orderLookupResult
-	if err := json.Unmarshal([]byte(response.TextValue()), &result); err != nil {
+	if err := json.Unmarshal([]byte(response), &result); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
 	if !result.Found {
@@ -39,18 +39,18 @@ func TestLookupOrderToolReturnsKnownOrder(t *testing.T) {
 func TestLookupOrderToolReturnsStructuredMiss(t *testing.T) {
 	t.Parallel()
 
-	response := newLookupOrderTool().Function(context.Background(), &ai.ToolCall{
+	response, callErr := newLookupOrderTool().Function(context.Background(), ai.ToolCall{
 		ID:   "call_test",
 		Type: "function",
 		Name: "lookup_order",
 		Args: json.RawMessage(`{"order_id":"lace-9999"}`),
 	})
-	if err := response.ErrorValue(); err != nil {
+	if err := callErr; err != nil {
 		t.Fatalf("lookup order: %v", err)
 	}
 
 	var result orderLookupResult
-	if err := json.Unmarshal([]byte(response.TextValue()), &result); err != nil {
+	if err := json.Unmarshal([]byte(response), &result); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
 	if result.Found {

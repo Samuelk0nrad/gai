@@ -99,8 +99,8 @@ type Event struct {
 
 	Iteration *loop.Iteration
 
-	ToolCall     *ai.ToolCall
-	ToolResponse *loop.ToolResponse
+	ToolCall   *ai.ToolCall
+	ToolResult *loop.ToolResult
 
 	RetryReason string
 	RetryDelay  time.Duration
@@ -143,6 +143,6 @@ func cloneEvent(event Event) Event {
 		cloned.Iteration = &iteration
 	}
 	cloned.ToolCall = cloneToolCall(event.ToolCall)
-	cloned.ToolResponse = cloneToolResponse(event.ToolResponse)
+	cloned.ToolResult = cloneToolResult(event.ToolResult)
 	return cloned
 }

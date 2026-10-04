@@ -18,38 +18,14 @@ type namedTestTool struct {
 func (t namedTestTool) Name() string            { return t.name }
 func (namedTestTool) Description() string       { return "A test tool." }
 func (namedTestTool) Params() ai.ToolParameters { return loop.NewEchoTool().Params() }
-func (namedTestTool) Function(context.Context, *ai.ToolCall) *loop.ToolResponse {
-	return loop.NewToolSuccess("ok")
-}
-
-func TestNewToolErrorHandlesNilError(t *testing.T) {
-	t.Parallel()
-
-	response := loop.NewToolError(nil)
-
-	if err := response.ErrorValue(); !errors.Is(err, loop.ErrToolErrorMissing) {
-		t.Fatalf("error = %v, want ErrToolErrorMissing", err)
-	}
-	if got := response.String(); got != loop.ErrToolErrorMissing.Error() {
-		t.Fatalf("String() = %q, want %q", got, loop.ErrToolErrorMissing.Error())
-	}
-}
-
-func TestToolResponseStringHandlesNilErrorPointer(t *testing.T) {
-	t.Parallel()
-
-	var err error
-	response := &loop.ToolResponse{Status: "error", Err: &err}
-
-	if got := response.String(); got != "" {
-		t.Fatalf("String() = %q, want empty string", got)
-	}
+func (namedTestTool) Function(context.Context, ai.ToolCall) (string, error) {
+	return "ok", nil
 }
 
 func TestCallToolRejectsNilTool(t *testing.T) {
 	t.Parallel()
 
-	req := &ai.ToolCall{
+	req := ai.ToolCall{
 		ID:   "call_1",
 		Type: "function",
 		Name: "test_tool",
@@ -58,7 +34,7 @@ func TestCallToolRejectsNilTool(t *testing.T) {
 
 	response := loop.CallTool(context.Background(), req, []loop.Tool{nil})
 
-	if err := response.ErrorValue(); !errors.Is(err, ai.ErrInvalidToolDefinition) {
+	if err := response.Err; !errors.Is(err, ai.ErrInvalidToolDefinition) {
 		t.Fatalf("error = %v, want ErrInvalidToolDefinition", err)
 	}
 }
@@ -126,7 +102,7 @@ func TestDecodeToolArgs(t *testing.T) {
 
 			tReq := req
 			tReq.Args = tt.input
-			err := loop.DecodeToolArgs(&tReq, &gotArgs)
+			err := loop.DecodeToolArgs(tReq, &gotArgs)
 
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("DecodeToolArgs() error = %v, wantErr %v", err, tt.wantErr)

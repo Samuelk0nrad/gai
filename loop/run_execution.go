@@ -381,7 +381,7 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		attempt.terminateCanceled(err)
 		return iterationTerminal
 	}
-	attempt.state.recordToolResponses(attempt.iteration)
+	attempt.state.recordToolResults(attempt.iteration)
 
 	attemptID := attempt.state.attemptID()
 	retryCount := r.state.retryCount

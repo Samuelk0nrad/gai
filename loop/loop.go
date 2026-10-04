@@ -28,12 +28,22 @@ const (
 	ToolTransportText
 )
 
-// ToolResponseProcessor can inspect or modify a tool response before the loop
-// records it and builds the next prompt. Implementations must be safe for
-// concurrent use.
-type ToolResponseProcessor interface {
-	// Process handles the response produced for req.
-	Process(req ai.ToolCall, res *ToolResponse) error
+// ToolResultProcessor transforms a result before it enters the conversation.
+// Returning an error terminates the run. To reject output without terminating,
+// return a ToolResult containing a safe Err and a nil processing error.
+// Implementations are shared dependencies and must be concurrency-safe.
+type ToolResultProcessor interface {
+	Process(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error)
+}
+
+// ToolResultProcessorFunc adapts a function to ToolResultProcessor.
+type ToolResultProcessorFunc func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error)
+
+func (f ToolResultProcessorFunc) Process(ctx context.Context, input ToolPolicyInput, result ToolResult) (ToolResult, error) {
+	if f == nil {
+		return ToolResult{}, fmt.Errorf("%w: processor function is nil", ErrToolResultProcess)
+	}
+	return f(ctx, input, result)
 }
 
 // Loop coordinates prompt construction, model generation, and tool execution.
@@ -73,8 +83,8 @@ type Loop struct {
 	RetryPolicy *RetryPolicy
 	// PromptBuilder constructs the prompt for each iteration.
 	PromptBuilder gaictx.PromptBuilder
-	// ToolResponseProcessor optionally processes tool responses after they are recorded on the iteration and before it is persisted.
-	ToolResponseProcessor ToolResponseProcessor
+	// ToolResultProcessor optionally processes tool responses before they are recorded, emitted, or captured by loop telemetry.
+	ToolResultProcessor ToolResultProcessor
 }
 
 // Validate applies default iteration limits and checks required loop dependencies.
@@ -98,6 +108,9 @@ func (l *Loop) Validate() error {
 	}
 	if l.MaxTokens < 0 {
 		return fmt.Errorf("%w: negative output limit", ai.ErrInvalidRequestBudget)
+	}
+	if l.ToolResultProcessor != nil && nilImplementation(l.ToolResultProcessor) {
+		return fmt.Errorf("%w: processor is a typed nil", ErrToolResultProcess)
 	}
 	if l.RetryPolicy != nil {
 		if err := l.RetryPolicy.Validate(); err != nil {
@@ -152,13 +165,13 @@ func EffectiveTools(tools []Tool, choice ai.ToolChoice, transport ToolTransportM
 }
 
 // New constructs a Loop with the default iteration limit.
-func New(model ai.Model, tools []Tool, promptBuilder gaictx.PromptBuilder, toolResponseProcessor ToolResponseProcessor) *Loop {
+func New(model ai.Model, tools []Tool, promptBuilder gaictx.PromptBuilder, toolResultProcessor ToolResultProcessor) *Loop {
 	l := &Loop{
-		Model:                 model,
-		Tools:                 tools,
-		MaxLoopIterations:     defaultMaxLoopIterations,
-		PromptBuilder:         promptBuilder,
-		ToolResponseProcessor: toolResponseProcessor,
+		Model:               model,
+		Tools:               tools,
+		MaxLoopIterations:   defaultMaxLoopIterations,
+		PromptBuilder:       promptBuilder,
+		ToolResultProcessor: toolResultProcessor,
 	}
 	return l
 }
@@ -274,7 +287,7 @@ func toolsNamed(tools []Tool, names []string) []Tool {
 }
 
 // executeToolCalls records tool responses on iteration. Tool execution
-// failures are stored in ToolResponse.Err and are not returned. Only framework
+// failures are stored in ToolResult.Err and are not returned. Only framework
 // or tool-response processing failures are returned.
 func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, toolCalls []pendingToolCall, tools []Tool, events chan<- Event, iterationCount, attemptID, retryCount int) error {
 	var wg sync.WaitGroup
@@ -293,28 +306,25 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, toolC
 		go func(tc pendingToolCall) {
 			defer wg.Done()
 
-			toolRes, duration := callObservedTool(ctx, tc.call, tools, l.ObservationSink)
-			iteration.Parts[tc.partIndex].ToolResp = toolRes
-			if l.ToolResponseProcessor != nil {
-				if err := l.ToolResponseProcessor.Process(tc.call, toolRes); err != nil {
-					processErr := fmt.Errorf("%w: %w", ErrToolResponseProcess, err)
-					toolErrMu.Lock()
-					if toolErr == nil {
-						toolErr = processErr
-					}
-					toolErrMu.Unlock()
-					if events != nil {
-						if err := sendEvent(ctx, events, ToolErrorEvent(iterationCount, attemptID, retryCount, tc.call, toolRes, duration, processErr)); err != nil {
-							toolErrMu.Lock()
-							if toolErr == nil {
-								toolErr = err
-							}
-							toolErrMu.Unlock()
-						}
-					}
-					return
+			toolRes, duration, processErr := processObservedTool(ctx, ToolPolicyInput{Call: tc.call}, tools, l.ToolResultProcessor, l.ObservationSink)
+			if processErr != nil {
+				toolErrMu.Lock()
+				if toolErr == nil {
+					toolErr = processErr
 				}
+				toolErrMu.Unlock()
+				if events != nil {
+					if err := sendEvent(ctx, events, ToolErrorEvent(iterationCount, attemptID, retryCount, tc.call, nil, duration, processErr)); err != nil {
+						toolErrMu.Lock()
+						if toolErr == nil {
+							toolErr = err
+						}
+						toolErrMu.Unlock()
+					}
+				}
+				return
 			}
+			iteration.Parts[tc.partIndex].ToolResp = toolRes
 			if events != nil {
 				if err := sendEvent(ctx, events, ToolResultEvent(iterationCount, attemptID, retryCount, tc.call, toolRes, duration)); err != nil {
 					toolErrMu.Lock()
@@ -333,8 +343,8 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, toolC
 			if response == nil {
 				continue
 			}
-			result := ai.ToolResult{ToolCallID: tc.call.ID, Name: tc.call.Name, Parts: ai.TextParts(response.TextValue())}
-			if err := response.ErrorValue(); err != nil {
+			result := ai.ToolResult{ToolCallID: tc.call.ID, Name: tc.call.Name, Parts: ai.TextParts(response.Text)}
+			if err := response.Err; err != nil {
 				result.IsError = true
 				result.Parts = ai.TextParts(err.Error())
 			}

@@ -16,10 +16,10 @@ func TestWorkflowOutputAccumulatorDoesNotRetainLargeExecutionEvents(t *testing.T
 		Iteration: &loop.Iteration{Parts: []loop.IterationPart{{
 			Response: &ai.AIResponse{Raw: payload},
 			ToolReq:  &ai.ToolCall{Args: payload},
-			ToolResp: loop.NewToolSuccess(response),
+			ToolResp: &loop.ToolResult{Text: response},
 		}}},
-		ToolCall:     &ai.ToolCall{Args: payload},
-		ToolResponse: loop.NewToolSuccess(response),
+		ToolCall:   &ai.ToolCall{Args: payload},
+		ToolResult: &loop.ToolResult{Text: response},
 	}
 
 	var retained int
