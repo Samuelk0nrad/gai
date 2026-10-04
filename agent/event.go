@@ -15,6 +15,11 @@ type EventType string
 const EventToolDecision EventType = "tool_decision"
 
 const (
+	EventToolApprovalRequested EventType = "tool_approval_requested"
+	EventToolApprovalResolved  EventType = "tool_approval_resolved"
+)
+
+const (
 	// EventOutput contributes to externally visible workflow output. Every
 	// EventOutput is visible regardless of its source index.
 	EventOutput EventType = "output"
@@ -91,6 +96,7 @@ const (
 // stream. Fields are meaningful according to Type.
 type Event struct {
 	ToolExecution *loop.ToolExecution
+	ToolApproval  *loop.ToolApprovalRequest
 	Type          EventType
 	Source        EventSource
 
@@ -138,6 +144,10 @@ func cloneOutputParts(parts []OutputPart) []OutputPart {
 
 func cloneEvent(event Event) Event {
 	cloned := event
+	if event.ToolApproval != nil {
+		request := event.ToolApproval.Clone()
+		cloned.ToolApproval = &request
+	}
 	if event.ToolExecution != nil {
 		execution := *event.ToolExecution
 		cloned.ToolExecution = &execution
