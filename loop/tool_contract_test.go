@@ -13,6 +13,8 @@ import (
 	"github.com/lace-ai/gai/internal/obstest"
 )
 
+// TestTextToolContract protects empty successful output, error precedence over text, and wrapped
+// error identity in the text-handler contract.
 func TestTextToolContract(t *testing.T) {
 	sentinel := errors.New("unavailable")
 	for _, tc := range []struct {
@@ -42,6 +44,8 @@ func TestTextToolContract(t *testing.T) {
 	}
 }
 
+// TestToolCallbacksOwnCallSnapshots mutates handler and processor inputs to verify that neither
+// callback can alter retained call arguments or extensions.
 func TestToolCallbacksOwnCallSnapshots(t *testing.T) {
 	call := ai.ToolCall{ID: "1", Type: "function", Name: "test", Args: json.RawMessage(`{"x":1}`), Extensions: []ai.Extension{{Namespace: "test", Type: "state", Data: json.RawMessage(`"state"`)}}}
 	original := call.Clone()
@@ -70,6 +74,8 @@ func TestToolCallbacksOwnCallSnapshots(t *testing.T) {
 	}
 }
 
+// TestFunctionToolValidatesAndCopiesDeclaration rejects nil handlers, typed-nil tools, and
+// malformed calls while preventing aliases to the parameter declaration.
 func TestFunctionToolValidatesAndCopiesDeclaration(t *testing.T) {
 	if _, err := NewTool("test", "test", ai.ToolParameters{}, nil); !errors.Is(err, ai.ErrInvalidToolDefinition) {
 		t.Fatalf("nil function: %v", err)
@@ -99,6 +105,8 @@ func TestFunctionToolValidatesAndCopiesDeclaration(t *testing.T) {
 	}
 }
 
+// TestResultProcessingPrecedesPublication ensures raw successful and failed outputs cannot
+// escape through events, retained results, or traces before processing succeeds.
 func TestResultProcessingPrecedesPublication(t *testing.T) {
 	for _, toolError := range []bool{false, true} {
 		for _, reject := range []bool{false, true} {
@@ -148,6 +156,8 @@ func TestResultProcessingPrecedesPublication(t *testing.T) {
 	}
 }
 
+// TestFunctionToolPreservesSchemaNumbers protects large integer enum and default values from
+// precision loss when tool parameters are copied.
 func TestFunctionToolPreservesSchemaNumbers(t *testing.T) {
 	params := ai.ToolParameters{Properties: []ai.ToolParameter{{Name: "number", Type: ai.ToolParameterInteger, Enum: []any{int64(9007199254740993), json.Number("9007199254740995")}, Default: int64(9007199254740993)}}}
 	original, err := params.JSONSchema()

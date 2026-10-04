@@ -8,6 +8,8 @@ import (
 	"github.com/lace-ai/gai/loop"
 )
 
+// TestCloneWorkflowResultOwnsMutableExecutionData mutates a cloned workflow result to detect
+// shared prompt slices, messages, call arguments, and tool results.
 func TestCloneWorkflowResultOwnsMutableExecutionData(t *testing.T) {
 	call := &ai.ToolCall{Name: "lookup", Args: []byte(`{"query":"original"}`)}
 	result := WorkflowResult{
