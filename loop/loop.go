@@ -342,6 +342,11 @@ func cancellationError(ctx context.Context, err error) error {
 	if ctx != nil && ctx.Err() != nil {
 		return ctx.Err()
 	}
+	// A live run can receive an approval resolver's private context error.
+	// Preserve that failure and its cause without marking the run canceled.
+	if errors.Is(err, ErrToolApproval) {
+		return nil
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
