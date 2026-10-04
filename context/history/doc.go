@@ -22,7 +22,7 @@
 // Use errors.As to detect wrapped conflicts. All writers must participate in the
 // same revision scheme. A load-then-unconditional-save adapter is not CAS. Store
 // revisions belong to HistorySnapshot, never canonical messages or SchemaVersion.
-// Missing history has an empty revision; initialized history has a nonempty one.
+// Never-created history has an empty revision; initialized history has a nonempty one.
 // Stores with deletion retain tombstone/generation identity to avoid revision reuse.
 //
 // CAS prevents lost updates but does not make concurrent answers causally ordered.
