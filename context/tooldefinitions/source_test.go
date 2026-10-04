@@ -295,6 +295,8 @@ func (t staticTool) Description() string { return t.description }
 func (t staticTool) Params() ai.ToolParameters {
 	return t.params
 }
+// Function supplies an empty successful handler for fixtures that exercise tool-definition
+// rendering.
 func (t staticTool) Function(context.Context, ai.ToolCall) (string, error) {
 	return "", nil
 }

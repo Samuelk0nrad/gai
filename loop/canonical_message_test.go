@@ -53,6 +53,8 @@ type canonicalParallelTool struct {
 func (*canonicalParallelTool) Name() string              { return "echo" }
 func (*canonicalParallelTool) Description() string       { return "Returns identified test results." }
 func (*canonicalParallelTool) Params() ai.ToolParameters { return loop.NewEchoTool().Params() }
+// Function forces the second call to fail before the first succeeds, making completion order
+// differ from model order.
 func (tool *canonicalParallelTool) Function(ctx context.Context, call ai.ToolCall) (string, error) {
 	tool.calls.Add(1)
 	select {
@@ -118,6 +120,9 @@ func mutateCanonicalParts(parts []ai.ContentPart) {
 	}
 }
 
+// TestLoopCanonicalMixedPartsSurviveRetryParallelToolsAndEventMutation protects canonical
+// message order and ownership across generation retries, parallel tool completion, and
+// event-consumer mutation.
 func TestLoopCanonicalMixedPartsSurviveRetryParallelToolsAndEventMutation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()

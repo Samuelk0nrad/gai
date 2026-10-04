@@ -45,6 +45,8 @@ func TestLoopRunSpanUsesRetryPolicyLimit(t *testing.T) {
 	}
 }
 
+// TestToolObservationEmitsOutcomeToSink checks that finished observations identify the tool call
+// and report its successful outcome.
 func TestToolObservationEmitsOutcomeToSink(t *testing.T) {
 	var emitted gai.Observation
 	sink := gai.ObservationSinkFunc(func(_ context.Context, observation gai.Observation) {
@@ -64,6 +66,8 @@ func TestToolObservationEmitsOutcomeToSink(t *testing.T) {
 	}
 }
 
+// TestExecuteToolCallsDurationExcludesSinkEmissionLatency keeps handler duration independent of
+// a slow observation sink and consistent between events and telemetry.
 func TestExecuteToolCallsDurationExcludesSinkEmissionLatency(t *testing.T) {
 	sinkEntered := make(chan struct{})
 	releaseSink := make(chan struct{})
@@ -111,10 +115,13 @@ func TestExecuteToolCallsDurationExcludesSinkEmissionLatency(t *testing.T) {
 func (t observedTestTool) Name() string              { return t.name }
 func (t observedTestTool) Description() string       { return "Test tool." }
 func (t observedTestTool) Params() ai.ToolParameters { return NewEchoTool().Params() }
+// Function delegates to a supplied callback so observation tests control each handler outcome.
 func (t observedTestTool) Function(ctx context.Context, call ai.ToolCall) (string, error) {
 	return t.call(ctx, call)
 }
 
+// TestToolObservationOutcomes checks safe telemetry classifications for success, empty output,
+// tool errors, deadlines, and cancellation.
 func TestToolObservationOutcomes(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -179,6 +186,8 @@ func TestToolObservationOutcomes(t *testing.T) {
 	}
 }
 
+// TestObservedToolPanicFinalizesAndRepanics ensures a panic closes its tool span with safe
+// metadata before propagating the original panic value.
 func TestObservedToolPanicFinalizesAndRepanics(t *testing.T) {
 	recorder := obstest.Install(t)
 	panicValue := errors.New("panic-sentinel-secret")
@@ -214,6 +223,8 @@ func TestObservedToolPanicFinalizesAndRepanics(t *testing.T) {
 	}
 }
 
+// TestToolObservationUsesPolicyGatedContentAliases verifies that opted-in, redacted content is
+// consistent across tool, GenAI, and Langfuse attributes.
 func TestToolObservationUsesPolicyGatedContentAliases(t *testing.T) {
 	recorder := obstest.Install(t)
 	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{
@@ -249,6 +260,8 @@ func TestToolObservationUsesPolicyGatedContentAliases(t *testing.T) {
 	}
 }
 
+// TestToolObservationCapturesInvalidJSONAndTruncatesLargeValues retains malformed input for
+// opted-in diagnostics while bounding captured content and recording truncation.
 func TestToolObservationCapturesInvalidJSONAndTruncatesLargeValues(t *testing.T) {
 	t.Run("invalid JSON", func(t *testing.T) {
 		recorder := obstest.Install(t)
@@ -289,6 +302,8 @@ func TestToolObservationCapturesInvalidJSONAndTruncatesLargeValues(t *testing.T)
 	})
 }
 
+// TestToolObservationOmitsContentByDefault ensures default tracing exports no tool arguments or
+// results through any supported content alias.
 func TestToolObservationOmitsContentByDefault(t *testing.T) {
 	recorder := obstest.Install(t)
 	call := ai.ToolCall{ID: "call-private", Type: "function", Name: "content", Args: json.RawMessage(`{"secret":"input"}`)}
@@ -308,6 +323,8 @@ func TestToolObservationOmitsContentByDefault(t *testing.T) {
 	}
 }
 
+// TestToolObservationFinishesOnce ensures the first finalization fixes the span outcome despite
+// later error or panic completion attempts.
 func TestToolObservationFinishesOnce(t *testing.T) {
 	recorder := obstest.Install(t)
 	_, observation := startToolSpan(t.Context(), ai.ToolCall{ID: "call-once", Name: "once"})
@@ -321,6 +338,8 @@ func TestToolObservationFinishesOnce(t *testing.T) {
 	}
 }
 
+// TestExecuteToolCallsCreatesConcurrentChildSpans verifies overlapping handlers and sink
+// callbacks produce one correctly parented span per invocation.
 func TestExecuteToolCallsCreatesConcurrentChildSpans(t *testing.T) {
 	recorder := obstest.Install(t)
 	entered := make(chan string, 2)
@@ -400,6 +419,8 @@ func TestExecuteToolCallsCreatesConcurrentChildSpans(t *testing.T) {
 	}
 }
 
+// TestExecuteToolCallsEmitsToolEvents checks start-before-result ordering and preservation of
+// call, iteration, attempt, and retry identifiers.
 func TestExecuteToolCallsEmitsToolEvents(t *testing.T) {
 	tool := observedTestTool{name: "event", call: func(context.Context, ai.ToolCall) (string, error) {
 		return "ok", nil
@@ -434,6 +455,8 @@ func TestExecuteToolCallsEmitsToolEvents(t *testing.T) {
 	}
 }
 
+// TestExecuteToolCallsEmitsToolErrorWhenResponseProcessingFails preserves the processor error
+// cause and emits a tool-error event when result processing fails.
 func TestExecuteToolCallsEmitsToolErrorWhenResponseProcessingFails(t *testing.T) {
 	processorErr := errors.New("reject tool response")
 	tool := observedTestTool{name: "event", call: func(context.Context, ai.ToolCall) (string, error) {
@@ -473,6 +496,8 @@ func TestExecuteToolCallsEmitsToolErrorWhenResponseProcessingFails(t *testing.T)
 	}
 }
 
+// TestExecuteToolCallsReturnsCanceledWhenToolResultEventCannotBeSent ensures cancellation
+// releases execution when no consumer can receive the result event.
 func TestExecuteToolCallsReturnsCanceledWhenToolResultEventCannotBeSent(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)

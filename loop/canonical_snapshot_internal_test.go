@@ -12,6 +12,8 @@ import (
 	"github.com/lace-ai/gai/ai"
 )
 
+// TestCanonicalCanceledToolStartWaitsForAlreadyRunningTool ensures canceling a blocked start
+// event joins active work before exposing an independent terminal snapshot.
 func TestCanonicalCanceledToolStartWaitsForAlreadyRunningTool(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())

@@ -40,6 +40,8 @@ type gatedWorkflowTool struct {
 	release <-chan struct{}
 }
 
+// Function blocks tool completion until released while allowing workflow cancellation to
+// interrupt the wait.
 func (t gatedWorkflowTool) Function(ctx context.Context, call ai.ToolCall) (string, error) {
 	select {
 	case <-t.release:
