@@ -142,6 +142,7 @@ func cloneOutputParts(parts []OutputPart) []OutputPart {
 	return cloned
 }
 
+// cloneEvent isolates mutable event payloads while sharing immutable errors.
 func cloneEvent(event Event) Event {
 	cloned := event
 	if event.ToolApproval != nil {

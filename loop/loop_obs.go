@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// retryReason maps generation errors to stable retry classifications.
 func retryReason(err error) string {
 	if errors.Is(err, ErrAttemptTimeout) {
 		return "attempt_timeout"
@@ -215,6 +216,7 @@ func (s *loopIterationState) recordToken(token ai.Token) {
 	}
 }
 
+// recordToolResults counts processed tool failures for iteration telemetry.
 func (s *loopIterationState) recordToolResults(iteration Iteration) {
 	if s == nil {
 		return
@@ -341,11 +343,13 @@ func startToolSpan(ctx context.Context, call ai.ToolCall, sinks ...gai.Observati
 	return ctx, &toolObservation{ctx: ctx, span: span, sink: sink, call: call}
 }
 
+// callObservedTool instruments a direct invocation without a result processor.
 func callObservedTool(ctx context.Context, call ai.ToolCall, tools []Tool, sinks ...gai.ObservationSink) (*ToolResult, time.Duration) {
 	result, duration, _ := processObservedTool(ctx, ToolPolicyInput{Call: call}, tools, nil, sinks...)
 	return result, duration
 }
 
+// processObservedTool filters results before observation or caller publication.
 func processObservedTool(ctx context.Context, input ToolPolicyInput, tools []Tool, processor ToolResultProcessor, sinks ...gai.ObservationSink) (*ToolResult, time.Duration, error) {
 	return processObservedToolDeadline(ctx, input, tools, processor, 0, sinks...)
 }
@@ -368,7 +372,7 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 			panic(panicValue)
 		}
 		if processErr != nil {
-			observation.finishProcessingError(processErr, duration)
+			observation.finishProcessingError(duration)
 		} else {
 			observation.finish(response, duration)
 		}
@@ -384,12 +388,6 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 	execution.State = ToolNotStarted
 	if invoked {
 		execution.State = invocationState(result.Err)
-	}
-	if timeout > 0 && errors.Is(invokeCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-		result = ToolResult{Err: context.DeadlineExceeded}
-		if invoked {
-			execution.State = ToolTimedOut
-		}
 	}
 	cancel()
 	duration = time.Since(started)
@@ -408,6 +406,7 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 	return &result, duration, nil
 }
 
+// finish captures only processed output and closes the observation once.
 func (o *toolObservation) finish(response *ToolResult, duration time.Duration) {
 	if o == nil {
 		return
@@ -427,6 +426,7 @@ func (o *toolObservation) finish(response *ToolResult, duration time.Duration) {
 	})
 }
 
+// finishPanic records a safe classification without the panic payload.
 func (o *toolObservation) finishPanic(duration time.Duration) {
 	if o == nil {
 		return
@@ -436,20 +436,12 @@ func (o *toolObservation) finishPanic(duration time.Duration) {
 	})
 }
 
-func toolProcessingOutcome(err error) (string, error) {
-	if errors.Is(err, ErrToolPanic) {
-		return toolOutcomePanic, errObservedToolPanic
-	}
-	return toolOutcomeProcessing, errObservedToolProcessing
+// finishProcessingError records a processing failure without capturing raw output.
+func (o *toolObservation) finishProcessingError(duration time.Duration) {
+	o.finishOnce.Do(func() { o.setOutcome(toolOutcomeProcessing, errObservedToolProcessing, duration) })
 }
 
-func (o *toolObservation) finishProcessingError(err error, duration time.Duration) {
-	o.finishOnce.Do(func() {
-		outcome, safeErr := toolProcessingOutcome(err)
-		o.setOutcome(outcome, safeErr, duration)
-	})
-}
-
+// setOutcome emits fixed error classifications and closes the tool span.
 func (o *toolObservation) setOutcome(outcome string, spanErr error, duration time.Duration) {
 	status := "success"
 	attrs := []attribute.KeyValue{attribute.String("gai.tool.outcome", outcome)}
@@ -488,6 +480,7 @@ func toolObservationFields(call ai.ToolCall, execution *ToolExecution, outcome, 
 	return fields
 }
 
+// toolResult separates model-facing output from safe telemetry errors.
 func toolResult(response *ToolResult) (outcome string, output string, spanErr error) {
 	if response == nil {
 		return toolOutcomeError, "", errObservedToolExecution

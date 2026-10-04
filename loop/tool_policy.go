@@ -24,6 +24,7 @@ type ToolDecision struct {
 	Reason string
 }
 
+// Validate rejects unspecified or unknown authorization actions.
 func (d ToolDecision) Validate() error {
 	switch d.Action {
 	case ToolAllow, ToolDeny, ToolRequireApproval:
@@ -37,8 +38,11 @@ func (d ToolDecision) Validate() error {
 type ToolPolicy interface {
 	BeforeTool(context.Context, ToolPolicyInput) (ToolDecision, error)
 }
+
+// ToolPolicyFunc adapts a concurrency-safe authorization callback.
 type ToolPolicyFunc func(context.Context, ToolPolicyInput) (ToolDecision, error)
 
+// BeforeTool invokes the policy callback, rejecting a nil function.
 func (f ToolPolicyFunc) BeforeTool(ctx context.Context, input ToolPolicyInput) (ToolDecision, error) {
 	if f == nil {
 		return ToolDecision{}, fmt.Errorf("%w: nil policy function", ErrToolPolicy)

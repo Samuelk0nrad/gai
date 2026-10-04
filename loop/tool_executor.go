@@ -30,10 +30,11 @@ type toolCompletion struct {
 // reflect.Select accepts at most 65,536 cases; reserve two for completion/context.
 const maxToolGuardWaits = 65534
 
+// validateToolGuardCount rejects batches beyond the runtime select-case limit before dispatch.
 func validateToolGuardCount(tasks []scheduledTool) error {
 	guards := make(map[*ToolGuard]struct{})
 	for _, task := range tasks {
-		if task.options.Guard != nil {
+		if task.result == nil && task.options.Guard != nil {
 			guards[task.options.Guard] = struct{}{}
 		}
 	}
@@ -43,6 +44,7 @@ func validateToolGuardCount(tasks []scheduledTool) error {
 	return nil
 }
 
+// prepareToolCalls copies requests and snapshots registration settings.
 func prepareToolCalls(calls []pendingToolCall, tools []Tool) ([]scheduledTool, error) {
 	registry := make(map[string]Tool, len(tools))
 	options := make(map[string]ToolOptions, len(tools))
@@ -89,9 +91,6 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 	if err != nil {
 		return err
 	}
-	if err := validateToolGuardCount(tasks); err != nil {
-		return err
-	}
 	preflightErr := l.preflightToolPolicies(ctx, tasks, events, iterationCount, attemptID, retryCount)
 	if preflightErr == nil {
 		preflightErr = l.preflightToolApprovals(ctx, tasks, events, iterationCount, attemptID, retryCount)
@@ -101,6 +100,9 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 	}
 	if preflightErr != nil {
 		return preflightErr
+	}
+	if err := validateToolGuardCount(tasks); err != nil {
+		return err
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -127,14 +129,21 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 		iteration.Parts[task.pending.partIndex].ToolResp = done.result
 		iteration.Parts[task.pending.partIndex].ToolExecution = cloneToolExecution(&done.execution)
 		if task.result != nil {
-			outcome, _, observationErr := toolResult(task.result)
+			outcome, _, safeErr := toolResult(done.result)
 			if done.err != nil {
-				outcome, observationErr = toolProcessingOutcome(done.err)
+				outcome, safeErr = toolOutcomeProcessing, errObservedToolProcessing
+				if done.err == ErrToolPanic {
+					outcome, safeErr = toolOutcomePanic, errObservedToolPanic
+				}
 			}
+			status := "success"
+			if safeErr != nil {
+				status = "error"
+			}
+			fields := toolObservationFields(task.pending.call, &done.execution, outcome, status, 0)
+			fields["invoked"] = false
 			gai.EmitObservation(ctx, l.ObservationSink, gai.Observation{
-				Name: "loop_tool_finished", Source: "loop:Tool",
-				Fields: toolObservationFields(task.pending.call, &done.execution, outcome, "error", done.duration),
-				Err:    observationErr,
+				Name: "loop_tool_finished", Source: "loop:Tool", Err: safeErr, Fields: fields,
 			})
 		}
 		if events != nil && firstErr == nil {
@@ -169,11 +178,17 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 					position++
 					continue
 				}
-				release, changed := task.options.Guard.tryAcquire()
+				// Synthetic refusals do not use the handler's shared resource.
+				// Keep local Serial/capacity rules for their result processors.
+				guard := task.options.Guard
+				if task.result != nil {
+					guard = nil
+				}
+				release, changed := guard.tryAcquire()
 				if release == nil {
-					if !waitingGuards[task.options.Guard] {
+					if !waitingGuards[guard] {
 						guards = append(guards, changed)
-						waitingGuards[task.options.Guard] = true
+						waitingGuards[guard] = true
 					}
 					if task.options.Serial {
 						blockedNames[name] = true
@@ -268,6 +283,7 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 	return nil
 }
 
+// processUninvoked filters synthetic errors without invoking a handler.
 func (l *Loop) processUninvoked(ctx context.Context, task scheduledTool) (response *ToolResult, processErr error) {
 	defer func() {
 		if recover() != nil {
@@ -283,6 +299,7 @@ func (l *Loop) processUninvoked(ctx context.Context, task scheduledTool) (respon
 		}
 		result = normalizeToolResult(processed.Text, processed.Err)
 	}
+	result = preserveToolRefusal(*task.result, result)
 	return &result, nil
 }
 

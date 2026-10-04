@@ -132,10 +132,12 @@ func DoneEvent() Event {
 	return Event{Type: EventDone}
 }
 
+// ToolStartEvent announces admission of a handler invocation.
 func ToolStartEvent(iteration, attempt, retry int, call ai.ToolCall) Event {
 	return Event{Type: EventToolStart, IterationCount: iteration, AttemptID: attempt, RetryCount: retry, ToolCall: &call}
 }
 
+// ToolResultEvent reports processed output, selecting ToolError when Err is non-nil.
 func ToolResultEvent(iteration, attempt, retry int, call ai.ToolCall, response *ToolResult, duration time.Duration) Event {
 	eventType := EventToolResult
 	var err error
@@ -145,6 +147,7 @@ func ToolResultEvent(iteration, attempt, retry int, call ai.ToolCall, response *
 	return Event{Type: eventType, IterationCount: iteration, AttemptID: attempt, RetryCount: retry, ToolCall: &call, ToolResult: response, Duration: duration, Err: err}
 }
 
+// ToolErrorEvent reports a terminal tool-pipeline error with optional safe output.
 func ToolErrorEvent(iteration, attempt, retry int, call ai.ToolCall, response *ToolResult, duration time.Duration, err error) Event {
 	return Event{Type: EventToolError, IterationCount: iteration, AttemptID: attempt, RetryCount: retry, ToolCall: &call, ToolResult: response, Duration: duration, Err: err}
 }
@@ -187,7 +190,8 @@ func attemptTerminalEvent(eventType EventType, iterationCount, attemptID, retryC
 	return event
 }
 
-func sendEvent(ctx context.Context, ch chan<- Event, event Event) error {
+// cloneToolEventPayload isolates mutable tool and token event fields.
+func cloneToolEventPayload(event Event) Event {
 	if event.ToolApproval != nil {
 		request := event.ToolApproval.Clone()
 		event.ToolApproval = &request
@@ -206,6 +210,12 @@ func sendEvent(ctx context.Context, ch chan<- Event, event Event) error {
 		event.ToolResult = &r
 	}
 
+	return event
+}
+
+// sendEvent copies mutable tool payloads and waits for delivery or cancellation.
+func sendEvent(ctx context.Context, ch chan<- Event, event Event) error {
+	event = cloneToolEventPayload(event)
 	select {
 	case ch <- event:
 		return nil

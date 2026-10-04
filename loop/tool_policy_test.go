@@ -7,12 +7,103 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
 	"github.com/lace-ai/gai/internal/obstest"
 )
+
+func TestSyntheticResultsDoNotWaitForSharedGuard(t *testing.T) {
+	for _, kind := range []string{"denied", "approval", "malformed"} {
+		t.Run(kind, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				guard := &ToolGuard{}
+				release, _ := guard.tryAcquire()
+				defer release()
+				var invoked, processed atomic.Int32
+				tool := schedulerTool(t, "test", ToolOptions{Guard: guard, Serial: true}, func(context.Context, ai.ToolCall) (string, error) {
+					invoked.Add(1)
+					return "unexpected", nil
+				})
+				l := &Loop{Tools: []Tool{tool}, ToolExecution: ToolExecutionConfig{MaxConcurrent: 1}, ToolResultProcessor: ToolResultProcessorFunc(func(_ context.Context, _ ToolPolicyInput, r ToolResult) (ToolResult, error) {
+					processed.Add(1)
+					return r, nil
+				})}
+				iteration, calls := schedulerCalls("test", "test")
+				if kind == "malformed" {
+					for i := range calls {
+						calls[i].call.Args = json.RawMessage(`{`)
+					}
+				} else {
+					action := ToolDeny
+					if kind == "approval" {
+						action = ToolRequireApproval
+					}
+					l.ToolPolicy = controlTestPolicy(action)
+				}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				events := make(chan Event, 16)
+				done := make(chan error, 1)
+				go func() { done <- l.executeToolCalls(ctx, iteration, calls, l.Tools, events, 1, 1, 0) }()
+				synctest.Wait()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatal(err)
+					}
+				default:
+					cancel()
+					<-done
+					t.Fatal("synthetic result waited for shared handler guard")
+				}
+				if invoked.Load() != 0 || processed.Load() != 2 {
+					t.Fatalf("invoked=%d processed=%d", invoked.Load(), processed.Load())
+				}
+				close(events)
+				for event := range events {
+					if event.Type == EventToolStart {
+						t.Fatal("synthetic result emitted invocation start")
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestByteLimitRequiresRoomForCompleteDiagnostics(t *testing.T) {
+	for limit := -1; limit < MinToolResultBytes; limit++ {
+		if limit == 0 {
+			continue
+		}
+		if _, err := LimitToolResultBytes(limit); !errors.Is(err, ErrToolResultProcess) {
+			t.Fatalf("undersized limit %d accepted: %v", limit, err)
+		}
+	}
+	for _, maxBytes := range []int{0, MinToolResultBytes} {
+		processor, err := LimitToolResultBytes(maxBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, kind := range []error{nil, ErrToolDenied, ErrToolApprovalRequired} {
+			original := ToolResult{Text: strings.Repeat("x", 100)}
+			want := "tool output too large"
+			if kind != nil {
+				original = ToolResult{Err: safeToolError{text: original.Text, kind: kind}}
+				want = kind.Error()
+			}
+			result, err := processor.Process(t.Context(), ToolPolicyInput{}, original)
+			if maxBytes == 0 {
+				want = original.String()
+			}
+			if err != nil || result.String() != want || (maxBytes > 0 && len(result.String()) > maxBytes) {
+				t.Fatalf("limit=%d kind=%v result=%q err=%v", maxBytes, kind, result.String(), err)
+			}
+		}
+	}
+}
 
 func TestToolPolicyDefaultsPrecedenceAndSnapshot(t *testing.T) {
 	rules := ToolPolicyRules{Allow: []string{"read", "both"}, Deny: []string{"both"}, RequireApproval: []string{"write"}, ApprovalEffects: []ToolEffect{ToolEffectDestructive}}
@@ -145,7 +236,7 @@ func TestBuiltInFiltersProtectAllOuterResults(t *testing.T) {
 		redactor, _ := RedactToolResult(func(_ context.Context, text string) (string, error) {
 			return strings.ReplaceAll(text, "secret-marker", "safe"), nil
 		})
-		limiter, _ := LimitToolResultBytes(4)
+		limiter, _ := LimitToolResultBytes(MinToolResultBytes)
 		processor, _ := ChainToolResultProcessors(redactor, limiter)
 		l := &Loop{Tools: []Tool{tool}, ToolResultProcessor: processor}
 		iteration, calls := schedulerCalls("test")
@@ -182,7 +273,7 @@ func TestBuiltInFiltersProtectAllOuterResults(t *testing.T) {
 }
 
 func TestByteLimitRejectsRatherThanTruncatesPayload(t *testing.T) {
-	for _, maxBytes := range []int{1, 10, 64} {
+	for _, maxBytes := range []int{MinToolResultBytes, 64} {
 		limit, _ := LimitToolResultBytes(maxBytes)
 		for _, r := range []ToolResult{{Text: strings.Repeat("x", 100)}, {Err: errors.New(strings.Repeat("x", 100))}} {
 			result, err := limit.Process(t.Context(), ToolPolicyInput{}, r)
@@ -301,4 +392,54 @@ func controlTestPolicy(action ToolAction) ToolPolicy {
 	return ToolPolicyFunc(func(context.Context, ToolPolicyInput) (ToolDecision, error) {
 		return ToolDecision{Action: action, Reason: "private reason"}, nil
 	})
+}
+
+func TestProcessorsCannotConvertPolicyRefusalIntoSuccess(t *testing.T) {
+	for _, action := range []ToolAction{ToolDeny, ToolRequireApproval} {
+		for _, replacement := range []ToolResult{{Text: "filtered"}, RejectToolResult("filtered")} {
+			tool := schedulerTool(t, "test", ToolOptions{}, func(context.Context, ai.ToolCall) (string, error) {
+				t.Error("refused handler invoked")
+				return "unexpected", nil
+			})
+			l := &Loop{Tools: []Tool{tool}, ToolPolicy: controlTestPolicy(action), ToolResultProcessor: ToolResultProcessorFunc(func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error) {
+				return replacement, nil
+			})}
+			iteration, calls := schedulerCalls("test")
+			events := make(chan Event, 8)
+			if err := l.executeToolCalls(t.Context(), iteration, calls, l.Tools, events, 1, 1, 0); err != nil {
+				t.Fatal(err)
+			}
+			want := ErrToolDenied
+			if action == ToolRequireApproval {
+				want = ErrToolApprovalRequired
+			}
+			result := iteration.Parts[0].ToolResp
+			if !errors.Is(result.Err, want) || result.String() != "filtered" || iteration.Parts[0].ToolExecution.State != ToolNotStarted {
+				t.Fatalf("refusal lost: %#v", result)
+			}
+			if replacement.Err != nil && !errors.Is(result.Err, ErrToolResultRejected) {
+				t.Fatal("processor rejection lost")
+			}
+			if !iteration.Conversation[0].Parts[0].ToolResult.IsError {
+				t.Fatal("transcript reports refusal as success")
+			}
+			close(events)
+			for e := range events {
+				if e.Type == EventToolResult || e.Type == EventToolStart {
+					t.Fatal("refusal published as successful invocation")
+				}
+			}
+		}
+	}
+}
+
+func TestRefusalEnforcementDoesNotRestoreHiddenErrorCauses(t *testing.T) {
+	originalSecret := errors.New("original secret")
+	processorSecret := errors.New("processor secret")
+	original := ToolResult{Err: safeToolError{text: "original", kind: errors.Join(ErrToolDenied, originalSecret)}}
+	processed := ToolResult{Err: safeToolError{text: "filtered", kind: errors.Join(ErrToolOutputLimit, processorSecret)}}
+	result := preserveToolRefusal(original, processed)
+	if result.String() != "filtered" || !errors.Is(result.Err, ErrToolDenied) || !errors.Is(result.Err, ErrToolOutputLimit) || errors.Is(result.Err, originalSecret) || errors.Is(result.Err, processorSecret) {
+		t.Fatalf("unsafe refusal result: %#v", result)
+	}
 }

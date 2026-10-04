@@ -157,7 +157,7 @@ func TestToolDeadlineFiltersWithParentAndPreservesSiblingSuccess(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		slow := schedulerTool(t, "slow", ToolOptions{}, func(ctx context.Context, _ ai.ToolCall) (string, error) {
 			<-ctx.Done()
-			return "late apparent success", nil
+			return "", ctx.Err()
 		})
 		fast := schedulerTool(t, "fast", ToolOptions{}, func(context.Context, ai.ToolCall) (string, error) { return "ok", nil })
 		l := &Loop{Tools: []Tool{slow, fast}, ToolExecution: ToolExecutionConfig{MaxConcurrent: 2, DefaultTimeout: time.Second}, ToolResultProcessor: ToolResultProcessorFunc(func(ctx context.Context, _ ToolPolicyInput, r ToolResult) (ToolResult, error) {
@@ -371,4 +371,19 @@ func TestGuardCountRejectsTooManyDistinctWaiters(t *testing.T) {
 	if err := validateToolGuardCount(tasks[:maxToolGuardWaits]); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestHandlerResultSurvivesItsExpiredDeadline avoids replacing successful side effects with a false error.
+func TestHandlerResultSurvivesItsExpiredDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tool := schedulerTool(t, "test", ToolOptions{}, func(ctx context.Context, _ ai.ToolCall) (string, error) { <-ctx.Done(); return "completed", nil })
+		l := &Loop{Tools: []Tool{tool}, ToolExecution: ToolExecutionConfig{DefaultTimeout: time.Second}}
+		iteration, calls := schedulerCalls("test")
+		if err := l.executeToolCalls(t.Context(), iteration, calls, l.Tools, nil, 1, 1, 0); err != nil {
+			t.Fatal(err)
+		}
+		if result := iteration.Parts[0].ToolResp; result.Err != nil || result.Text != "completed" {
+			t.Fatalf("result=%#v", result)
+		}
+	})
 }
