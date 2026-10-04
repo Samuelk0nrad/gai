@@ -3,7 +3,6 @@ package loop
 import (
 	"context"
 	"crypto/rand"
-	"errors"
 	"fmt"
 )
 
@@ -90,17 +89,11 @@ func (l *Loop) preflightToolApprovals(ctx context.Context, tasks []scheduledTool
 			}
 			return sendEvent(ctx, events, eventFor(kind, nil))
 		}
-		failed := func(err error, requested bool) {
+		failed := func(requested bool) {
 			safeErr := ErrToolApproval
 			task.execution.Approval = ToolDecision{Action: ToolDeny, Code: "approval_failed", Reason: "tool approval failed"}
-			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				safeErr = context.Canceled
-				if errors.Is(err, context.DeadlineExceeded) {
-					safeErr = context.DeadlineExceeded
-				}
-				if ctx.Err() != nil {
-					safeErr = ctx.Err()
-				}
+			if ctx.Err() != nil {
+				safeErr = ctx.Err()
 				task.execution.Approval.Code = "approval_canceled"
 				task.execution.Approval.Reason = "tool approval canceled"
 			}
@@ -116,7 +109,7 @@ func (l *Loop) preflightToolApprovals(ctx context.Context, tasks []scheduledTool
 			sendTerminalEvent(ctx, events, cloneToolEventPayload(event))
 		}
 		if err := emit(EventToolApprovalRequested); err != nil {
-			failed(err, false)
+			failed(false)
 			return err
 		}
 		if l.ToolApprovalResolver == nil {
@@ -124,7 +117,7 @@ func (l *Loop) preflightToolApprovals(ctx context.Context, tasks []scheduledTool
 		} else {
 			decision, err := resolveToolApproval(ctx, l.ToolApprovalResolver, request)
 			if err != nil {
-				failed(err, true)
+				failed(true)
 				return err
 			}
 			task.execution.Approval = ToolDecision{Action: ToolDeny, Code: "approval_denied", Reason: decision.Reason}
