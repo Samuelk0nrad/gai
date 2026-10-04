@@ -537,3 +537,33 @@ func toolSpanText(span sdktrace.ReadOnlySpan) string {
 	}
 	return text.String()
 }
+
+// TestProcessorFailureHasDistinctSafeObservation keeps filter failures separate from handler failures.
+func TestProcessorFailureHasDistinctSafeObservation(t *testing.T) {
+	recorder := obstest.Install(t)
+	var observed gai.Observation
+	sink := gai.ObservationSinkFunc(func(_ context.Context, event gai.Observation) {
+		if event.Name == "loop_tool_finished" {
+			observed = event
+		}
+	})
+	tool, err := NewTool("test", "Test", ai.ToolParameters{}, func(context.Context, ai.ToolCall) (string, error) { return "secret-output", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor := ToolResultProcessorFunc(func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error) {
+		return ToolResult{}, errors.New("secret-processor-error")
+	})
+	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{ToolOutput: gai.CaptureEnabled})
+	result, _, err := processObservedTool(ctx, ToolPolicyInput{Call: ai.ToolCall{ID: "1", Name: "test", Type: "function", Args: []byte(`{}`)}}, []Tool{tool}, processor, sink)
+	if result != nil || !errors.Is(err, ErrToolResultProcess) {
+		t.Fatalf("result=%v err=%v", result, err)
+	}
+	span := requireToolSpans(t, recorder, 1)[0]
+	if obstest.Attributes(span)["gai.tool.outcome"].AsString() != toolOutcomeProcessing || observed.Fields["tool_outcome"] != toolOutcomeProcessing {
+		t.Fatalf("observation=%v", observed)
+	}
+	if strings.Contains(toolSpanText(span), "secret-") {
+		t.Fatal("raw output/error escaped")
+	}
+}

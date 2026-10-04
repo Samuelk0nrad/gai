@@ -105,6 +105,7 @@ func (o *searchObserver) Succeeded(ctx context.Context, requestID string, result
 	o.emit(ctx, "exa_search_finished", fields, nil)
 }
 
+// Failure records sanitized diagnostics while returning the original error to execution.
 func (o *searchObserver) Failure(ctx context.Context, stage string, err error) (string, error) {
 	fields := o.baseFields()
 	fields["stage"] = stage

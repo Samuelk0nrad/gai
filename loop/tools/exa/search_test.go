@@ -291,3 +291,34 @@ func attributeMap(attrs []attribute.KeyValue) map[string]attribute.Value {
 	}
 	return result
 }
+
+type panicTransport struct{}
+
+func (panicTransport) RoundTrip(*http.Request) (*http.Response, error) { panic("private-panic-marker") }
+
+func TestSearchPanicClosesSpanWithSafeError(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() { otel.SetTracerProvider(previous); _ = provider.Shutdown(context.Background()) })
+	tool, err := exa.NewSearchTool("secret", exa.WithHTTPClient(&http.Client{Transport: panicTransport{}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("direct invocation swallowed panic")
+			}
+		}()
+		_, _ = tool.Function(t.Context(), ai.ToolCall{ID: "1", Name: tool.Name(), Type: "function", Args: []byte(`{"query":"news"}`)})
+	}()
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Status().Code != codes.Error {
+		t.Fatalf("spans=%v", spans)
+	}
+	if strings.Contains(spans[0].Status().Description, "private-panic-marker") {
+		t.Fatal("panic value leaked")
+	}
+}
