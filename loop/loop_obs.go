@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// retryReason maps generation errors to stable retry classifications.
 func retryReason(err error) string {
 	if errors.Is(err, ErrAttemptTimeout) {
 		return "attempt_timeout"
@@ -32,6 +33,10 @@ const (
 	toolOutcomePanic        = "panic"
 	toolOutcomeDeadline     = "deadline"
 	toolOutcomeCancellation = "cancellation"
+	toolOutcomeProcessing   = "processing_error"
+	toolOutcomeDenied       = "denied"
+	toolOutcomeApproval     = "approval_required"
+	toolOutcomeInvalidCall  = "invalid_call"
 )
 
 var (
@@ -39,6 +44,7 @@ var (
 	errObservedToolPanic        = errors.New("tool execution panicked")
 	errObservedToolDeadline     = errors.New("tool execution deadline exceeded")
 	errObservedToolCancellation = errors.New("tool execution canceled")
+	errObservedToolProcessing   = errors.New("tool result processing failed")
 )
 
 type loopRunState struct {
@@ -210,6 +216,7 @@ func (s *loopIterationState) recordToken(token ai.Token) {
 	}
 }
 
+// recordToolResults counts processed tool failures for iteration telemetry.
 func (s *loopIterationState) recordToolResults(iteration Iteration) {
 	if s == nil {
 		return
@@ -336,11 +343,13 @@ func startToolSpan(ctx context.Context, call ai.ToolCall, sinks ...gai.Observati
 	return ctx, &toolObservation{ctx: ctx, span: span, sink: sink, call: call}
 }
 
+// callObservedTool instruments a direct invocation without a result processor.
 func callObservedTool(ctx context.Context, call ai.ToolCall, tools []Tool, sinks ...gai.ObservationSink) (*ToolResult, time.Duration) {
 	result, duration, _ := processObservedTool(ctx, ToolPolicyInput{Call: call}, tools, nil, sinks...)
 	return result, duration
 }
 
+// processObservedTool filters results before observation or caller publication.
 func processObservedTool(ctx context.Context, input ToolPolicyInput, tools []Tool, processor ToolResultProcessor, sinks ...gai.ObservationSink) (*ToolResult, time.Duration, error) {
 	return processObservedToolDeadline(ctx, input, tools, processor, 0, sinks...)
 }
@@ -362,7 +371,11 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 			observation.finishPanic(time.Since(started))
 			panic(panicValue)
 		}
-		observation.finish(response, duration)
+		if processErr != nil {
+			observation.finishProcessingError(duration)
+		} else {
+			observation.finish(response, duration)
+		}
 	}()
 	invokeCtx := toolCtx
 	cancel := func() {}
@@ -375,12 +388,6 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 	execution.State = ToolNotStarted
 	if invoked {
 		execution.State = invocationState(result.Err)
-	}
-	if timeout > 0 && errors.Is(invokeCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-		result = ToolResult{Err: context.DeadlineExceeded}
-		if invoked {
-			execution.State = ToolTimedOut
-		}
 	}
 	cancel()
 	duration = time.Since(started)
@@ -399,6 +406,7 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 	return &result, duration, nil
 }
 
+// finish captures only processed output and closes the observation once.
 func (o *toolObservation) finish(response *ToolResult, duration time.Duration) {
 	if o == nil {
 		return
@@ -418,6 +426,7 @@ func (o *toolObservation) finish(response *ToolResult, duration time.Duration) {
 	})
 }
 
+// finishPanic records a safe classification without the panic payload.
 func (o *toolObservation) finishPanic(duration time.Duration) {
 	if o == nil {
 		return
@@ -427,6 +436,12 @@ func (o *toolObservation) finishPanic(duration time.Duration) {
 	})
 }
 
+// finishProcessingError records a processing failure without capturing raw output.
+func (o *toolObservation) finishProcessingError(duration time.Duration) {
+	o.finishOnce.Do(func() { o.setOutcome(toolOutcomeProcessing, errObservedToolProcessing, duration) })
+}
+
+// setOutcome emits fixed error classifications and closes the tool span.
 func (o *toolObservation) setOutcome(outcome string, spanErr error, duration time.Duration) {
 	status := "success"
 	attrs := []attribute.KeyValue{attribute.String("gai.tool.outcome", outcome)}
@@ -439,7 +454,7 @@ func (o *toolObservation) setOutcome(outcome string, spanErr error, duration tim
 		attrs = append(attrs, attribute.String("gai.tool.execution", string(o.execution.State)), attribute.String("gai.tool.output", string(o.execution.Output)), attribute.String("gai.tool.decision", string(o.execution.Decision.Action)))
 	}
 	o.span.SetAttributes(attrs...)
-	fields := map[string]any{"tool_name": o.call.Name, "tool_call_id": o.call.ID, "tool_type": o.call.Type, "outcome": outcome, "status": status, "duration_ms": duration.Milliseconds()}
+	fields := map[string]any{"tool_name": o.call.Name, "tool_call_id": o.call.ID, "tool_type": o.call.Type, "outcome": outcome, "tool_outcome": outcome, "status": status, "duration_ms": duration.Milliseconds()}
 	if o.execution != nil {
 		fields["execution"] = string(o.execution.State)
 		fields["output"] = string(o.execution.Output)
@@ -454,6 +469,7 @@ func (o *toolObservation) setOutcome(outcome string, spanErr error, duration tim
 	gai.EndSpan(o.span, spanErr)
 }
 
+// toolResult separates model-facing output from safe telemetry errors.
 func toolResult(response *ToolResult) (outcome string, output string, spanErr error) {
 	if response == nil {
 		return toolOutcomeError, "", errObservedToolExecution
@@ -464,6 +480,12 @@ func toolResult(response *ToolResult) (outcome string, output string, spanErr er
 	}
 	output = responseErr.Error()
 	switch {
+	case errors.Is(responseErr, ErrToolDenied):
+		return toolOutcomeDenied, output, ErrToolDenied
+	case errors.Is(responseErr, ErrToolApprovalRequired):
+		return toolOutcomeApproval, output, ErrToolApprovalRequired
+	case errors.Is(responseErr, ErrToolCallMalformed), errors.Is(responseErr, ErrToolReqValidation), errors.Is(responseErr, ErrToolNotFound), errors.Is(responseErr, ai.ErrInvalidToolCall):
+		return toolOutcomeInvalidCall, output, errObservedToolExecution
 	case errors.Is(responseErr, context.DeadlineExceeded):
 		return toolOutcomeDeadline, output, errObservedToolDeadline
 	case errors.Is(responseErr, context.Canceled):

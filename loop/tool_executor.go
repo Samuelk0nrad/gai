@@ -27,6 +27,24 @@ type toolCompletion struct {
 	err       error
 }
 
+// reflect.Select accepts at most 65,536 cases; reserve two for completion/context.
+const maxToolGuardWaits = 65534
+
+// validateToolGuardCount rejects batches beyond the runtime select-case limit before dispatch.
+func validateToolGuardCount(tasks []scheduledTool) error {
+	guards := make(map[*ToolGuard]struct{})
+	for _, task := range tasks {
+		if task.result == nil && task.options.Guard != nil {
+			guards[task.options.Guard] = struct{}{}
+		}
+	}
+	if len(guards) > maxToolGuardWaits {
+		return fmt.Errorf("%w: batch exceeds %d distinct tool guards", ErrToolExecutionConfig, maxToolGuardWaits)
+	}
+	return nil
+}
+
+// prepareToolCalls copies requests and snapshots registration settings.
 func prepareToolCalls(calls []pendingToolCall, tools []Tool) ([]scheduledTool, error) {
 	registry := make(map[string]Tool, len(tools))
 	options := make(map[string]ToolOptions, len(tools))
@@ -83,6 +101,9 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 	if preflightErr != nil {
 		return preflightErr
 	}
+	if err := validateToolGuardCount(tasks); err != nil {
+		return err
+	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	limit := l.ToolExecution.MaxConcurrent
@@ -108,7 +129,24 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 		iteration.Parts[task.pending.partIndex].ToolResp = done.result
 		iteration.Parts[task.pending.partIndex].ToolExecution = cloneToolExecution(&done.execution)
 		if task.result != nil {
-			gai.EmitObservation(ctx, l.ObservationSink, gai.Observation{Name: "loop_tool_finished", Source: "loop:Tool", Fields: map[string]any{"tool_name": task.pending.call.Name, "tool_call_id": task.pending.call.ID, "execution": string(done.execution.State), "decision": string(done.execution.Decision.Action), "output": string(done.execution.Output)}})
+			outcome, _, safeErr := toolResult(done.result)
+			if done.err != nil {
+				outcome, safeErr = toolOutcomeProcessing, errObservedToolProcessing
+				if done.err == ErrToolPanic {
+					outcome, safeErr = toolOutcomePanic, errObservedToolPanic
+				}
+			}
+			fields := map[string]any{"tool_name": task.pending.call.Name, "tool_call_id": task.pending.call.ID, "tool_type": task.pending.call.Type, "outcome": outcome, "tool_outcome": outcome, "status": "success", "duration_ms": int64(0), "invoked": false}
+			if safeErr != nil {
+				fields["status"] = "error"
+				fields["error_code"] = "gai.tool." + outcome
+			}
+			fields["execution"] = string(done.execution.State)
+			fields["decision"] = string(done.execution.Decision.Action)
+			fields["output"] = string(done.execution.Output)
+			gai.EmitObservation(ctx, l.ObservationSink, gai.Observation{
+				Name: "loop_tool_finished", Source: "loop:Tool", Err: safeErr, Fields: fields,
+			})
 		}
 		if events != nil && firstErr == nil {
 			var event Event
@@ -131,6 +169,7 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 			fail(err)
 		}
 		var guards []<-chan struct{}
+		waitingGuards := map[*ToolGuard]bool{}
 		blockedNames := map[string]bool{}
 		if firstErr == nil {
 			for position := 0; position < len(pending) && active < limit; {
@@ -141,9 +180,18 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 					position++
 					continue
 				}
-				release, changed := task.options.Guard.tryAcquire()
+				// Synthetic refusals do not use the handler's shared resource.
+				// Keep local Serial/capacity rules for their result processors.
+				guard := task.options.Guard
+				if task.result != nil {
+					guard = nil
+				}
+				release, changed := guard.tryAcquire()
 				if release == nil {
-					guards = append(guards, changed)
+					if !waitingGuards[guard] {
+						guards = append(guards, changed)
+						waitingGuards[guard] = true
+					}
 					if task.options.Serial {
 						blockedNames[name] = true
 					}
@@ -237,6 +285,7 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 	return nil
 }
 
+// processUninvoked filters synthetic errors without invoking a handler.
 func (l *Loop) processUninvoked(ctx context.Context, task scheduledTool) (response *ToolResult, processErr error) {
 	defer func() {
 		if recover() != nil {

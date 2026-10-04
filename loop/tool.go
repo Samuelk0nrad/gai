@@ -26,6 +26,7 @@ func (r ToolResult) String() string {
 	return r.Text
 }
 
+// normalizeToolResult discards text when a handler returns an error.
 func normalizeToolResult(text string, err error) ToolResult {
 	if err != nil {
 		return ToolResult{Err: err}
@@ -36,8 +37,11 @@ func normalizeToolResult(text string, err error) ToolResult {
 // Tool defines a function that a model may request during a loop run.
 // Implementations must be safe for concurrent use and honor context cancellation.
 type Tool interface {
+	// Name is the stable identifier used by model calls.
 	Name() string
+	// Description explains the tool to the model.
 	Description() string
+	// Params declares the model-facing JSON argument schema.
 	Params() ai.ToolParameters
 	// Function receives a call owned by this invocation. Err takes precedence over text.
 	Function(context.Context, ai.ToolCall) (string, error)
@@ -68,8 +72,14 @@ func NewTool(name, description string, params ai.ToolParameters, function ToolFu
 	}
 	return tool, nil
 }
-func (t *functionTool) Name() string        { return t.name }
+
+// Name returns the validated tool identifier.
+func (t *functionTool) Name() string { return t.name }
+
+// Description returns the model-facing tool description.
 func (t *functionTool) Description() string { return t.description }
+
+// Params returns an independent parameter snapshot, preserving JSON numbers.
 func (t *functionTool) Params() ai.ToolParameters {
 	var params ai.ToolParameters
 	decoder := json.NewDecoder(bytes.NewReader(t.paramsJSON))
@@ -79,6 +89,8 @@ func (t *functionTool) Params() ai.ToolParameters {
 	}
 	return params
 }
+
+// Function invokes the registered handler with the supplied call.
 func (t *functionTool) Function(ctx context.Context, call ai.ToolCall) (string, error) {
 	return t.function(ctx, call)
 }
@@ -113,6 +125,7 @@ func invokeTool(ctx context.Context, req ai.ToolCall, tools []Tool) (ToolResult,
 	return ToolResult{Err: fmt.Errorf("%w: %s", ErrToolNotFound, req.Name)}, false
 }
 
+// nilImplementation detects nil interfaces and typed-nil dependencies without invoking them.
 func nilImplementation(tool any) bool {
 	if tool == nil {
 		return true

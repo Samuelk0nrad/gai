@@ -65,32 +65,40 @@ func RedactToolResult(redact func(context.Context, string) (string, error)) (Too
 		if result.Err == nil {
 			return ToolResult{Text: text}, nil
 		}
-		var kind error
+		var kinds []error
 		// Preserve only known safe classifications, never arbitrary original causes.
 		for _, candidate := range []error{ErrToolOutputLimit, ErrToolResultRejected, ErrToolDenied, ErrToolApprovalRequired, context.DeadlineExceeded, context.Canceled} {
 			if errors.Is(result.Err, candidate) {
-				kind = candidate
-				break
+				kinds = append(kinds, candidate)
 			}
 		}
-		return ToolResult{Err: safeToolError{text: text, kind: kind}}, nil
+		return ToolResult{Err: safeToolError{text: text, kind: errors.Join(kinds...)}}, nil
 	}), nil
 }
 
+// MinToolResultBytes is the smallest supported nonzero result budget. It fits
+// every complete framework diagnostic, including an approval-required refusal.
+const MinToolResultBytes = len("tool approval required")
+
 // LimitToolResultBytes rejects oversized model-facing text, including error text.
-// It never truncates JSON or UTF-8. Zero disables the limit. This cannot bound
+// It never truncates JSON or diagnostics. Zero disables the limit; smaller
+// positive budgets than MinToolResultBytes are invalid. This cannot bound
 // allocations already made by a handler; only retained/published output is bounded.
 func LimitToolResultBytes(maxBytes int) (ToolResultProcessor, error) {
-	if maxBytes < 0 {
-		return nil, fmt.Errorf("%w: negative result byte limit", ErrToolResultProcess)
+	if maxBytes < 0 || (maxBytes > 0 && maxBytes < MinToolResultBytes) {
+		return nil, fmt.Errorf("%w: result byte limit must be zero or at least %d", ErrToolResultProcess, MinToolResultBytes)
 	}
 	return ToolResultProcessorFunc(func(_ context.Context, _ ToolPolicyInput, result ToolResult) (ToolResult, error) {
 		if maxBytes > 0 && len(result.String()) > maxBytes {
 			message := "tool output too large"
-			if len(message) > maxBytes {
-				message = message[:maxBytes]
-			} // Fixed ASCII diagnostic, never truncated handler output.
-			return ToolResult{Err: safeToolError{text: message, kind: ErrToolOutputLimit}}, nil
+			kinds := []error{ErrToolOutputLimit}
+			for _, refusal := range []error{ErrToolDenied, ErrToolApprovalRequired} {
+				if errors.Is(result.Err, refusal) {
+					kinds = append(kinds, refusal)
+					message = refusal.Error()
+				}
+			}
+			return ToolResult{Err: safeToolError{text: message, kind: errors.Join(kinds...)}}, nil
 		}
 		return result, nil
 	}), nil

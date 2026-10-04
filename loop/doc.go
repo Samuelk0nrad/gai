@@ -14,9 +14,13 @@
 // ToolExecution.MaxConcurrent bounds active tool pipelines; zero preserves
 // unlimited concurrency. WithToolOptions adds per-name Serial execution and
 // handler timeouts. Serial includes result processing within one run; shared
-// ToolGuard registrations also serialize across runs. Timeouts start at admission,
+// ToolGuard registrations also serialize invoked pipelines across runs. Synthetic
+// refusals bypass shared guards but retain bounded processing and local serial order. Timeouts start at admission,
 // excluding queue and approval waits. Handlers must honor cancellation: the loop
-// joins admitted work before returning. Handler panics terminate the run without
+// joins admitted work before returning. A handler's returned result is authoritative;
+// only returned deadline errors are classified as tool timeouts. Calls rejected
+// before invocation emit a tool error and finished metadata without a start event.
+// Handler panics terminate the run without
 // exposing panic payloads. Model retries never retry a tool invocation.
 //
 // ToolPolicy runs before scheduling using copied plain call metadata. Nil policy

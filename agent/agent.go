@@ -69,6 +69,8 @@ type Definition struct {
 	// prompt. Otherwise, the protocol is added as the first prompt context
 	// source unless its builder already contains a tool_definitions source.
 	Tools []loop.Tool
+	// ToolPolicy authorizes calls before admission; shared policies must be concurrency-safe.
+	ToolPolicy loop.ToolPolicy
 	// ToolChoice is the default tool-use policy. The zero value uses the
 	// loop/provider default. Run overrides replace this policy atomically.
 	ToolChoice ai.ToolChoice
@@ -200,6 +202,7 @@ func (a *Agent) middleware() []Middleware {
 	return a.def.Middleware
 }
 
+// newLoop builds the run-owned loop from validated effective settings.
 func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedExecution) (*loop.Loop, error) {
 	if a.def.Prompt == nil {
 		return nil, loop.ErrPromptNotConfigured
@@ -280,6 +283,7 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 	l.ResponseFormat = execution.responseFormat
 	l.Reasoning = execution.reasoning
 	l.ToolChoice = execution.toolChoice
+	l.ToolPolicy = execution.toolPolicy
 	l.RetryPolicy = execution.retryPolicy
 	return l, nil
 }
