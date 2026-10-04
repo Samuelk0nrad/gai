@@ -105,7 +105,7 @@ func (l *Loop) preflightToolApprovals(ctx context.Context, tasks []scheduledTool
 				return
 			}
 			// Cancellation must not wait for a consumer that has stopped reading.
-			// The execution snapshot retains this outcome if the buffer is full.
+			// A full buffer can omit this event and the later terminal snapshot.
 			sendTerminalEvent(ctx, events, cloneToolEventPayload(event))
 		}
 		if err := emit(EventToolApprovalRequested); err != nil {

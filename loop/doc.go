@@ -40,8 +40,9 @@
 // transport, and persistence; durable workflow pause/resume is a separate concern.
 // Resolver failures retain a failed approval decision and emit a resolved event
 // before the terminal failure. A resolver-local timeout remains a failure unless
-// the run context is canceled. Run cancellation attempts nonblocking delivery; the
-// retained execution metadata remains available if the event buffer is full.
+// the run context is canceled. Run cancellation attempts nonblocking delivery;
+// a full buffer can omit resolved and terminal snapshots, so consumers reconcile
+// pending approvals when the stream closes.
 //
 // Only accepted iterations enter Loop.Messages; retries and discards stay in events.
 // Message views clone the retained ai.Message values instead of reconstructing
