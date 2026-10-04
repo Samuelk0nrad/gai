@@ -70,20 +70,24 @@ The examples assume application-owned `model`, `promptFactory`, `updateRecord`,
 | `DefaultTimeout` | Zero adds no handler deadline. Parent deadlines still apply. Negative values are invalid. |
 | `ToolOptions.Timeout` | Nil inherits; a pointer to zero disables the default. The duration is copied. |
 | `ToolOptions.Serial` | Preserves same-name FIFO within a run, including result processing. It does not serialize other names or runs. |
-| `ToolOptions.Guard` | The exact shared `*ToolGuard` serializes all registrations using it across runs. Zero value is ready; never copy a used guard. It is an in-process gate. |
+| `ToolOptions.Guard` | The exact shared `*ToolGuard` serializes invoked pipelines across runs. Synthetic refusals bypass it. Zero value is ready; never copy a used guard. It is an in-process gate. |
 | `ToolPolicy` | Nil permits registered calls. A decision is allow, deny, or require approval. |
 | `ToolApprovalResolver` | Nil refuses approval-required calls with `ErrToolApprovalRequired`; it never implies consent. |
 | `ToolResultProcessor` | Nil publishes the normalized handler result. |
 
 Scheduling does not put guard waiters or serially blocked calls in worker slots.
 Independent eligible calls can proceed. Queue and approval waits do not consume
-the handler timeout. If the tool deadline has expired when its return is observed,
-its result becomes a timeout, even if the handler ignored cancellation and
-returned success. Serial/guard ownership and concurrency capacity extend
-through result processing; the handler deadline does not limit the processor.
+the handler timeout. Deadlines are cooperative: the handler's returned result is
+authoritative. A returned deadline error is a timeout; a completed successful
+result remains successful even if the deadline has elapsed. Parent cancellation
+still terminates the run and joins admitted work. Serial/guard ownership and
+concurrency capacity extend through result processing; the handler deadline does
+not limit the processor. Refused or malformed calls bypass shared guards because
+no handler uses that resource; their processors still obey the run's concurrency
+limit and same-name Serial order.
 Processors receive the run context and must honor its cancellation. Results enter
 the model transcript in original call order, even if completion events arrive in
-a different order. A batch with more than 65,534 distinct guard objects is
+a different order. A batch with more than 65,534 distinct guards for admitted handler candidates is
 rejected before dispatch to stay within Go's wait-set limit; repeated calls using
 the same guard share one wait registration.
 
@@ -132,7 +136,13 @@ from different runs and must handle them safely.
 `EventToolApprovalRequested` and `EventToolApprovalResolved` carry independent
 request snapshots. `ToolExecution.Decision` retains the original policy;
 `ApprovalID` and `Approval` retain the resolution. Missing resolvers emit a
-resolved refusal. Resolver failure instead ends the run with its terminal event.
+resolved refusal. Resolver errors, panics, and mismatched IDs emit a resolved
+failure with `Approval.Code=approval_failed` before ending the run. Cancellation
+records `approval_canceled`. These outcomes retain the request ID and
+`ToolNotStarted`; they do not represent a human denial. On cancellation, resolved
+event delivery is nonblocking so a stopped consumer cannot prevent termination.
+If its buffer is full, use the retained execution metadata to reconcile pending
+requests after the run ends.
 Applications must consume the event stream while resolving approvals, or use
 `Workflow.Run`, which drains it automatically. Blocking the event consumer on an
 approval event while waiting for later events from the same run can deadlock.
@@ -155,14 +165,19 @@ processor, err := loop.ChainToolResultProcessors(redact, limit)
 if err != nil { return err }
 ```
 
-Place the byte limit last. Zero disables it. It bounds the published result text,
+Place the byte limit last. Zero disables it. Positive limits must be at least
+`loop.MinToolResultBytes` (22 bytes) so every fixed refusal diagnostic fits in
+full; smaller limits fail construction. It bounds the published result text,
 including error text, by replacing oversized output with `ErrToolOutputLimit`;
 it never truncates the original JSON or UTF-8 payload. It does not cap memory
 allocated inside a handler. `RedactToolResult` sanitizes success and error text,
 dropping the original error chain rather than retaining hidden sensitive causes.
 Only safe framework classifications are retained. Oversized refusals preserve
 `ErrToolDenied` or `ErrToolApprovalRequired` alongside `ErrToolOutputLimit`, using
-a bounded safe refusal message.
+a complete safe refusal message. Custom processors may replace refusal text,
+but the executor preserves the original denial or approval-required classification
+and the model-facing error flag. Filtering cannot turn an unapproved call into a
+successful invocation.
 
 A custom processor returns `ToolResult{Text: ..., Err: ...}` as a replacement.
 Use `RejectToolResult("safe reason")` to withhold output while continuing the run

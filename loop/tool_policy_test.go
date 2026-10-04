@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -441,5 +442,56 @@ func TestRefusalEnforcementDoesNotRestoreHiddenErrorCauses(t *testing.T) {
 	result := preserveToolRefusal(original, processed)
 	if result.String() != "filtered" || !errors.Is(result.Err, ErrToolDenied) || !errors.Is(result.Err, ErrToolOutputLimit) || errors.Is(result.Err, originalSecret) || errors.Is(result.Err, processorSecret) {
 		t.Fatalf("unsafe refusal result: %#v", result)
+	}
+}
+
+// TestProcessorPanicClassificationUsesControlFlow distinguishes an actual recovered
+// panic from an ordinary processor error that happens to wrap the panic sentinel.
+func TestProcessorPanicClassificationUsesControlFlow(t *testing.T) {
+	for _, invoked := range []bool{false, true} {
+		for _, panics := range []bool{false, true} {
+			t.Run(fmt.Sprintf("invoked=%v/panics=%v", invoked, panics), func(t *testing.T) {
+				recorder := obstest.Install(t)
+				var finished *gai.Observation
+				tool := schedulerTool(t, "test", ToolOptions{}, func(context.Context, ai.ToolCall) (string, error) { return "private output", nil })
+				l := &Loop{Tools: []Tool{tool}, ToolResultProcessor: ToolResultProcessorFunc(func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error) {
+					if panics {
+						panic("private panic")
+					}
+					return ToolResult{}, fmt.Errorf("private processor error: %w", ErrToolPanic)
+				}), ObservationSink: gai.ObservationSinkFunc(func(_ context.Context, o gai.Observation) {
+					if o.Name == "loop_tool_finished" {
+						finished = &o
+					}
+				})}
+				name := "missing"
+				if invoked {
+					name = "test"
+				}
+				iteration, calls := schedulerCalls(name)
+				err := l.executeToolCalls(t.Context(), iteration, calls, l.Tools, nil, 1, 1, 0)
+				want := toolOutcomeProcessing
+				if panics {
+					want = toolOutcomePanic
+				}
+				if !errors.Is(err, ErrToolPanic) || errors.Is(err, ErrToolResultProcess) == panics {
+					t.Fatalf("error=%v", err)
+				}
+				if finished == nil || finished.Fields["tool_outcome"] != want || finished.Fields["error_code"] != "gai.tool."+want {
+					t.Fatalf("observation=%#v", finished)
+				}
+				if invoked {
+					span := requireToolSpans(t, recorder, 1)[0]
+					if obstest.Attributes(span)["gai.tool.outcome"].AsString() != want || strings.Contains(toolSpanText(span), "private") {
+						t.Fatal("unsafe or inaccurate processor span")
+					}
+					if iteration.Parts[0].ToolExecution.State != ToolSucceeded {
+						t.Fatal("processor failure overwrote invocation success")
+					}
+				} else if iteration.Parts[0].ToolExecution.State != ToolNotStarted {
+					t.Fatal("synthetic processing started handler")
+				}
+			})
+		}
 	}
 }
