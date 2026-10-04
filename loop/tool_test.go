@@ -18,10 +18,13 @@ type namedTestTool struct {
 func (t namedTestTool) Name() string            { return t.name }
 func (namedTestTool) Description() string       { return "A test tool." }
 func (namedTestTool) Params() ai.ToolParameters { return loop.NewEchoTool().Params() }
+// Function returns a fixed successful result for tool registration and invocation fixtures.
 func (namedTestTool) Function(context.Context, ai.ToolCall) (string, error) {
 	return "ok", nil
 }
 
+// TestCallToolRejectsNilTool verifies that a nil registered tool returns a definition error
+// instead of panicking.
 func TestCallToolRejectsNilTool(t *testing.T) {
 	t.Parallel()
 
@@ -48,6 +51,8 @@ func TestToolDefinitionsRejectNonCanonicalToolName(t *testing.T) {
 	}
 }
 
+// TestDecodeToolArgs checks typed argument decoding and rejects malformed JSON or values
+// incompatible with the target fields.
 func TestDecodeToolArgs(t *testing.T) {
 	t.Parallel()
 

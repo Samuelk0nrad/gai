@@ -209,10 +209,14 @@ func TestExecutionOpaqueBuilderRequiresExplicitTokenCounterSupport(t *testing.T)
 
 type executionProcessor struct{ text string }
 
+// Process replaces output with a configured marker so tests can identify the effective processor
+// override.
 func (p *executionProcessor) Process(_ context.Context, _ loop.ToolPolicyInput, _ loop.ToolResult) (loop.ToolResult, error) {
 	return loop.ToolResult{Text: p.text}, nil
 }
 
+// TestExecutionRejectsInvalidResolvedValuesBeforePrompt ensures invalid resolved settings fail
+// before prompt construction and emit a run-creation failure observation.
 func TestExecutionRejectsInvalidResolvedValuesBeforePrompt(t *testing.T) {
 	var nilModel *executionModel
 	var nilTokenCounter *mocks.MockTokenCounter
@@ -443,6 +447,8 @@ func TestExecutionClearingRetryPolicyAlsoClearsTimeouts(t *testing.T) {
 	}
 }
 
+// TestExecutionProcessorCanBeInheritedReplacedOrCleared verifies that processor overrides
+// distinguish inheritance, replacement, explicit clearing, and ignored unset values.
 func TestExecutionProcessorCanBeInheritedReplacedOrCleared(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
