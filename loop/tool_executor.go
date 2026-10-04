@@ -92,6 +92,9 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 		return err
 	}
 	preflightErr := l.preflightToolPolicies(ctx, tasks, events, iterationCount, attemptID, retryCount)
+	if preflightErr == nil {
+		preflightErr = l.preflightToolApprovals(ctx, tasks, events, iterationCount, attemptID, retryCount)
+	}
 	for _, task := range tasks {
 		iteration.Parts[task.pending.partIndex].ToolExecution = cloneToolExecution(&task.execution)
 	}

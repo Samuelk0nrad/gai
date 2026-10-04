@@ -70,3 +70,24 @@ func TestToolExecutionMetadataIsCopiedAtWorkflowBoundary(t *testing.T) {
 		t.Fatal("workflow clone aliases execution metadata")
 	}
 }
+
+func TestApprovalEventMappingOwnsRequest(t *testing.T) {
+	for _, kind := range []loop.EventType{loop.EventToolApprovalRequested, loop.EventToolApprovalResolved} {
+		low := loop.Event{Type: kind, ToolApproval: &loop.ToolApprovalRequest{ID: "one", Input: loop.ToolPolicyInput{Call: ai.ToolCall{Args: []byte(`{}`), Extensions: []ai.Extension{{Data: []byte(`"original"`)}}}}}}
+		mapped, ok := mapLoopEvent(low, EventSource{Kind: SourcePrimary})
+		if !ok || string(mapped.Type) != string(kind) || mapped.ToolApproval == nil {
+			t.Fatalf("mapping: %#v", mapped)
+		}
+		copied := cloneEvent(mapped)
+		copied.ToolApproval.Input.Call.Args[0] = 'X'
+		copied.ToolApproval.Input.Call.Extensions[0].Data[0] = 'X'
+		if string(mapped.ToolApproval.Input.Call.Args) != "{}" || string(mapped.ToolApproval.Input.Call.Extensions[0].Data) != `"original"` {
+			t.Fatal("workflow approval clone aliases request")
+		}
+		mapped.ToolApproval.Input.Call.Args[0] = 'X'
+		mapped.ToolApproval.Input.Call.Extensions[0].Data[0] = 'X'
+		if string(low.ToolApproval.Input.Call.Args) != "{}" || string(low.ToolApproval.Input.Call.Extensions[0].Data) != `"original"` {
+			t.Fatal("mapped approval aliases loop event")
+		}
+	}
+}

@@ -32,6 +32,13 @@
 // ToolExecution records authorization, invocation, and output disposition
 // independently: rejected output never undoes a successful external side effect.
 //
+// ToolApprovalResolver resolves policy-required approvals in process. Every
+// policy and approval for a batch completes before any handler starts. Approval
+// request IDs must be echoed exactly and are never reused; they are correlation
+// tokens, not durable invocation identities. A missing resolver refuses the call
+// with ErrToolApprovalRequired and does not suspend the run. Applications own UI,
+// transport, and persistence; durable workflow pause/resume is a separate concern.
+//
 // Only accepted iterations enter Loop.Messages; retries and discards stay in events.
 // Message views clone the retained ai.Message values instead of reconstructing
 // different native and rendered transcripts from execution records.
