@@ -373,7 +373,8 @@ and call `Compact(ctx, historyBudget)` explicitly when older completed turns sho
 be summarized. Stores load revisioned snapshots and commit through atomic
 compare-and-swap; conflicts are returned to the application without retrying.
 See [history persistence and migration](docs/history.md) for the store contract,
-compaction results, and session ordering.
+compaction results, and session ordering. The [offline history-session example](examples/history-session)
+demonstrates the complete application lifecycle and concurrent-session tests.
 
 Built-in summarization uses a text projection. If the selected turns contain media,
 signed reasoning, or other opaque provider state, it returns

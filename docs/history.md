@@ -102,3 +102,12 @@ is not a committed summary: inspect `changed` on successful completion. Selectio
 events carry `selection_stage: loaded` or `selection_stage: candidate`; candidate
 events describe the proposed state before CAS and do not imply persistence. Build
 observations describe selection only.
+
+## Runnable session lifecycle
+
+See [the offline history-session example](../examples/history-session) for atomic
+in-memory CAS, cancellation-aware per-session ownership, a prompt pinned to its
+loaded revision, accepted-turn persistence, and deterministic concurrency tests.
+It also demonstrates explicit pre-run compaction and an application policy for
+remaining pressure. The example is process-local; production persistence and
+multi-process ownership remain application responsibilities.
