@@ -393,3 +393,53 @@ func controlTestPolicy(action ToolAction) ToolPolicy {
 		return ToolDecision{Action: action, Reason: "private reason"}, nil
 	})
 }
+
+func TestProcessorsCannotConvertPolicyRefusalIntoSuccess(t *testing.T) {
+	for _, action := range []ToolAction{ToolDeny, ToolRequireApproval} {
+		for _, replacement := range []ToolResult{{Text: "filtered"}, RejectToolResult("filtered")} {
+			tool := schedulerTool(t, "test", ToolOptions{}, func(context.Context, ai.ToolCall) (string, error) {
+				t.Error("refused handler invoked")
+				return "unexpected", nil
+			})
+			l := &Loop{Tools: []Tool{tool}, ToolPolicy: controlTestPolicy(action), ToolResultProcessor: ToolResultProcessorFunc(func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error) {
+				return replacement, nil
+			})}
+			iteration, calls := schedulerCalls("test")
+			events := make(chan Event, 8)
+			if err := l.executeToolCalls(t.Context(), iteration, calls, l.Tools, events, 1, 1, 0); err != nil {
+				t.Fatal(err)
+			}
+			want := ErrToolDenied
+			if action == ToolRequireApproval {
+				want = ErrToolApprovalRequired
+			}
+			result := iteration.Parts[0].ToolResp
+			if !errors.Is(result.Err, want) || result.String() != "filtered" || iteration.Parts[0].ToolExecution.State != ToolNotStarted {
+				t.Fatalf("refusal lost: %#v", result)
+			}
+			if replacement.Err != nil && !errors.Is(result.Err, ErrToolResultRejected) {
+				t.Fatal("processor rejection lost")
+			}
+			if !iteration.Conversation[0].Parts[0].ToolResult.IsError {
+				t.Fatal("transcript reports refusal as success")
+			}
+			close(events)
+			for e := range events {
+				if e.Type == EventToolResult || e.Type == EventToolStart {
+					t.Fatal("refusal published as successful invocation")
+				}
+			}
+		}
+	}
+}
+
+func TestRefusalEnforcementDoesNotRestoreHiddenErrorCauses(t *testing.T) {
+	originalSecret := errors.New("original secret")
+	processorSecret := errors.New("processor secret")
+	original := ToolResult{Err: safeToolError{text: "original", kind: errors.Join(ErrToolDenied, originalSecret)}}
+	processed := ToolResult{Err: safeToolError{text: "filtered", kind: errors.Join(ErrToolOutputLimit, processorSecret)}}
+	result := preserveToolRefusal(original, processed)
+	if result.String() != "filtered" || !errors.Is(result.Err, ErrToolDenied) || !errors.Is(result.Err, ErrToolOutputLimit) || errors.Is(result.Err, originalSecret) || errors.Is(result.Err, processorSecret) {
+		t.Fatalf("unsafe refusal result: %#v", result)
+	}
+}

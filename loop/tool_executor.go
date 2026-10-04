@@ -301,6 +301,7 @@ func (l *Loop) processUninvoked(ctx context.Context, task scheduledTool) (respon
 		}
 		result = normalizeToolResult(processed.Text, processed.Err)
 	}
+	result = preserveToolRefusal(*task.result, result)
 	return &result, nil
 }
 
