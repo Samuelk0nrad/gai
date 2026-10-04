@@ -11,6 +11,14 @@
 // response. Each run exposes one ordered Event stream containing tokens,
 // attempt starts, retries, completed iterations, and terminal results.
 // Iteration retains attempt execution diagnostics and canonical message snapshots.
+// ToolExecution.MaxConcurrent bounds active tool pipelines; zero preserves
+// unlimited concurrency. WithToolOptions adds per-name Serial execution and
+// handler timeouts. Serial includes result processing within one run; shared
+// ToolGuard registrations also serialize across runs. Timeouts start at admission,
+// excluding queue and approval waits. Handlers must honor cancellation: the loop
+// joins admitted work before returning. Handler panics terminate the run without
+// exposing panic payloads. Model retries never retry a tool invocation.
+//
 // Only accepted iterations enter Loop.Messages; retries and discards stay in events.
 // Message views clone the retained ai.Message values instead of reconstructing
 // different native and rendered transcripts from execution records.

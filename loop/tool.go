@@ -143,6 +143,9 @@ func ToolDefinitions(tools []Tool) ([]ai.ToolDefinition, error) {
 		if nilImplementation(tool) {
 			return nil, fmt.Errorf("%w: tool at index %d is nil", ai.ErrInvalidToolDefinition, index)
 		}
+		if _, err := optionsForTool(tool); err != nil {
+			return nil, err
+		}
 		params, err := tool.Params().JSONSchema()
 		if err != nil {
 			return nil, fmt.Errorf("tool %q: %w", tool.Name(), err)

@@ -3,6 +3,10 @@ package loop
 import "errors"
 
 var (
+	// ErrToolExecutionConfig identifies invalid scheduling or registration options.
+	ErrToolExecutionConfig = errors.New("invalid tool execution configuration")
+	// ErrToolPanic is a terminal handler/processor panic; panic values are not published.
+	ErrToolPanic = errors.New("tool execution panicked")
 	// ErrNilLoop indicates an operation on a nil Loop.
 	ErrNilLoop = errors.New("loop is nil")
 	// ErrModelNotConfigured indicates that a Loop has no model.
