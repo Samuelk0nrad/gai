@@ -230,20 +230,11 @@ func (t *LookupOrderTool) Function(
 }
 ```
 
-For a small tool, use `loop.NewTool(name, description, params, handler)` with a
-`loop.ToolFunc` instead of implementing a custom struct. The constructor validates
-and snapshots the declaration. Handlers receive their own copy of arguments and
-provider extensions. An empty string is a valid success; a non-nil error takes
-precedence over text and becomes a model-visible tool error.
-
-The pre-v1 migration replaces `ToolResponse` with `ToolResult{Text string, Err error}`,
-renames event payloads to `ToolResult`, and replaces `ToolResponseProcessor` with
-`ToolResultProcessor`. Its `Process(ctx, input, result) (ToolResult, error)` method
-returns a replacement result; a processing error terminates the run without
-publishing the unfiltered output. Loop telemetry captures only processed output.
-Handlers and nested provider telemetry still need the request's content-capture
-policy. `loop.CallTool` is a direct invocation helper and bypasses loop policies
-and processing.
+Use `loop.NewTool(name, description, params, handler)` to wrap a handler without a
+custom struct. A non-nil handler error becomes a tool failure the model can read.
+`ToolResultProcessor` can transform results before they reach the conversation,
+events, or loop telemetry. See the [loop API reference](https://pkg.go.dev/github.com/lace-ai/gai/loop)
+for details.
 
 Attach tools to an agent definition:
 
