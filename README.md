@@ -546,13 +546,14 @@ span. Direct calls to `CallTool` are not instrumented.
 | `gen_ai.tool.name`, `gen_ai.tool.call.id` | Stable tool name and model-issued call ID |
 | `gen_ai.tool.type` | `function` |
 | `langfuse.observation.type` | `tool` |
-| `gai.tool.outcome` | `success`, `tool_error`, `panic`, `deadline`, `cancellation`, or `missing_response` |
+| `gai.tool.outcome` | `success`, `tool_error`, `panic`, `deadline`, or `cancellation` |
 | `error.type` | Fixed `gai.tool.*` classification on failures |
 | `tool.name`, `tool.call_id`, `tool.status` | Legacy compatibility attributes |
 
 Span errors use fixed, low-cardinality classifications; raw tool errors and
-panic values are never exported implicitly. A panic is recorded and then
-rethrown unchanged.
+panic values are never exported implicitly. `Loop` contains handler and processor
+panics as terminal `ErrToolPanic` errors, cancels siblings, and joins admitted work.
+Direct `CallTool` invocations retain ordinary Go panic behavior.
 
 Tool arguments and results are absent by default. Enable them independently
 with the same request-scoped capture policy used for other sensitive content:

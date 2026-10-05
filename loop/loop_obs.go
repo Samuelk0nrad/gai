@@ -346,7 +346,12 @@ func callObservedTool(ctx context.Context, call ai.ToolCall, tools []Tool, sinks
 }
 
 // processObservedTool filters results before observation or caller publication.
-func processObservedTool(ctx context.Context, input ToolPolicyInput, tools []Tool, processor ToolResultProcessor, sinks ...gai.ObservationSink) (response *ToolResult, duration time.Duration, processErr error) {
+func processObservedTool(ctx context.Context, input ToolPolicyInput, tools []Tool, processor ToolResultProcessor, sinks ...gai.ObservationSink) (*ToolResult, time.Duration, error) {
+	return processObservedToolDeadline(ctx, input, tools, processor, 0, sinks...)
+}
+
+// processObservedToolDeadline applies a cooperative handler deadline before output processing.
+func processObservedToolDeadline(ctx context.Context, input ToolPolicyInput, tools []Tool, processor ToolResultProcessor, timeout time.Duration, sinks ...gai.ObservationSink) (response *ToolResult, duration time.Duration, processErr error) {
 	toolCtx, observation := startToolSpan(ctx, input.Call, sinks...)
 	started := time.Now()
 	defer func() {
@@ -360,7 +365,14 @@ func processObservedTool(ctx context.Context, input ToolPolicyInput, tools []Too
 			observation.finish(response, duration)
 		}
 	}()
-	result := CallTool(toolCtx, input.Call, tools)
+	invokeCtx := toolCtx
+	cancel := func() {}
+	if timeout > 0 {
+		invokeCtx, cancel = context.WithTimeout(toolCtx, timeout)
+	}
+	defer cancel()
+	result := CallTool(invokeCtx, input.Call, tools)
+	cancel()
 	duration = time.Since(started)
 	if processor != nil {
 		input.Call = input.Call.Clone()

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sync"
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
@@ -61,6 +60,8 @@ type Loop struct {
 	Model ai.Model
 	// Tools contains the functions available to the model.
 	Tools []Tool
+	// ToolExecution controls run-local tool admission and handler deadlines.
+	ToolExecution ToolExecutionConfig
 	// ToolChoice controls whether and how the model may call Tools.
 	ToolChoice ai.ToolChoice
 	// ToolTransport controls whether Tools are serialized into AIRequest.Tools.
@@ -109,6 +110,9 @@ func (l *Loop) Validate() error {
 	}
 	if l.MaxTokens < 0 {
 		return fmt.Errorf("%w: negative output limit", ai.ErrInvalidRequestBudget)
+	}
+	if err := l.ToolExecution.Validate(); err != nil {
+		return err
 	}
 	if l.ToolResultProcessor != nil && nilImplementation(l.ToolResultProcessor) {
 		return fmt.Errorf("%w: processor is a typed nil", ErrToolResultProcess)
@@ -286,74 +290,6 @@ func toolsNamed(tools []Tool, names []string) []Tool {
 		}
 	}
 	return selected
-}
-
-// executeToolCalls records tool responses on iteration. Tool execution
-// failures are stored in ToolResult.Err and are not returned. Only framework
-// or tool-response processing failures are returned.
-func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, toolCalls []pendingToolCall, tools []Tool, events chan<- Event, iterationCount, attemptID, retryCount int) error {
-	var wg sync.WaitGroup
-	// A failed later start event must not leave tools mutating a snapshot.
-	defer wg.Wait()
-	var toolErr error
-	var toolErrMu sync.Mutex
-
-	for _, tc := range toolCalls {
-		if events != nil {
-			if err := sendEvent(ctx, events, ToolStartEvent(iterationCount, attemptID, retryCount, tc.call)); err != nil {
-				return err
-			}
-		}
-		wg.Add(1)
-		go func(tc pendingToolCall) {
-			defer wg.Done()
-
-			toolRes, duration, processErr := processObservedTool(ctx, ToolPolicyInput{Call: tc.call}, tools, l.ToolResultProcessor, l.ObservationSink)
-			if processErr != nil {
-				toolErrMu.Lock()
-				if toolErr == nil {
-					toolErr = processErr
-				}
-				toolErrMu.Unlock()
-				if events != nil {
-					if err := sendEvent(ctx, events, ToolErrorEvent(iterationCount, attemptID, retryCount, tc.call, nil, duration, processErr)); err != nil {
-						toolErrMu.Lock()
-						if toolErr == nil {
-							toolErr = err
-						}
-						toolErrMu.Unlock()
-					}
-				}
-				return
-			}
-			iteration.Parts[tc.partIndex].ToolResp = toolRes
-			if events != nil {
-				if err := sendEvent(ctx, events, ToolResultEvent(iterationCount, attemptID, retryCount, tc.call, toolRes, duration)); err != nil {
-					toolErrMu.Lock()
-					if toolErr == nil {
-						toolErr = err
-					}
-					toolErrMu.Unlock()
-				}
-			}
-		}(tc)
-	}
-	wg.Wait()
-	if toolErr == nil {
-		for _, tc := range toolCalls {
-			response := iteration.Parts[tc.partIndex].ToolResp
-			if response == nil {
-				continue
-			}
-			result := ai.ToolResult{ToolCallID: tc.call.ID, Name: tc.call.Name, Parts: ai.TextParts(response.Text)}
-			if err := response.Err; err != nil {
-				result.IsError = true
-				result.Parts = ai.TextParts(err.Error())
-			}
-			iteration.Conversation = append(iteration.Conversation, ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &result}}})
-		}
-	}
-	return toolErr
 }
 
 func sendLoopError(ctx context.Context, events chan<- Event, state *loopRunState, err error) {
