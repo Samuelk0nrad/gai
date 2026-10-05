@@ -11,6 +11,9 @@ import (
 // EventType identifies one ordered workflow event.
 type EventType string
 
+// EventToolDecision reports authorization before a tool is admitted.
+const EventToolDecision EventType = "tool_decision"
+
 const (
 	// EventOutput contributes to externally visible workflow output. Every
 	// EventOutput is visible regardless of its source index.
@@ -87,8 +90,9 @@ const (
 // Event is one immutable snapshot from the ordered, middleware-aware workflow
 // stream. Fields are meaningful according to Type.
 type Event struct {
-	Type   EventType
-	Source EventSource
+	ToolExecution *loop.ToolExecution
+	Type          EventType
+	Source        EventSource
 
 	IterationCount int
 	AttemptID      int
@@ -135,6 +139,10 @@ func cloneOutputParts(parts []OutputPart) []OutputPart {
 // cloneEvent isolates mutable event payloads while sharing immutable errors.
 func cloneEvent(event Event) Event {
 	cloned := event
+	if event.ToolExecution != nil {
+		execution := *event.ToolExecution
+		cloned.ToolExecution = &execution
+	}
 	if event.Output != nil {
 		output := cloneOutputPart(*event.Output)
 		cloned.Output = &output

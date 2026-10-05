@@ -168,7 +168,13 @@ func mapLoopEvent(low loop.Event, source EventSource) (Event, bool) {
 		Duration:       low.Duration,
 		Err:            low.Err,
 	}
+	if low.ToolExecution != nil {
+		execution := *low.ToolExecution
+		event.ToolExecution = &execution
+	}
 	switch low.Type {
+	case loop.EventToolDecision:
+		event.Type = EventToolDecision
 	case loop.EventAttemptStart:
 		event.Type = EventAttemptStart
 	case loop.EventToken:

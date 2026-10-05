@@ -22,6 +22,8 @@ const (
 	EventDiscard EventType = "discard"
 	// EventIterationDone carries a completed agent iteration.
 	EventIterationDone EventType = "iteration_done"
+	// EventToolDecision reports a policy decision before admission.
+	EventToolDecision EventType = "tool_decision"
 	// EventToolStart reports that a tool invocation has started.
 	EventToolStart EventType = "tool_start"
 	// EventToolResult reports a successful tool completion.
@@ -49,12 +51,13 @@ type Event struct {
 	// RetryDelay is the backoff selected before the next attempt.
 	RetryDelay time.Duration
 
-	Token      *ai.Token
-	Iteration  *Iteration
-	ToolCall   *ai.ToolCall
-	ToolResult *ToolResult
-	Duration   time.Duration
-	Err        error
+	Token         *ai.Token
+	Iteration     *Iteration
+	ToolCall      *ai.ToolCall
+	ToolResult    *ToolResult
+	ToolExecution *ToolExecution
+	Duration      time.Duration
+	Err           error
 }
 
 func AttemptStartEvent(iteration, attempt, retry int) Event {
@@ -185,6 +188,7 @@ func attemptTerminalEvent(eventType EventType, iterationCount, attemptID, retryC
 
 // sendEvent copies mutable tool payloads and waits for delivery or cancellation.
 func sendEvent(ctx context.Context, ch chan<- Event, event Event) error {
+	event.ToolExecution = cloneToolExecution(event.ToolExecution)
 	if event.Token != nil {
 		t := event.Token.Clone()
 		event.Token = &t

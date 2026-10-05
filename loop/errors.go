@@ -1,8 +1,22 @@
 package loop
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
+	// ErrToolPolicy identifies an authorization implementation failure.
+	ErrToolPolicy = errors.New("tool policy failed")
+	// ErrToolDenied identifies a policy refusal before invocation.
+	ErrToolDenied = errors.New("tool execution denied")
+	// ErrToolApprovalRequired identifies a call awaiting application approval.
+	ErrToolApprovalRequired = errors.New("tool approval required")
+	// ErrToolResultRejected identifies withheld output after processing.
+	ErrToolResultRejected = errors.New("tool output rejected")
+	// ErrToolOutputLimit is a safe replacement for oversized output.
+	ErrToolOutputLimit = fmt.Errorf("%w: output exceeds byte limit", ErrToolResultRejected)
+
 	// ErrToolExecutionConfig identifies invalid scheduling or registration options.
 	ErrToolExecutionConfig = errors.New("invalid tool execution configuration")
 	// ErrToolPanic is a terminal handler/processor panic; panic values are not published.

@@ -34,6 +34,9 @@ const (
 	toolOutcomeDeadline     = "deadline"
 	toolOutcomeCancellation = "cancellation"
 	toolOutcomeProcessing   = "processing_error"
+	toolOutcomeDenied       = "denied"
+	toolOutcomeApproval     = "approval_required"
+	toolOutcomeInvalidCall  = "invalid_call"
 )
 
 var (
@@ -309,6 +312,7 @@ func (o *iterationObserver) finish(err error, stats loopIterationStats) {
 }
 
 type toolObservation struct {
+	execution  *ToolExecution
 	ctx        context.Context
 	span       trace.Span
 	sink       gai.ObservationSink
@@ -350,12 +354,20 @@ func processObservedTool(ctx context.Context, input ToolPolicyInput, tools []Too
 	return processObservedToolDeadline(ctx, input, tools, processor, 0, sinks...)
 }
 
-// processObservedToolDeadline applies a cooperative handler deadline before output processing.
-func processObservedToolDeadline(ctx context.Context, input ToolPolicyInput, tools []Tool, processor ToolResultProcessor, timeout time.Duration, sinks ...gai.ObservationSink) (response *ToolResult, duration time.Duration, processErr error) {
+func processObservedToolDeadline(ctx context.Context, input ToolPolicyInput, tools []Tool, processor ToolResultProcessor, timeout time.Duration, sinks ...gai.ObservationSink) (*ToolResult, time.Duration, error) {
+	execution := ToolExecution{State: ToolNotStarted, Decision: ToolDecision{Action: ToolAllow}}
+	return processObservedToolExecution(ctx, input, tools, processor, timeout, &execution, sinks...)
+}
+func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, tools []Tool, processor ToolResultProcessor, timeout time.Duration, execution *ToolExecution, sinks ...gai.ObservationSink) (response *ToolResult, duration time.Duration, processErr error) {
 	toolCtx, observation := startToolSpan(ctx, input.Call, sinks...)
+	observation.execution = execution
 	started := time.Now()
 	defer func() {
 		if panicValue := recover(); panicValue != nil {
+			if execution.State == ToolRunning {
+				execution.State = ToolFailed
+			}
+			execution.Output = ToolOutputRejected
 			observation.finishPanic(time.Since(started))
 			panic(panicValue)
 		}
@@ -371,17 +383,26 @@ func processObservedToolDeadline(ctx context.Context, input ToolPolicyInput, too
 		invokeCtx, cancel = context.WithTimeout(toolCtx, timeout)
 	}
 	defer cancel()
-	result := CallTool(invokeCtx, input.Call, tools)
+	execution.State = ToolRunning
+	result, invoked := invokeTool(invokeCtx, input.Call, tools)
+	execution.State = ToolNotStarted
+	if invoked {
+		execution.State = invocationState(result.Err)
+	}
 	cancel()
 	duration = time.Since(started)
+	original := result
+	execution.Output = ToolOutputAccepted
 	if processor != nil {
 		input.Call = input.Call.Clone()
 		processed, err := processor.Process(toolCtx, input, result)
 		if err != nil {
+			execution.Output = ToolOutputRejected
 			return nil, duration, fmt.Errorf("%w: %w", ErrToolResultProcess, err)
 		}
 		result = normalizeToolResult(processed.Text, processed.Err)
 	}
+	execution.Output = outputState(original, &result)
 	return &result, duration, nil
 }
 
@@ -429,20 +450,21 @@ func (o *toolObservation) setOutcome(outcome string, spanErr error, duration tim
 		attrs = append(attrs, attribute.String("error.type", "gai.tool."+outcome))
 	}
 	attrs = append(attrs, attribute.String("tool.status", status))
+	if o.execution != nil {
+		attrs = append(attrs, attribute.String("gai.tool.execution", string(o.execution.State)), attribute.String("gai.tool.output", string(o.execution.Output)), attribute.String("gai.tool.decision", string(o.execution.Decision.Action)))
+	}
 	o.span.SetAttributes(attrs...)
+	fields := map[string]any{"tool_name": o.call.Name, "tool_call_id": o.call.ID, "tool_type": o.call.Type, "outcome": outcome, "tool_outcome": outcome, "status": status, "duration_ms": duration.Milliseconds()}
+	if o.execution != nil {
+		fields["execution"] = string(o.execution.State)
+		fields["output"] = string(o.execution.Output)
+		fields["decision"] = string(o.execution.Decision.Action)
+	}
 	gai.EmitObservation(o.ctx, o.sink, gai.Observation{
 		Name:   "loop_tool_finished",
 		Source: "loop:Tool",
-		Fields: map[string]any{
-			"tool_name":    o.call.Name,
-			"tool_call_id": o.call.ID,
-			"tool_type":    o.call.Type,
-			"outcome":      outcome,
-			"tool_outcome": outcome,
-			"status":       status,
-			"duration_ms":  duration.Milliseconds(),
-		},
-		Err: spanErr,
+		Fields: fields,
+		Err:    spanErr,
 	})
 	gai.EndSpan(o.span, spanErr)
 }
@@ -458,6 +480,12 @@ func toolResult(response *ToolResult) (outcome string, output string, spanErr er
 	}
 	output = responseErr.Error()
 	switch {
+	case errors.Is(responseErr, ErrToolDenied):
+		return toolOutcomeDenied, output, ErrToolDenied
+	case errors.Is(responseErr, ErrToolApprovalRequired):
+		return toolOutcomeApproval, output, ErrToolApprovalRequired
+	case errors.Is(responseErr, ErrToolCallMalformed), errors.Is(responseErr, ErrToolReqValidation), errors.Is(responseErr, ErrToolNotFound), errors.Is(responseErr, ai.ErrInvalidToolCall):
+		return toolOutcomeInvalidCall, output, errObservedToolExecution
 	case errors.Is(responseErr, context.DeadlineExceeded):
 		return toolOutcomeDeadline, output, errObservedToolDeadline
 	case errors.Is(responseErr, context.Canceled):
