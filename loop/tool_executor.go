@@ -136,14 +136,12 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 					outcome, safeErr = toolOutcomePanic, errObservedToolPanic
 				}
 			}
-			fields := map[string]any{"tool_name": task.pending.call.Name, "tool_call_id": task.pending.call.ID, "tool_type": task.pending.call.Type, "outcome": outcome, "tool_outcome": outcome, "status": "success", "duration_ms": int64(0), "invoked": false}
+			status := "success"
 			if safeErr != nil {
-				fields["status"] = "error"
-				fields["error_code"] = "gai.tool." + outcome
+				status = "error"
 			}
-			fields["execution"] = string(done.execution.State)
-			fields["decision"] = string(done.execution.Decision.Action)
-			fields["output"] = string(done.execution.Output)
+			fields := toolObservationFields(task.pending.call, &done.execution, outcome, status, 0)
+			fields["invoked"] = false
 			gai.EmitObservation(ctx, l.ObservationSink, gai.Observation{
 				Name: "loop_tool_finished", Source: "loop:Tool", Err: safeErr, Fields: fields,
 			})

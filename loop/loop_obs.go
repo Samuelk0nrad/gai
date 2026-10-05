@@ -454,12 +454,7 @@ func (o *toolObservation) setOutcome(outcome string, spanErr error, duration tim
 		attrs = append(attrs, attribute.String("gai.tool.execution", string(o.execution.State)), attribute.String("gai.tool.output", string(o.execution.Output)), attribute.String("gai.tool.decision", string(o.execution.Decision.Action)))
 	}
 	o.span.SetAttributes(attrs...)
-	fields := map[string]any{"tool_name": o.call.Name, "tool_call_id": o.call.ID, "tool_type": o.call.Type, "outcome": outcome, "tool_outcome": outcome, "status": status, "duration_ms": duration.Milliseconds()}
-	if o.execution != nil {
-		fields["execution"] = string(o.execution.State)
-		fields["output"] = string(o.execution.Output)
-		fields["decision"] = string(o.execution.Decision.Action)
-	}
+	fields := toolObservationFields(o.call, o.execution, outcome, status, duration)
 	gai.EmitObservation(o.ctx, o.sink, gai.Observation{
 		Name:   "loop_tool_finished",
 		Source: "loop:Tool",
@@ -467,6 +462,22 @@ func (o *toolObservation) setOutcome(outcome string, spanErr error, duration tim
 		Err:    spanErr,
 	})
 	gai.EndSpan(o.span, spanErr)
+}
+
+// The shared observation finalizer normalizes outcome to "error" and removes
+// Err. Keep the safe tool-specific classification in a separate scalar field.
+func toolObservationFields(call ai.ToolCall, execution *ToolExecution, outcome, status string, duration time.Duration) map[string]any {
+	fields := map[string]any{"tool_name": call.Name, "tool_call_id": call.ID, "tool_type": call.Type, "outcome": outcome, "tool_outcome": outcome, "status": status, "duration_ms": duration.Milliseconds()}
+	if status == "error" {
+		fields["error_code"] = "gai.tool." + outcome
+	}
+	if execution != nil {
+		fields["execution"] = string(execution.State)
+		fields["output"] = string(execution.Output)
+		fields["decision"] = string(execution.Decision.Action)
+		fields["approval"] = string(execution.Approval.Action)
+	}
+	return fields
 }
 
 // toolResult separates model-facing output from safe telemetry errors.

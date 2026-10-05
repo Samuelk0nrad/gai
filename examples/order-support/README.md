@@ -4,6 +4,8 @@ This example shows the shortest end-to-end GAI workflow that is still representa
 
 - an OpenAI-backed agent;
 - a typed `lookup_order` tool;
+- a read-only tool registration, a name allowlist, at most four concurrent
+  tool pipelines, a five-second handler deadline, and a 4096-byte output limit;
 - provider-native tool calling;
 - a 2048-token request window checked before every generation, with 500 tokens
   reserved for output and a 128-token estimation margin;
@@ -60,3 +62,8 @@ The tests call the tool directly and do not require network access:
 ```bash
 go test ./examples/order-support
 ```
+
+The output limit replaces oversized results with a safe tool error; it does not
+truncate JSON. Handler deadlines are cooperative. See
+[tool execution](../../docs/tool-execution.md) for approval resolvers, shared
+guards, result redaction, and per-run overrides.
