@@ -233,8 +233,7 @@ func (t *LookupOrderTool) Function(
 Use `loop.NewTool(name, description, params, handler)` to wrap a handler without a
 custom struct. A non-nil handler error becomes a tool failure the model can read.
 `ToolResultProcessor` can transform results before they reach the conversation,
-events, or loop telemetry. See the [loop API reference](https://pkg.go.dev/github.com/lace-ai/gai/loop)
-for details.
+events, or loop telemetry.
 
 Attach tools to an agent definition:
 
