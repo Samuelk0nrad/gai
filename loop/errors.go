@@ -12,6 +12,8 @@ var (
 	ErrToolDenied = errors.New("tool execution denied")
 	// ErrToolApprovalRequired identifies a call awaiting application approval.
 	ErrToolApprovalRequired = errors.New("tool approval required")
+	// ErrToolApproval identifies resolver failures and mismatched responses.
+	ErrToolApproval = errors.New("tool approval failed")
 	// ErrToolResultRejected identifies withheld output after processing.
 	ErrToolResultRejected = errors.New("tool output rejected")
 	// ErrToolOutputLimit is a safe replacement for oversized output.

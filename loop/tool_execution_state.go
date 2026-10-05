@@ -31,8 +31,11 @@ const (
 // the final publication; a successful side effect may have rejected output.
 type ToolExecution struct {
 	Decision ToolDecision
-	State    ToolExecutionState
-	Output   ToolOutputState
+	// Approval preserves the resolver outcome separately from the original policy.
+	ApprovalID string
+	Approval   ToolDecision
+	State      ToolExecutionState
+	Output     ToolOutputState
 }
 
 func cloneToolExecution(value *ToolExecution) *ToolExecution {

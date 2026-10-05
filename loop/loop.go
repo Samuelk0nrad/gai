@@ -64,6 +64,9 @@ type Loop struct {
 	ToolExecution ToolExecutionConfig
 	// ToolPolicy authorizes calls before scheduling. Nil allows registered tools.
 	ToolPolicy ToolPolicy
+	// ToolApprovalResolver resolves policy-required approvals within a live run.
+	// Nil refuses those calls with ErrToolApprovalRequired.
+	ToolApprovalResolver ToolApprovalResolver
 	// ToolChoice controls whether and how the model may call Tools.
 	ToolChoice ai.ToolChoice
 	// ToolTransport controls whether Tools are serialized into AIRequest.Tools.
@@ -115,6 +118,9 @@ func (l *Loop) Validate() error {
 	}
 	if l.ToolPolicy != nil && nilImplementation(l.ToolPolicy) {
 		return fmt.Errorf("%w: typed nil policy", ErrToolPolicy)
+	}
+	if l.ToolApprovalResolver != nil && nilImplementation(l.ToolApprovalResolver) {
+		return fmt.Errorf("%w: typed nil resolver", ErrToolApproval)
 	}
 	if err := l.ToolExecution.Validate(); err != nil {
 		return err
@@ -335,6 +341,11 @@ func sendTerminalEvent(_ context.Context, events chan<- Event, event Event) {
 func cancellationError(ctx context.Context, err error) error {
 	if ctx != nil && ctx.Err() != nil {
 		return ctx.Err()
+	}
+	// A live run can receive an approval resolver's private context error.
+	// Preserve that failure and its cause without marking the run canceled.
+	if errors.Is(err, ErrToolApproval) {
+		return nil
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err

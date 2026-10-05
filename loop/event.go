@@ -24,6 +24,9 @@ const (
 	EventIterationDone EventType = "iteration_done"
 	// EventToolDecision reports a policy decision before admission.
 	EventToolDecision EventType = "tool_decision"
+	// Approval events precede tool admission and carry isolated request snapshots.
+	EventToolApprovalRequested EventType = "tool_approval_requested"
+	EventToolApprovalResolved  EventType = "tool_approval_resolved"
 	// EventToolStart reports that a tool invocation has started.
 	EventToolStart EventType = "tool_start"
 	// EventToolResult reports a successful tool completion.
@@ -56,6 +59,7 @@ type Event struct {
 	ToolCall      *ai.ToolCall
 	ToolResult    *ToolResult
 	ToolExecution *ToolExecution
+	ToolApproval  *ToolApprovalRequest
 	Duration      time.Duration
 	Err           error
 }
@@ -186,8 +190,12 @@ func attemptTerminalEvent(eventType EventType, iterationCount, attemptID, retryC
 	return event
 }
 
-// sendEvent copies mutable tool payloads and waits for delivery or cancellation.
-func sendEvent(ctx context.Context, ch chan<- Event, event Event) error {
+// cloneToolEventPayload isolates mutable tool and token event fields.
+func cloneToolEventPayload(event Event) Event {
+	if event.ToolApproval != nil {
+		request := event.ToolApproval.Clone()
+		event.ToolApproval = &request
+	}
 	event.ToolExecution = cloneToolExecution(event.ToolExecution)
 	if event.Token != nil {
 		t := event.Token.Clone()
@@ -202,6 +210,12 @@ func sendEvent(ctx context.Context, ch chan<- Event, event Event) error {
 		event.ToolResult = &r
 	}
 
+	return event
+}
+
+// sendEvent copies mutable tool payloads and waits for delivery or cancellation.
+func sendEvent(ctx context.Context, ch chan<- Event, event Event) error {
+	event = cloneToolEventPayload(event)
 	select {
 	case ch <- event:
 		return nil

@@ -346,3 +346,102 @@ func TestRunCancellationUnblocksFullToolEventBuffer(t *testing.T) {
 		}
 	})
 }
+
+func TestRunApprovalFailureClosesRequestedApproval(t *testing.T) {
+	for _, mode := range []string{"error", "panic", "mismatch", "canceled"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var invoked atomic.Bool
+			tool := eventTool(t, "write", false, func(context.Context, ai.ToolCall) (string, error) {
+				invoked.Store(true)
+				return "unexpected", nil
+			})
+			l := loop.New(eventModel("write"), []loop.Tool{tool}, testPromptBuilder(), nil)
+			l.ToolPolicy = loop.ToolPolicyFunc(func(context.Context, loop.ToolPolicyInput) (loop.ToolDecision, error) {
+				return loop.ToolDecision{Action: loop.ToolRequireApproval}, nil
+			})
+			l.ToolApprovalResolver = loop.ToolApprovalResolverFunc(func(_ context.Context, r loop.ToolApprovalRequest) (loop.ToolApprovalDecision, error) {
+				switch mode {
+				case "error":
+					return loop.ToolApprovalDecision{}, errors.New("resolver unavailable")
+				case "panic":
+					panic("private approval panic")
+				case "mismatch":
+					return loop.ToolApprovalDecision{RequestID: "stale", Approved: true}, nil
+				case "canceled":
+					cancel()
+					return loop.ToolApprovalDecision{RequestID: r.ID, Approved: true}, nil
+				}
+				panic("unreachable")
+			})
+			events := collectLoopEvents(t, l, ctx)
+			var requestID string
+			resolved := false
+			for _, e := range events {
+				switch e.Type {
+				case loop.EventToolApprovalRequested:
+					requestID = e.ToolApproval.ID
+				case loop.EventToolApprovalResolved:
+					resolved = true
+					if requestID == "" || e.ToolApproval.ID != requestID || e.ToolExecution.ApprovalID != requestID || e.ToolExecution.State != loop.ToolNotStarted || e.ToolExecution.Approval.Action != loop.ToolDeny || e.Err == nil {
+						t.Fatalf("incomplete approval closure: %#v", e)
+					}
+				case loop.EventError, loop.EventCanceled:
+					if !resolved {
+						t.Fatal("terminal event preceded approval closure")
+					}
+				}
+			}
+			if !resolved || invoked.Load() {
+				t.Fatalf("resolved=%v invoked=%v", resolved, invoked.Load())
+			}
+			last := events[len(events)-1]
+			if last.Type != loop.EventError && last.Type != loop.EventCanceled {
+				t.Fatalf("terminal=%s", last.Type)
+			}
+		})
+	}
+}
+
+// TestRunResolverContextErrorsRemainApprovalFailures keeps callback-local
+// timeouts and cancellation separate from cancellation of the caller's run.
+func TestRunResolverContextErrorsRemainApprovalFailures(t *testing.T) {
+	for _, cause := range []error{context.DeadlineExceeded, context.Canceled} {
+		for _, wrapped := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%v/wrapped=%v", cause, wrapped), func(t *testing.T) {
+				tool := eventTool(t, "write", false, func(context.Context, ai.ToolCall) (string, error) {
+					t.Error("failed approval invoked handler")
+					return "unexpected", nil
+				})
+				l := loop.New(eventModel("write"), []loop.Tool{tool}, testPromptBuilder(), nil)
+				l.ToolPolicy = loop.ToolPolicyFunc(func(context.Context, loop.ToolPolicyInput) (loop.ToolDecision, error) {
+					return loop.ToolDecision{Action: loop.ToolRequireApproval}, nil
+				})
+				l.ToolApprovalResolver = loop.ToolApprovalResolverFunc(func(context.Context, loop.ToolApprovalRequest) (loop.ToolApprovalDecision, error) {
+					if wrapped {
+						return loop.ToolApprovalDecision{}, fmt.Errorf("resolver-local error: %w", cause)
+					}
+					return loop.ToolApprovalDecision{}, cause
+				})
+				events := collectLoopEvents(t, l, t.Context())
+				var resolved bool
+				for _, e := range events {
+					if e.Type == loop.EventToolApprovalResolved {
+						resolved = true
+						if e.Err != loop.ErrToolApproval || e.ToolExecution.Approval.Code != "approval_failed" {
+							t.Fatalf("resolver failure mislabeled: %#v", e)
+						}
+					}
+					if e.Type == loop.EventCanceled {
+						t.Fatal("resolver-local context failure canceled the run")
+					}
+				}
+				terminal := events[len(events)-1]
+				if !resolved || terminal.Type != loop.EventError || !errors.Is(terminal.Err, loop.ErrToolApproval) || !errors.Is(terminal.Err, cause) {
+					t.Fatalf("approval cause or terminal outcome lost: %#v", terminal)
+				}
+			})
+		}
+	}
+}

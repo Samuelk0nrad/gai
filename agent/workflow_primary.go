@@ -172,7 +172,15 @@ func mapLoopEvent(low loop.Event, source EventSource) (Event, bool) {
 		execution := *low.ToolExecution
 		event.ToolExecution = &execution
 	}
+	if low.ToolApproval != nil {
+		request := low.ToolApproval.Clone()
+		event.ToolApproval = &request
+	}
 	switch low.Type {
+	case loop.EventToolApprovalRequested:
+		event.Type = EventToolApprovalRequested
+	case loop.EventToolApprovalResolved:
+		event.Type = EventToolApprovalResolved
 	case loop.EventToolDecision:
 		event.Type = EventToolDecision
 	case loop.EventAttemptStart:
