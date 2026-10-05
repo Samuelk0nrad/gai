@@ -99,8 +99,8 @@ type Event struct {
 
 	Iteration *loop.Iteration
 
-	ToolCall     *ai.ToolCall
-	ToolResponse *loop.ToolResponse
+	ToolCall   *ai.ToolCall
+	ToolResult *loop.ToolResult
 
 	RetryReason string
 	RetryDelay  time.Duration
@@ -132,6 +132,7 @@ func cloneOutputParts(parts []OutputPart) []OutputPart {
 	return cloned
 }
 
+// cloneEvent isolates mutable event payloads while sharing immutable errors.
 func cloneEvent(event Event) Event {
 	cloned := event
 	if event.Output != nil {
@@ -143,6 +144,6 @@ func cloneEvent(event Event) Event {
 		cloned.Iteration = &iteration
 	}
 	cloned.ToolCall = cloneToolCall(event.ToolCall)
-	cloned.ToolResponse = cloneToolResponse(event.ToolResponse)
+	cloned.ToolResult = cloneToolResult(event.ToolResult)
 	return cloned
 }

@@ -52,7 +52,7 @@ explicit provider preflight. OpenAI does not advertise full-request preflight.
 
 1. `Params` defines a typed JSON Schema for the model.
 2. `Function` decodes arguments with `loop.DecodeToolArgs`.
-3. The tool returns structured JSON with `loop.NewToolSuccess`.
+3. The tool returns structured JSON as a string and a nil error.
 4. The loop adds the tool result to the conversation and asks the model for the final response.
 
 The tests call the tool directly and do not require network access:

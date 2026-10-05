@@ -72,6 +72,8 @@ func (m *scriptedWorkflowModel) Requests() []ai.AIRequest {
 	return append([]ai.AIRequest(nil), m.requests...)
 }
 
+// TestAgentWorkflowEndToEndWithToolCall checks that tool events, retained results, reconstructed
+// messages, and response-format snapshots agree across a complete workflow.
 func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 	model := &scriptedWorkflowModel{
 		scripts: [][]ai.Token{
@@ -131,7 +133,7 @@ func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 		if event.Type == agent.EventToolStart && event.Source.Kind == agent.SourcePrimary && event.ToolCall != nil && event.ToolCall.Name == "echo" {
 			toolStart = true
 		}
-		if event.Type == agent.EventToolResult && event.Source.Kind == agent.SourcePrimary && event.ToolResponse != nil && event.ToolResponse.TextValue() == "tool says hi" {
+		if event.Type == agent.EventToolResult && event.Source.Kind == agent.SourcePrimary && event.ToolResult != nil && event.ToolResult.Text == "tool says hi" {
 			toolResult = true
 		}
 	}
@@ -173,7 +175,7 @@ func TestAgentWorkflowEndToEndWithToolCall(t *testing.T) {
 	if toolPart == nil || toolPart.ToolResp == nil {
 		t.Fatalf("expected first iteration to contain executed tool call, got %+v", first.Parts)
 	}
-	if toolPart.ToolResp.TextValue() != "tool says hi" {
+	if toolPart.ToolResp.Text != "tool says hi" {
 		t.Fatalf("unexpected tool response: %+v", toolPart.ToolResp)
 	}
 	if len(result.Primary.Messages) != 4 {

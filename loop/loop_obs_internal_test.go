@@ -20,13 +20,7 @@ import (
 
 type observedTestTool struct {
 	name string
-	call func(context.Context, *ai.ToolCall) *ToolResponse
-}
-
-type toolResponseProcessorFunc func(ai.ToolCall, *ToolResponse) error
-
-func (f toolResponseProcessorFunc) Process(call ai.ToolCall, response *ToolResponse) error {
-	return f(call, response)
+	call func(context.Context, ai.ToolCall) (string, error)
 }
 
 func TestLoopRunSpanUsesRetryPolicyLimit(t *testing.T) {
@@ -51,6 +45,8 @@ func TestLoopRunSpanUsesRetryPolicyLimit(t *testing.T) {
 	}
 }
 
+// TestToolObservationEmitsOutcomeToSink checks that finished observations identify the tool call
+// and report its successful outcome.
 func TestToolObservationEmitsOutcomeToSink(t *testing.T) {
 	var emitted gai.Observation
 	sink := gai.ObservationSinkFunc(func(_ context.Context, observation gai.Observation) {
@@ -58,8 +54,8 @@ func TestToolObservationEmitsOutcomeToSink(t *testing.T) {
 	})
 	call := ai.ToolCall{ID: "call-1", Type: "function", Name: "test", Args: json.RawMessage(`{}`)}
 
-	callObservedTool(t.Context(), call, []Tool{observedTestTool{name: "test", call: func(context.Context, *ai.ToolCall) *ToolResponse {
-		return NewToolSuccess("ok")
+	callObservedTool(t.Context(), call, []Tool{observedTestTool{name: "test", call: func(context.Context, ai.ToolCall) (string, error) {
+		return "ok", nil
 	}}}, sink)
 
 	if emitted.Name != "loop_tool_finished" || emitted.Source != "loop:Tool" {
@@ -70,6 +66,8 @@ func TestToolObservationEmitsOutcomeToSink(t *testing.T) {
 	}
 }
 
+// TestExecuteToolCallsDurationExcludesSinkEmissionLatency keeps handler duration independent of
+// a slow observation sink and consistent between events and telemetry.
 func TestExecuteToolCallsDurationExcludesSinkEmissionLatency(t *testing.T) {
 	sinkEntered := make(chan struct{})
 	releaseSink := make(chan struct{})
@@ -79,8 +77,8 @@ func TestExecuteToolCallsDurationExcludesSinkEmissionLatency(t *testing.T) {
 		close(sinkEntered)
 		<-releaseSink
 	})
-	tool := observedTestTool{name: "fast", call: func(context.Context, *ai.ToolCall) *ToolResponse {
-		return NewToolSuccess("ok")
+	tool := observedTestTool{name: "fast", call: func(context.Context, ai.ToolCall) (string, error) {
+		return "ok", nil
 	}}
 	l := &Loop{Tools: []Tool{tool}, ObservationSink: sink}
 	iteration := &Iteration{Parts: make([]IterationPart, 1)}
@@ -117,40 +115,43 @@ func TestExecuteToolCallsDurationExcludesSinkEmissionLatency(t *testing.T) {
 func (t observedTestTool) Name() string              { return t.name }
 func (t observedTestTool) Description() string       { return "Test tool." }
 func (t observedTestTool) Params() ai.ToolParameters { return NewEchoTool().Params() }
-func (t observedTestTool) Function(ctx context.Context, call *ai.ToolCall) *ToolResponse {
+// Function delegates to a supplied callback so observation tests control each handler outcome.
+func (t observedTestTool) Function(ctx context.Context, call ai.ToolCall) (string, error) {
 	return t.call(ctx, call)
 }
 
+// TestToolObservationOutcomes checks safe telemetry classifications for success, empty output,
+// tool errors, deadlines, and cancellation.
 func TestToolObservationOutcomes(t *testing.T) {
 	tests := []struct {
 		name    string
 		ctx     func(*testing.T) context.Context
-		call    func(context.Context, *ai.ToolCall) *ToolResponse
+		call    func(context.Context, ai.ToolCall) (string, error)
 		outcome string
 	}{
-		{name: "success", call: func(context.Context, *ai.ToolCall) *ToolResponse {
-			return NewToolSuccess("ok")
+		{name: "success", call: func(context.Context, ai.ToolCall) (string, error) {
+			return "ok", nil
 		}, outcome: toolOutcomeSuccess},
-		{name: "tool error", call: func(context.Context, *ai.ToolCall) *ToolResponse {
-			return NewToolError(errors.New("tool-error-sentinel-secret"))
+		{name: "tool error", call: func(context.Context, ai.ToolCall) (string, error) {
+			return "", errors.New("tool-error-sentinel-secret")
 		}, outcome: toolOutcomeError},
 		{name: "deadline", ctx: func(t *testing.T) context.Context {
 			ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 			t.Cleanup(cancel)
 			return ctx
-		}, call: func(ctx context.Context, _ *ai.ToolCall) *ToolResponse {
-			return NewToolError(fmt.Errorf("wrapped: %w", ctx.Err()))
+		}, call: func(ctx context.Context, _ ai.ToolCall) (string, error) {
+			return "", fmt.Errorf("wrapped: %w", ctx.Err())
 		}, outcome: toolOutcomeDeadline},
 		{name: "cancellation", ctx: func(t *testing.T) context.Context {
 			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
 			return ctx
-		}, call: func(ctx context.Context, _ *ai.ToolCall) *ToolResponse {
-			return NewToolError(fmt.Errorf("wrapped: %w", ctx.Err()))
+		}, call: func(ctx context.Context, _ ai.ToolCall) (string, error) {
+			return "", fmt.Errorf("wrapped: %w", ctx.Err())
 		}, outcome: toolOutcomeCancellation},
-		{name: "missing response", call: func(context.Context, *ai.ToolCall) *ToolResponse {
-			return nil
-		}, outcome: toolOutcomeMissingResponse},
+		{name: "empty success", call: func(context.Context, ai.ToolCall) (string, error) {
+			return "", nil
+		}, outcome: toolOutcomeSuccess},
 	}
 
 	for _, tt := range tests {
@@ -185,6 +186,8 @@ func TestToolObservationOutcomes(t *testing.T) {
 	}
 }
 
+// TestObservedToolPanicFinalizesAndRepanics ensures a panic closes its tool span with safe
+// metadata before propagating the original panic value.
 func TestObservedToolPanicFinalizesAndRepanics(t *testing.T) {
 	recorder := obstest.Install(t)
 	panicValue := errors.New("panic-sentinel-secret")
@@ -193,7 +196,7 @@ func TestObservedToolPanicFinalizesAndRepanics(t *testing.T) {
 		emitted = observation
 	})
 	call := ai.ToolCall{ID: "call-panic", Type: "function", Name: "panic", Args: json.RawMessage(`{}`)}
-	tool := observedTestTool{name: "panic", call: func(context.Context, *ai.ToolCall) *ToolResponse {
+	tool := observedTestTool{name: "panic", call: func(context.Context, ai.ToolCall) (string, error) {
 		time.Sleep(10 * time.Millisecond)
 		panic(panicValue)
 	}}
@@ -220,26 +223,8 @@ func TestObservedToolPanicFinalizesAndRepanics(t *testing.T) {
 	}
 }
 
-func TestToolObservationMissingResponseOmitsOutput(t *testing.T) {
-	recorder := obstest.Install(t)
-	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{ToolOutput: gai.CaptureEnabled})
-	call := ai.ToolCall{ID: "call-missing", Type: "function", Name: "missing", Args: json.RawMessage(`{}`)}
-	tool := observedTestTool{name: "missing", call: func(context.Context, *ai.ToolCall) *ToolResponse {
-		return nil
-	}}
-	callObservedTool(ctx, call, []Tool{tool})
-
-	attrs := obstest.Attributes(requireToolSpans(t, recorder, 1)[0])
-	if got := attrs["gai.tool.outcome"].AsString(); got != toolOutcomeMissingResponse {
-		t.Fatalf("gai.tool.outcome = %q, want %q", got, toolOutcomeMissingResponse)
-	}
-	for _, key := range []string{"tool.output", "gen_ai.tool.call.result", "langfuse.observation.output"} {
-		if _, ok := attrs[key]; ok {
-			t.Fatalf("missing response exported %q: %#v", key, attrs[key])
-		}
-	}
-}
-
+// TestToolObservationUsesPolicyGatedContentAliases verifies that opted-in, redacted content is
+// consistent across tool, GenAI, and Langfuse attributes.
 func TestToolObservationUsesPolicyGatedContentAliases(t *testing.T) {
 	recorder := obstest.Install(t)
 	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{
@@ -249,8 +234,8 @@ func TestToolObservationUsesPolicyGatedContentAliases(t *testing.T) {
 		},
 	})
 	call := ai.ToolCall{ID: "call-content", Type: "function", Name: "content", Args: json.RawMessage(`{"text":"secret"}`)}
-	tool := observedTestTool{name: "content", call: func(context.Context, *ai.ToolCall) *ToolResponse {
-		return NewToolSuccess(`{"result":"secret"}`)
+	tool := observedTestTool{name: "content", call: func(context.Context, ai.ToolCall) (string, error) {
+		return `{"result":"secret"}`, nil
 	}}
 	callObservedTool(ctx, call, []Tool{tool})
 
@@ -275,13 +260,15 @@ func TestToolObservationUsesPolicyGatedContentAliases(t *testing.T) {
 	}
 }
 
+// TestToolObservationCapturesInvalidJSONAndTruncatesLargeValues retains malformed input for
+// opted-in diagnostics while bounding captured content and recording truncation.
 func TestToolObservationCapturesInvalidJSONAndTruncatesLargeValues(t *testing.T) {
 	t.Run("invalid JSON", func(t *testing.T) {
 		recorder := obstest.Install(t)
 		ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{ToolInput: gai.CaptureEnabled})
 		call := ai.ToolCall{ID: "call-invalid", Type: "function", Name: "content", Args: json.RawMessage(`{"broken"`)}
-		tool := observedTestTool{name: "content", call: func(context.Context, *ai.ToolCall) *ToolResponse {
-			return NewToolSuccess("ok")
+		tool := observedTestTool{name: "content", call: func(context.Context, ai.ToolCall) (string, error) {
+			return "ok", nil
 		}}
 		callObservedTool(ctx, call, []Tool{tool})
 
@@ -297,8 +284,8 @@ func TestToolObservationCapturesInvalidJSONAndTruncatesLargeValues(t *testing.T)
 			ToolInput: gai.CaptureEnabled, ToolOutput: gai.CaptureEnabled, MaxBytes: 24,
 		})
 		call := ai.ToolCall{ID: "call-large", Type: "function", Name: "content", Args: json.RawMessage(`{"text":"abcdefghijklmnopqrstuvwxyz"}`)}
-		tool := observedTestTool{name: "content", call: func(context.Context, *ai.ToolCall) *ToolResponse {
-			return NewToolSuccess(strings.Repeat("x", 64))
+		tool := observedTestTool{name: "content", call: func(context.Context, ai.ToolCall) (string, error) {
+			return strings.Repeat("x", 64), nil
 		}}
 		callObservedTool(ctx, call, []Tool{tool})
 
@@ -315,11 +302,13 @@ func TestToolObservationCapturesInvalidJSONAndTruncatesLargeValues(t *testing.T)
 	})
 }
 
+// TestToolObservationOmitsContentByDefault ensures default tracing exports no tool arguments or
+// results through any supported content alias.
 func TestToolObservationOmitsContentByDefault(t *testing.T) {
 	recorder := obstest.Install(t)
 	call := ai.ToolCall{ID: "call-private", Type: "function", Name: "content", Args: json.RawMessage(`{"secret":"input"}`)}
-	tool := observedTestTool{name: "content", call: func(context.Context, *ai.ToolCall) *ToolResponse {
-		return NewToolSuccess("output-secret")
+	tool := observedTestTool{name: "content", call: func(context.Context, ai.ToolCall) (string, error) {
+		return "output-secret", nil
 	}}
 	callObservedTool(t.Context(), call, []Tool{tool})
 
@@ -334,11 +323,13 @@ func TestToolObservationOmitsContentByDefault(t *testing.T) {
 	}
 }
 
+// TestToolObservationFinishesOnce ensures the first finalization fixes the span outcome despite
+// later error or panic completion attempts.
 func TestToolObservationFinishesOnce(t *testing.T) {
 	recorder := obstest.Install(t)
 	_, observation := startToolSpan(t.Context(), ai.ToolCall{ID: "call-once", Name: "once"})
-	observation.finish(NewToolSuccess("ok"), false, 0)
-	observation.finish(NewToolError(errors.New("late error")), false, 0)
+	observation.finish(&ToolResult{Text: "ok"}, 0)
+	observation.finish(&ToolResult{Err: errors.New("late error")}, 0)
 	observation.finishPanic(0)
 
 	span := requireToolSpans(t, recorder, 1)[0]
@@ -347,6 +338,8 @@ func TestToolObservationFinishesOnce(t *testing.T) {
 	}
 }
 
+// TestExecuteToolCallsCreatesConcurrentChildSpans verifies overlapping handlers and sink
+// callbacks produce one correctly parented span per invocation.
 func TestExecuteToolCallsCreatesConcurrentChildSpans(t *testing.T) {
 	recorder := obstest.Install(t)
 	entered := make(chan string, 2)
@@ -355,10 +348,10 @@ func TestExecuteToolCallsCreatesConcurrentChildSpans(t *testing.T) {
 	releaseSink := make(chan struct{})
 	var observationsMu sync.Mutex
 	var observations []gai.Observation
-	tool := observedTestTool{name: "concurrent", call: func(_ context.Context, call *ai.ToolCall) *ToolResponse {
+	tool := observedTestTool{name: "concurrent", call: func(_ context.Context, call ai.ToolCall) (string, error) {
 		entered <- call.ID
 		<-release
-		return NewToolSuccess(call.ID)
+		return call.ID, nil
 	}}
 	l := &Loop{
 		Tools: []Tool{tool},
@@ -426,9 +419,11 @@ func TestExecuteToolCallsCreatesConcurrentChildSpans(t *testing.T) {
 	}
 }
 
+// TestExecuteToolCallsEmitsToolEvents checks start-before-result ordering and preservation of
+// call, iteration, attempt, and retry identifiers.
 func TestExecuteToolCallsEmitsToolEvents(t *testing.T) {
-	tool := observedTestTool{name: "event", call: func(context.Context, *ai.ToolCall) *ToolResponse {
-		return NewToolSuccess("ok")
+	tool := observedTestTool{name: "event", call: func(context.Context, ai.ToolCall) (string, error) {
+		return "ok", nil
 	}}
 	l := &Loop{Tools: []Tool{tool}}
 	iteration := &Iteration{Parts: make([]IterationPart, 1)}
@@ -460,15 +455,17 @@ func TestExecuteToolCallsEmitsToolEvents(t *testing.T) {
 	}
 }
 
+// TestExecuteToolCallsEmitsToolErrorWhenResponseProcessingFails preserves the processor error
+// cause and emits a tool-error event when result processing fails.
 func TestExecuteToolCallsEmitsToolErrorWhenResponseProcessingFails(t *testing.T) {
 	processorErr := errors.New("reject tool response")
-	tool := observedTestTool{name: "event", call: func(context.Context, *ai.ToolCall) *ToolResponse {
-		return NewToolSuccess("ok")
+	tool := observedTestTool{name: "event", call: func(context.Context, ai.ToolCall) (string, error) {
+		return "ok", nil
 	}}
 	l := &Loop{
 		Tools: []Tool{tool},
-		ToolResponseProcessor: toolResponseProcessorFunc(func(ai.ToolCall, *ToolResponse) error {
-			return processorErr
+		ToolResultProcessor: ToolResultProcessorFunc(func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error) {
+			return ToolResult{}, processorErr
 		}),
 	}
 	iteration := &Iteration{Parts: make([]IterationPart, 1)}
@@ -479,7 +476,7 @@ func TestExecuteToolCallsEmitsToolErrorWhenResponseProcessingFails(t *testing.T)
 	events := make(chan Event, 2)
 
 	err := l.executeToolCalls(t.Context(), iteration, calls, l.Tools, events, 3, 4, 5)
-	if !errors.Is(err, ErrToolResponseProcess) || !errors.Is(err, processorErr) {
+	if !errors.Is(err, ErrToolResultProcess) || !errors.Is(err, processorErr) {
 		t.Fatalf("executeToolCalls error = %v, want wrapped processor error", err)
 	}
 	close(events)
@@ -499,13 +496,15 @@ func TestExecuteToolCallsEmitsToolErrorWhenResponseProcessingFails(t *testing.T)
 	}
 }
 
+// TestExecuteToolCallsReturnsCanceledWhenToolResultEventCannotBeSent ensures cancellation
+// releases execution when no consumer can receive the result event.
 func TestExecuteToolCallsReturnsCanceledWhenToolResultEventCannotBeSent(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	release := make(chan struct{})
-	tool := observedTestTool{name: "event", call: func(context.Context, *ai.ToolCall) *ToolResponse {
+	tool := observedTestTool{name: "event", call: func(context.Context, ai.ToolCall) (string, error) {
 		<-release
-		return NewToolSuccess("ok")
+		return "ok", nil
 	}}
 	l := &Loop{Tools: []Tool{tool}}
 	iteration := &Iteration{Parts: make([]IterationPart, 1)}
@@ -562,4 +561,34 @@ func toolSpanText(span sdktrace.ReadOnlySpan) string {
 		}
 	}
 	return text.String()
+}
+
+// TestProcessorFailureHasDistinctSafeObservation keeps filter failures separate from handler failures.
+func TestProcessorFailureHasDistinctSafeObservation(t *testing.T) {
+	recorder := obstest.Install(t)
+	var observed gai.Observation
+	sink := gai.ObservationSinkFunc(func(_ context.Context, event gai.Observation) {
+		if event.Name == "loop_tool_finished" {
+			observed = event
+		}
+	})
+	tool, err := NewTool("test", "Test", ai.ToolParameters{}, func(context.Context, ai.ToolCall) (string, error) { return "secret-output", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor := ToolResultProcessorFunc(func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error) {
+		return ToolResult{}, errors.New("secret-processor-error")
+	})
+	ctx := gai.WithContentCapturePolicy(t.Context(), gai.ContentCapturePolicy{ToolOutput: gai.CaptureEnabled})
+	result, _, err := processObservedTool(ctx, ToolPolicyInput{Call: ai.ToolCall{ID: "1", Name: "test", Type: "function", Args: []byte(`{}`)}}, []Tool{tool}, processor, sink)
+	if result != nil || !errors.Is(err, ErrToolResultProcess) {
+		t.Fatalf("result=%v err=%v", result, err)
+	}
+	span := requireToolSpans(t, recorder, 1)[0]
+	if obstest.Attributes(span)["gai.tool.outcome"].AsString() != toolOutcomeProcessing || observed.Fields["tool_outcome"] != toolOutcomeProcessing {
+		t.Fatalf("observation=%v", observed)
+	}
+	if strings.Contains(toolSpanText(span), "secret-") {
+		t.Fatal("raw output/error escaped")
+	}
 }

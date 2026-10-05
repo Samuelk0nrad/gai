@@ -229,14 +229,15 @@ type searchContents struct {
 	Highlights bool `json:"highlights"`
 }
 
-func (t *SearchTool) Function(ctx context.Context, call *ai.ToolCall) (response *loop.ToolResponse) {
+// Function searches Exa and returns JSON; it honors ctx and preserves direct panic behavior.
+func (t *SearchTool) Function(ctx context.Context, call ai.ToolCall) (text string, err error) {
 	ctx, observer := newSearchObserver(ctx, t.debug, t.searchType, t.numResults)
 	defer func() {
-		if response == nil {
-			observer.Finish(errors.New("exa search returned no tool response"))
-			return
+		if value := recover(); value != nil {
+			observer.Finish(errObservedExaSearch)
+			panic(value)
 		}
-		observer.Finish(response.ErrorValue())
+		observer.Finish(err)
 	}()
 
 	var args searchArgs
@@ -300,7 +301,7 @@ func (t *SearchTool) Function(ctx context.Context, call *ai.ToolCall) (response 
 	}
 	observer.Succeeded(ctx, metadata.RequestID, len(metadata.Results), len(body))
 
-	return loop.NewToolSuccess(string(body))
+	return string(body), nil
 }
 
 func decodeAPIError(statusCode int, requestID string, body []byte) *APIError {

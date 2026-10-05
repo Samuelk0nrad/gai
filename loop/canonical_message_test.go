@@ -53,29 +53,31 @@ type canonicalParallelTool struct {
 func (*canonicalParallelTool) Name() string              { return "echo" }
 func (*canonicalParallelTool) Description() string       { return "Returns identified test results." }
 func (*canonicalParallelTool) Params() ai.ToolParameters { return loop.NewEchoTool().Params() }
-func (tool *canonicalParallelTool) Function(ctx context.Context, call *ai.ToolCall) *loop.ToolResponse {
+// Function forces the second call to fail before the first succeeds, making completion order
+// differ from model order.
+func (tool *canonicalParallelTool) Function(ctx context.Context, call ai.ToolCall) (string, error) {
 	tool.calls.Add(1)
 	select {
 	case <-tool.release:
 	case <-ctx.Done():
-		return loop.NewToolError(ctx.Err())
+		return "", ctx.Err()
 	}
 	var args struct {
 		Text string `json:"text"`
 	}
 	if err := json.Unmarshal(call.Args, &args); err != nil {
-		return loop.NewToolError(err)
+		return "", err
 	}
 	if call.ID == "second" {
 		close(tool.secondDone)
-		return loop.NewToolError(errors.New(args.Text + " unavailable"))
+		return "", errors.New(args.Text + " unavailable")
 	}
 	select {
 	case <-tool.secondDone:
 	case <-ctx.Done():
-		return loop.NewToolError(ctx.Err())
+		return "", ctx.Err()
 	}
-	return loop.NewToolSuccess(args.Text)
+	return args.Text, nil
 }
 
 func canonicalLoopCall(id, text string) ai.ContentPart {
@@ -118,6 +120,9 @@ func mutateCanonicalParts(parts []ai.ContentPart) {
 	}
 }
 
+// TestLoopCanonicalMixedPartsSurviveRetryParallelToolsAndEventMutation protects canonical
+// message order and ownership across generation retries, parallel tool completion, and
+// event-consumer mutation.
 func TestLoopCanonicalMixedPartsSurviveRetryParallelToolsAndEventMutation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -177,8 +182,8 @@ func TestLoopCanonicalMixedPartsSurviveRetryParallelToolsAndEventMutation(t *tes
 				mutateCanonicalParts([]ai.ContentPart{*event.Token.Part})
 			}
 		}
-		if event.ToolResponse != nil && event.ToolResponse.Text != nil {
-			*event.ToolResponse.Text = "mutated result"
+		if event.ToolResult != nil {
+			event.ToolResult.Text = "mutated result"
 		}
 		if event.Iteration != nil {
 			for i := range event.Iteration.Conversation {
@@ -187,8 +192,8 @@ func TestLoopCanonicalMixedPartsSurviveRetryParallelToolsAndEventMutation(t *tes
 			for i := range event.Iteration.Parts {
 				part := &event.Iteration.Parts[i]
 				mutateCanonicalCall(part.ToolReq)
-				if part.ToolResp != nil && part.ToolResp.Text != nil {
-					*part.ToolResp.Text = "mutated stored result"
+				if part.ToolResp != nil {
+					part.ToolResp.Text = "mutated stored result"
 				}
 			}
 		}

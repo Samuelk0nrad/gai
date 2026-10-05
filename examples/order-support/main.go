@@ -74,21 +74,22 @@ func (t *lookupOrderTool) Params() ai.ToolParameters {
 	}
 }
 
-func (t *lookupOrderTool) Function(ctx context.Context, req *ai.ToolCall) *loop.ToolResponse {
+// Function validates an order ID and returns the local order record as JSON.
+func (t *lookupOrderTool) Function(ctx context.Context, req ai.ToolCall) (string, error) {
 	select {
 	case <-ctx.Done():
-		return loop.NewToolError(ctx.Err())
+		return "", ctx.Err()
 	default:
 	}
 
 	var args lookupOrderArgs
 	if err := loop.DecodeToolArgs(req, &args); err != nil {
-		return loop.NewToolError(err)
+		return "", err
 	}
 
 	orderID := strings.ToUpper(strings.TrimSpace(args.OrderID))
 	if orderID == "" {
-		return loop.NewToolError(fmt.Errorf("order_id must not be empty"))
+		return "", fmt.Errorf("order_id must not be empty")
 	}
 
 	result, found := t.orders[orderID]
@@ -101,9 +102,9 @@ func (t *lookupOrderTool) Function(ctx context.Context, req *ai.ToolCall) *loop.
 
 	payload, err := json.Marshal(result)
 	if err != nil {
-		return loop.NewToolError(fmt.Errorf("encode order lookup result: %w", err))
+		return "", fmt.Errorf("encode order lookup result: %w", err)
 	}
-	return loop.NewToolSuccess(string(payload))
+	return string(payload), nil
 }
 
 func main() {

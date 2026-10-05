@@ -216,6 +216,8 @@ func TestLoopCharacterizationRequiredToolDiscardEventSequence(t *testing.T) {
 	}
 }
 
+// TestLoopCharacterizationToolErrorEventSequence checks that a handler error emits the expected
+// tool-error sequence and preserves attempt metadata while the run continues.
 func TestLoopCharacterizationToolErrorEventSequence(t *testing.T) {
 	t.Parallel()
 
@@ -244,7 +246,7 @@ func TestLoopCharacterizationToolErrorEventSequence(t *testing.T) {
 	for _, index := range []int{0, 1, 2, 3, 4} {
 		requireAttemptMetadata(t, events[index], 1, 1, 0)
 	}
-	if !errors.Is(events[3].Err, events[3].ToolResponse.ErrorValue()) {
+	if !errors.Is(events[3].Err, events[3].ToolResult.Err) {
 		t.Fatalf("tool error event = %#v, want returned tool error", events[3])
 	}
 	for _, index := range []int{5, 6, 7} {

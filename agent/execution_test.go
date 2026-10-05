@@ -209,11 +209,14 @@ func TestExecutionOpaqueBuilderRequiresExplicitTokenCounterSupport(t *testing.T)
 
 type executionProcessor struct{ text string }
 
-func (p *executionProcessor) Process(_ ai.ToolCall, res *loop.ToolResponse) error {
-	*res = *loop.NewToolSuccess(p.text)
-	return nil
+// Process replaces output with a configured marker so tests can identify the effective processor
+// override.
+func (p *executionProcessor) Process(_ context.Context, _ loop.ToolPolicyInput, _ loop.ToolResult) (loop.ToolResult, error) {
+	return loop.ToolResult{Text: p.text}, nil
 }
 
+// TestExecutionRejectsInvalidResolvedValuesBeforePrompt ensures invalid resolved settings fail
+// before prompt construction and emit a run-creation failure observation.
 func TestExecutionRejectsInvalidResolvedValuesBeforePrompt(t *testing.T) {
 	var nilModel *executionModel
 	var nilTokenCounter *mocks.MockTokenCounter
@@ -227,7 +230,7 @@ func TestExecutionRejectsInvalidResolvedValuesBeforePrompt(t *testing.T) {
 		{"typed nil model", &agent.ExecutionOverrides{Model: nilModel}},
 		{"typed nil counter", &agent.ExecutionOverrides{TokenCounter: agent.Optional[ai.TokenCounter]{Set: true, Value: nilTokenCounter}}},
 		{"typed nil model counter", &agent.ExecutionOverrides{Model: &executionModel{scriptedWorkflowModel: &scriptedWorkflowModel{}, counter: nilTokenCounter}}},
-		{"typed nil processor", &agent.ExecutionOverrides{ToolResponseProcessor: agent.Optional[loop.ToolResponseProcessor]{Set: true, Value: nilProcessor}}},
+		{"typed nil processor", &agent.ExecutionOverrides{ToolResultProcessor: agent.Optional[loop.ToolResultProcessor]{Set: true, Value: nilProcessor}}},
 		{"bad retry", &agent.ExecutionOverrides{RetryPolicy: agent.Optional[*loop.RetryPolicy]{Set: true, Value: &loop.RetryPolicy{MaxRetries: -1}}}},
 		{"bad format", &agent.ExecutionOverrides{ResponseFormat: &ai.ResponseFormat{Type: ai.ResponseFormatJSONSchema}}},
 		{"bad choice", &agent.ExecutionOverrides{ToolChoice: &ai.ToolChoice{Mode: "invalid"}}},
@@ -444,24 +447,26 @@ func TestExecutionClearingRetryPolicyAlsoClearsTimeouts(t *testing.T) {
 	}
 }
 
+// TestExecutionProcessorCanBeInheritedReplacedOrCleared verifies that processor overrides
+// distinguish inheritance, replacement, explicit clearing, and ignored unset values.
 func TestExecutionProcessorCanBeInheritedReplacedOrCleared(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		override agent.Optional[loop.ToolResponseProcessor]
+		override agent.Optional[loop.ToolResultProcessor]
 		want     string
 	}{
-		{"inherit", agent.Optional[loop.ToolResponseProcessor]{}, "definition"},
-		{"ignore unset value", agent.Optional[loop.ToolResponseProcessor]{Value: &executionProcessor{"unused"}}, "definition"},
-		{"replace", agent.Optional[loop.ToolResponseProcessor]{Set: true, Value: &executionProcessor{"run"}}, "run"},
-		{"clear", agent.Optional[loop.ToolResponseProcessor]{Set: true}, "original"},
+		{"inherit", agent.Optional[loop.ToolResultProcessor]{}, "definition"},
+		{"ignore unset value", agent.Optional[loop.ToolResultProcessor]{Value: &executionProcessor{"unused"}}, "definition"},
+		{"replace", agent.Optional[loop.ToolResultProcessor]{Set: true, Value: &executionProcessor{"run"}}, "run"},
+		{"clear", agent.Optional[loop.ToolResultProcessor]{Set: true}, "original"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			model := &scriptedWorkflowModel{scripts: [][]ai.Token{
 				{{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call", Type: "function", Name: "echo", Args: []byte("{\"text\":\"original\"}")}}}},
 				{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}},
 			}}
-			a := agent.New(agent.Definition{Model: nativeToolWorkflowModel{model}, Prompt: executionPrompt, Tools: []loop.Tool{loop.NewEchoTool()}, ToolResponseProcessor: &executionProcessor{"definition"}})
-			workflow, err := a.NewRun(t.Context(), agent.RunInput{Execution: &agent.ExecutionOverrides{ToolResponseProcessor: tc.override}})
+			a := agent.New(agent.Definition{Model: nativeToolWorkflowModel{model}, Prompt: executionPrompt, Tools: []loop.Tool{loop.NewEchoTool()}, ToolResultProcessor: &executionProcessor{"definition"}})
+			workflow, err := a.NewRun(t.Context(), agent.RunInput{Execution: &agent.ExecutionOverrides{ToolResultProcessor: tc.override}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -471,7 +476,7 @@ func TestExecutionProcessorCanBeInheritedReplacedOrCleared(t *testing.T) {
 			var response string
 			for _, part := range workflow.Result().Primary.Iterations[0].Parts {
 				if part.ToolResp != nil {
-					response = part.ToolResp.TextValue()
+					response = part.ToolResp.Text
 				}
 			}
 			if response != tc.want {

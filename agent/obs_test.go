@@ -274,7 +274,8 @@ func (*traceTestModel) TokenCounter() ai.TokenCounter { return &mocks.MockTokenC
 
 type traceTestTool struct{ loop.Tool }
 
-func (t traceTestTool) Function(ctx context.Context, call *ai.ToolCall) *loop.ToolResponse {
+// Function adds an inner tool span to verify trace-context propagation through agent execution.
+func (t traceTestTool) Function(ctx context.Context, call ai.ToolCall) (string, error) {
 	ctx, span := gai.StartOperationSpan(ctx, "gai-test", "test.tool", "test.operation", "execute")
 	defer span.End()
 	return t.Tool.Function(ctx, call)

@@ -93,8 +93,8 @@ type Definition struct {
 	// RequestBudget atomically replaces the prompt builder's window/reserve.
 	// Nil inherits standard Builder settings; explicit zero limits disable checks.
 	RequestBudget *ai.RequestBudgetConfig
-	// ToolResponseProcessor can transform tool responses before they enter the transcript.
-	ToolResponseProcessor loop.ToolResponseProcessor
+	// ToolResultProcessor can transform tool responses before they enter the transcript.
+	ToolResultProcessor loop.ToolResultProcessor
 	// ObservationSink receives agent and workflow lifecycle events.
 	ObservationSink gai.ObservationSink
 	// Middleware transforms the run stream in declaration order.
@@ -200,6 +200,7 @@ func (a *Agent) middleware() []Middleware {
 	return a.def.Middleware
 }
 
+// newLoop builds the run-owned loop from validated effective settings.
 func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedExecution) (*loop.Loop, error) {
 	if a.def.Prompt == nil {
 		return nil, loop.ErrPromptNotConfigured
@@ -266,7 +267,7 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 		return nil, ErrTokenCounterNotConfigurable
 	}
 
-	l := loop.New(execution.model, execution.tools, promptBuilder, execution.toolResponseProcessor)
+	l := loop.New(execution.model, execution.tools, promptBuilder, execution.toolResultProcessor)
 	l.ObservationSink = a.def.ObservationSink
 	if !nativeTools {
 		l.ToolTransport = loop.ToolTransportText

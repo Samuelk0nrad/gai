@@ -65,7 +65,7 @@ type countingTool struct {
 	calls atomic.Int32
 }
 
-type failingToolResponseProcessor struct {
+type failingToolResultProcessor struct {
 	err error
 }
 
@@ -74,12 +74,16 @@ type sentinelErrorTool struct{}
 func (sentinelErrorTool) Name() string              { return "failure" }
 func (sentinelErrorTool) Description() string       { return "Returns a test error." }
 func (sentinelErrorTool) Params() ai.ToolParameters { return loop.NewEchoTool().Params() }
-func (sentinelErrorTool) Function(context.Context, *ai.ToolCall) *loop.ToolResponse {
-	return loop.NewToolError(errors.New("tool-output-sentinel-secret"))
+// Function returns a recognizable private error to detect accidental disclosure through
+// telemetry.
+func (sentinelErrorTool) Function(context.Context, ai.ToolCall) (string, error) {
+	return "", errors.New("tool-output-sentinel-secret")
 }
 
-func (p failingToolResponseProcessor) Process(req ai.ToolCall, res *loop.ToolResponse) error {
-	return p.err
+// Process injects a processor failure so tests can inspect wrapping, events, and retained
+// snapshots.
+func (p failingToolResultProcessor) Process(_ context.Context, _ loop.ToolPolicyInput, _ loop.ToolResult) (loop.ToolResult, error) {
+	return loop.ToolResult{}, p.err
 }
 
 func (b *countingPromptBuilder) PrependContextSource(ctx context.Context, source gaictx.ContextSource) error {
@@ -109,18 +113,22 @@ func (t *deadlineRecordingTool) Description() string {
 func (t *deadlineRecordingTool) Params() ai.ToolParameters {
 	return loop.NewEchoTool().Params()
 }
-func (t *deadlineRecordingTool) Function(ctx context.Context, _ *ai.ToolCall) *loop.ToolResponse {
+// Function records whether a tool inherits a deadline so tests can distinguish generation and
+// run timeout scopes.
+func (t *deadlineRecordingTool) Function(ctx context.Context, _ ai.ToolCall) (string, error) {
 	_, hasDeadline := ctx.Deadline()
 	t.hasDeadline.Store(hasDeadline)
-	return loop.NewToolSuccess("ok")
+	return "ok", nil
 }
 
 func (t *countingTool) Name() string              { return "count" }
 func (t *countingTool) Description() string       { return "Counts invocations." }
 func (t *countingTool) Params() ai.ToolParameters { return loop.NewEchoTool().Params() }
-func (t *countingTool) Function(context.Context, *ai.ToolCall) *loop.ToolResponse {
+// Function counts actual invocations atomically to detect execution of calls that should have
+// been discarded.
+func (t *countingTool) Function(context.Context, ai.ToolCall) (string, error) {
 	t.calls.Add(1)
-	return loop.NewToolSuccess("ok")
+	return "ok", nil
 }
 
 func (b *deadlineRecordingPromptBuilder) BuildRequest(ctx context.Context, conv gaictx.Conversation) (ai.AIRequest, error) {
@@ -711,7 +719,9 @@ func TestLoopTextTransportDoesNotSatisfyNamedRequiredToolChoiceWithDifferentConf
 	}
 }
 
-func TestLoopTextTransportDiscardsMixedRequiredToolResponse(t *testing.T) {
+// TestLoopTextTransportDiscardsMixedRequiredToolResult ensures a mixed required-tool response is
+// retried without executing unselected tools or publishing rejected content.
+func TestLoopTextTransportDiscardsMixedRequiredToolResult(t *testing.T) {
 	t.Parallel()
 
 	unselected := &countingTool{}
@@ -1063,6 +1073,8 @@ func TestLoopHandlesManyToolCallsInOneIteration(t *testing.T) {
 	}
 }
 
+// TestLoopWrapsToolPreprocessErrors preserves framework error identity and attempt metadata
+// without retaining an unfiltered result or accepting the failed iteration.
 func TestLoopWrapsToolPreprocessErrors(t *testing.T) {
 	t.Parallel()
 
@@ -1084,13 +1096,13 @@ func TestLoopWrapsToolPreprocessErrors(t *testing.T) {
 		model,
 		[]loop.Tool{loop.NewEchoTool()},
 		testPromptBuilder(),
-		failingToolResponseProcessor{err: errors.New("reject tool response")},
+		failingToolResultProcessor{err: errors.New("reject tool response")},
 	)
 
 	events := collectLoopEvents(t, l, context.Background())
 	err := loopError(events)
-	if !errors.Is(err, loop.ErrToolResponseProcess) {
-		t.Fatalf("error = %v, want ErrToolResponseProcess", err)
+	if !errors.Is(err, loop.ErrToolResultProcess) {
+		t.Fatalf("error = %v, want ErrToolResultProcess", err)
 	}
 	errorEvents := loopEventsOfType(events, loop.EventError)
 	if len(errorEvents) != 1 {
@@ -1102,8 +1114,8 @@ func TestLoopWrapsToolPreprocessErrors(t *testing.T) {
 	if errorEvents[0].Iteration == nil || errorEvents[0].Iteration.InputMessage() == nil {
 		t.Fatalf("expected failed tool-processing snapshot, got %#v", errorEvents[0].Iteration)
 	}
-	if len(errorEvents[0].Iteration.Parts) != 1 || errorEvents[0].Iteration.Parts[0].ToolResp == nil {
-		t.Fatalf("expected failed tool-processing snapshot to retain tool response, got %#v", errorEvents[0].Iteration)
+	if len(errorEvents[0].Iteration.Parts) != 1 || errorEvents[0].Iteration.Parts[0].ToolResp != nil {
+		t.Fatalf("failed processing must not retain unfiltered tool response, got %#v", errorEvents[0].Iteration)
 	}
 	if len(l.Iterations) != 0 {
 		t.Fatalf("expected preprocess failure to skip persisted iteration, got %d", len(l.Iterations))

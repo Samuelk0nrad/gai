@@ -45,7 +45,7 @@ type IterationPart struct {
 	// ToolReq contains the requested call for tool-related parts.
 	ToolReq *ai.ToolCall
 	// ToolResp contains the result produced for ToolReq.
-	ToolResp *ToolResponse
+	ToolResp *ToolResult
 }
 
 // Messages returns snapshots of the input and canonical output of this iteration.
@@ -90,14 +90,6 @@ func (i Iteration) Clone() Iteration {
 		}
 		if p.ToolResp != nil {
 			r := *p.ToolResp
-			if r.Text != nil {
-				v := *r.Text
-				r.Text = &v
-			}
-			if r.Err != nil {
-				v := *r.Err
-				r.Err = &v
-			}
 			p.ToolResp = &r
 		}
 	}
@@ -162,7 +154,7 @@ func (i *Iteration) AppendToken(t ai.Token) {
 	case ai.TokenTypeErr:
 		i.Parts = append(i.Parts, IterationPart{
 			Type:     IterationTypeToolError,
-			ToolResp: NewToolError(t.Err),
+			ToolResp: &ToolResult{Err: t.Err},
 		})
 	case ai.TokenTypeThought:
 		if last != nil && last.Type == IterationTypeResponse {

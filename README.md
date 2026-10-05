@@ -195,7 +195,7 @@ type Tool interface {
   Name() string
   Description() string
   Params() ai.ToolParameters
-  Function(ctx context.Context, req *ai.ToolCall) *ToolResponse
+  Function(ctx context.Context, req ai.ToolCall) (string, error)
 }
 ```
 
@@ -218,17 +218,22 @@ func (t *LookupOrderTool) Params() ai.ToolParameters {
 
 func (t *LookupOrderTool) Function(
   ctx context.Context,
-  req *ai.ToolCall,
-) *loop.ToolResponse {
+  req ai.ToolCall,
+) (string, error) {
   var args struct {
     OrderID string `json:"order_id"`
   }
   if err := loop.DecodeToolArgs(req, &args); err != nil {
-    return loop.NewToolError(err)
+    return "", err
   }
-  return loop.NewToolSuccess(`{"status":"in_transit"}`)
+  return `{"status":"in_transit"}`, nil
 }
 ```
+
+Use `loop.NewTool(name, description, params, handler)` to wrap a handler without a
+custom struct. A non-nil handler error becomes a tool failure the model can read.
+`ToolResultProcessor` can transform results before they reach the conversation,
+events, or loop telemetry.
 
 Attach tools to an agent definition:
 

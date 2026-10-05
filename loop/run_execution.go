@@ -343,6 +343,7 @@ func (a *attemptExecution) scheduleRetry(retryErr error) attemptOutcome {
 	return attemptRetry
 }
 
+// postAttempt executes tool calls and commits only accepted iteration output.
 func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) iterationOutcome {
 	if deferTokens && (!r.requiredToolCallSatisfied || len(attempt.toolCalls) > 0) &&
 		!hasPermittedToolCall(attempt.toolCalls, r.owner.Tools, r.owner.ToolChoice.Names) {
@@ -381,7 +382,7 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		attempt.terminateCanceled(err)
 		return iterationTerminal
 	}
-	attempt.state.recordToolResponses(attempt.iteration)
+	attempt.state.recordToolResults(attempt.iteration)
 
 	attemptID := attempt.state.attemptID()
 	retryCount := r.state.retryCount

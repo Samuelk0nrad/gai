@@ -152,6 +152,7 @@ func (w *Workflow) canonicalPrimaryOutput() []Event {
 	return output
 }
 
+// mapLoopEvent converts loop lifecycle events into isolated workflow events.
 func mapLoopEvent(low loop.Event, source EventSource) (Event, bool) {
 	event := Event{
 		Source:         source,
@@ -161,7 +162,7 @@ func mapLoopEvent(low loop.Event, source EventSource) (Event, bool) {
 		PartCount:      low.PartCount,
 		Iteration:      cloneIterationPtr(low.Iteration),
 		ToolCall:       cloneToolCall(low.ToolCall),
-		ToolResponse:   cloneToolResponse(low.ToolResponse),
+		ToolResult:     cloneToolResult(low.ToolResult),
 		RetryReason:    low.RetryReason,
 		RetryDelay:     low.RetryDelay,
 		Duration:       low.Duration,

@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// retryReason maps generation errors to stable retry classifications.
 func retryReason(err error) string {
 	if errors.Is(err, ErrAttemptTimeout) {
 		return "attempt_timeout"
@@ -26,20 +28,20 @@ func retryReason(err error) string {
 const loopTracerName = "github.com/lace-ai/gai/loop"
 
 const (
-	toolOutcomeSuccess         = "success"
-	toolOutcomeError           = "tool_error"
-	toolOutcomePanic           = "panic"
-	toolOutcomeDeadline        = "deadline"
-	toolOutcomeCancellation    = "cancellation"
-	toolOutcomeMissingResponse = "missing_response"
+	toolOutcomeSuccess      = "success"
+	toolOutcomeError        = "tool_error"
+	toolOutcomePanic        = "panic"
+	toolOutcomeDeadline     = "deadline"
+	toolOutcomeCancellation = "cancellation"
+	toolOutcomeProcessing   = "processing_error"
 )
 
 var (
-	errObservedToolExecution       = errors.New("tool execution failed")
-	errObservedToolPanic           = errors.New("tool execution panicked")
-	errObservedToolDeadline        = errors.New("tool execution deadline exceeded")
-	errObservedToolCancellation    = errors.New("tool execution canceled")
-	errObservedToolMissingResponse = errors.New("tool response missing")
+	errObservedToolExecution    = errors.New("tool execution failed")
+	errObservedToolPanic        = errors.New("tool execution panicked")
+	errObservedToolDeadline     = errors.New("tool execution deadline exceeded")
+	errObservedToolCancellation = errors.New("tool execution canceled")
+	errObservedToolProcessing   = errors.New("tool result processing failed")
 )
 
 type loopRunState struct {
@@ -211,7 +213,8 @@ func (s *loopIterationState) recordToken(token ai.Token) {
 	}
 }
 
-func (s *loopIterationState) recordToolResponses(iteration Iteration) {
+// recordToolResults counts processed tool failures for iteration telemetry.
+func (s *loopIterationState) recordToolResults(iteration Iteration) {
 	if s == nil {
 		return
 	}
@@ -336,29 +339,48 @@ func startToolSpan(ctx context.Context, call ai.ToolCall, sinks ...gai.Observati
 	return ctx, &toolObservation{ctx: ctx, span: span, sink: sink, call: call}
 }
 
-func callObservedTool(ctx context.Context, call ai.ToolCall, tools []Tool, sinks ...gai.ObservationSink) (response *ToolResponse, duration time.Duration) {
-	toolCtx, observation := startToolSpan(ctx, call, sinks...)
-	missingResponse := false
-	started := time.Now()
-	defer func() {
-		duration = time.Since(started)
-		if panicValue := recover(); panicValue != nil {
-			observation.finishPanic(duration)
-			panic(panicValue)
-		}
-		observation.finish(response, missingResponse, duration)
-	}()
-	response, missingResponse = callTool(toolCtx, &call, tools)
-	return response, duration
+// callObservedTool instruments a direct invocation without a result processor.
+func callObservedTool(ctx context.Context, call ai.ToolCall, tools []Tool, sinks ...gai.ObservationSink) (*ToolResult, time.Duration) {
+	result, duration, _ := processObservedTool(ctx, ToolPolicyInput{Call: call}, tools, nil, sinks...)
+	return result, duration
 }
 
-func (o *toolObservation) finish(response *ToolResponse, missingResponse bool, duration time.Duration) {
+// processObservedTool filters results before observation or caller publication.
+func processObservedTool(ctx context.Context, input ToolPolicyInput, tools []Tool, processor ToolResultProcessor, sinks ...gai.ObservationSink) (response *ToolResult, duration time.Duration, processErr error) {
+	toolCtx, observation := startToolSpan(ctx, input.Call, sinks...)
+	started := time.Now()
+	defer func() {
+		if panicValue := recover(); panicValue != nil {
+			observation.finishPanic(time.Since(started))
+			panic(panicValue)
+		}
+		if processErr != nil {
+			observation.finishProcessingError(duration)
+		} else {
+			observation.finish(response, duration)
+		}
+	}()
+	result := CallTool(toolCtx, input.Call, tools)
+	duration = time.Since(started)
+	if processor != nil {
+		input.Call = input.Call.Clone()
+		processed, err := processor.Process(toolCtx, input, result)
+		if err != nil {
+			return nil, duration, fmt.Errorf("%w: %w", ErrToolResultProcess, err)
+		}
+		result = normalizeToolResult(processed.Text, processed.Err)
+	}
+	return &result, duration, nil
+}
+
+// finish captures only processed output and closes the observation once.
+func (o *toolObservation) finish(response *ToolResult, duration time.Duration) {
 	if o == nil {
 		return
 	}
 	o.finishOnce.Do(func() {
-		outcome, output, spanErr := toolResult(response, missingResponse)
-		if response != nil && outcome != toolOutcomeMissingResponse {
+		outcome, output, spanErr := toolResult(response)
+		if response != nil {
 			if captured, ok := gai.CaptureContent(o.ctx, gai.ContentKindToolOutput, []byte(output)); ok {
 				aliases := []string{"langfuse.observation.output"}
 				if outcome == toolOutcomeSuccess {
@@ -371,6 +393,7 @@ func (o *toolObservation) finish(response *ToolResponse, missingResponse bool, d
 	})
 }
 
+// finishPanic records a safe classification without the panic payload.
 func (o *toolObservation) finishPanic(duration time.Duration) {
 	if o == nil {
 		return
@@ -380,6 +403,12 @@ func (o *toolObservation) finishPanic(duration time.Duration) {
 	})
 }
 
+// finishProcessingError records a processing failure without capturing raw output.
+func (o *toolObservation) finishProcessingError(duration time.Duration) {
+	o.finishOnce.Do(func() { o.setOutcome(toolOutcomeProcessing, errObservedToolProcessing, duration) })
+}
+
+// setOutcome emits fixed error classifications and closes the tool span.
 func (o *toolObservation) setOutcome(outcome string, spanErr error, duration time.Duration) {
 	status := "success"
 	attrs := []attribute.KeyValue{attribute.String("gai.tool.outcome", outcome)}
@@ -397,6 +426,7 @@ func (o *toolObservation) setOutcome(outcome string, spanErr error, duration tim
 			"tool_call_id": o.call.ID,
 			"tool_type":    o.call.Type,
 			"outcome":      outcome,
+			"tool_outcome": outcome,
 			"status":       status,
 			"duration_ms":  duration.Milliseconds(),
 		},
@@ -405,16 +435,14 @@ func (o *toolObservation) setOutcome(outcome string, spanErr error, duration tim
 	gai.EndSpan(o.span, spanErr)
 }
 
-func toolResult(response *ToolResponse, missingResponse bool) (outcome string, output string, spanErr error) {
-	if missingResponse || response == nil {
-		return toolOutcomeMissingResponse, "", errObservedToolMissingResponse
+// toolResult separates model-facing output from safe telemetry errors.
+func toolResult(response *ToolResult) (outcome string, output string, spanErr error) {
+	if response == nil {
+		return toolOutcomeError, "", errObservedToolExecution
 	}
-	responseErr := response.ErrorValue()
-	if responseErr == nil && response.Status == "error" {
-		responseErr = ErrToolErrorMissing
-	}
+	responseErr := response.Err
 	if responseErr == nil {
-		return toolOutcomeSuccess, response.TextValue(), nil
+		return toolOutcomeSuccess, response.Text, nil
 	}
 	output = responseErr.Error()
 	switch {
