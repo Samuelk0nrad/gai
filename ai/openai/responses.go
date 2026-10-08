@@ -31,6 +31,13 @@ func (m *Model) generateResponses(ctx context.Context, req ai.AIRequest) (result
 	if response.Error.Message != "" {
 		return nil, fmt.Errorf("OpenAI Responses API: %s", response.Error.Message)
 	}
+	generationResult.ResponseModel = string(response.Model)
+	generationResult.RequestID = response.ID
+	generationResult.FinishReason = string(response.Status)
+	if response.JSON.Usage.Valid() {
+		usage := responsesUsage(response)
+		generationResult.Usage = &usage
+	}
 	if response.Status == "failed" {
 		message := string(response.Error.Code)
 		if message == "" {
@@ -38,19 +45,12 @@ func (m *Model) generateResponses(ctx context.Context, req ai.AIRequest) (result
 		}
 		return nil, fmt.Errorf("OpenAI Responses API: %s", message)
 	}
+	if response.Status == "incomplete" {
+		return nil, responseIncompleteError(response)
+	}
 	result, err = responseFromResponses(response)
 	if result != nil {
-		generationResult.ResponseModel = string(response.Model)
-		generationResult.RequestID = response.ID
-		generationResult.FinishReason = string(response.Status)
 		generationResult.ToolCallCount = len(result.ToolCalls())
-		if response.JSON.Usage.Valid() {
-			usage := ai.Usage{
-				InputTokens: result.InputTokens, OutputTokens: result.OutputTokens,
-				ReasoningTokens: result.ReasoningTokens, CachedTokens: int(response.Usage.InputTokensDetails.CachedTokens),
-			}
-			generationResult.Usage = &usage
-		}
 	}
 	return result, err
 }
@@ -99,20 +99,20 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 			}
 		case "response.completed":
 			response := event.Response
-			completion := ai.Completion{
-				Provider: "openai", Model: string(response.Model), RequestID: response.ID,
-				FinishReason: string(response.Status), Raw: json.RawMessage(response.RawJSON()),
-			}
-			if response.JSON.Usage.Valid() {
-				completion.UsageReported = true
-				completion.Usage = ai.Usage{
-					InputTokens: int(response.Usage.InputTokens), OutputTokens: int(response.Usage.OutputTokens),
-					ReasoningTokens: int(response.Usage.OutputTokensDetails.ReasoningTokens), CachedTokens: int(response.Usage.InputTokensDetails.CachedTokens),
-				}
-			}
+			completion := completionFromResponses(&response)
 			if !emit(ai.Token{Completion: &completion}) {
 				return
 			}
+		case "response.incomplete":
+			response := event.Response
+			completion := completionFromResponses(&response)
+			if !emit(ai.Token{Completion: &completion}) {
+				return
+			}
+			err := responseIncompleteError(&response)
+			streamErr = err
+			emit(ai.Token{Err: err})
+			return
 		case "response.output_item.done":
 			if event.Item.Type == "reasoning" {
 				part := reasoningExtension(json.RawMessage(event.Item.RawJSON()))
@@ -162,6 +162,35 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 		streamErr = classifyProviderError(err)
 		emit(ai.Token{Err: streamErr})
 	}
+}
+
+func responsesUsage(response *responses.Response) ai.Usage {
+	return ai.Usage{
+		InputTokens:     int(response.Usage.InputTokens),
+		OutputTokens:    int(response.Usage.OutputTokens),
+		ReasoningTokens: int(response.Usage.OutputTokensDetails.ReasoningTokens),
+		CachedTokens:    int(response.Usage.InputTokensDetails.CachedTokens),
+	}
+}
+
+func completionFromResponses(response *responses.Response) ai.Completion {
+	completion := ai.Completion{
+		Provider: "openai", Model: string(response.Model), RequestID: response.ID,
+		FinishReason: string(response.Status), Raw: json.RawMessage(response.RawJSON()),
+	}
+	if response.JSON.Usage.Valid() {
+		completion.UsageReported = true
+		completion.Usage = responsesUsage(response)
+	}
+	return completion
+}
+
+func responseIncompleteError(response *responses.Response) error {
+	reason := response.IncompleteDetails.Reason
+	if reason == "" {
+		return fmt.Errorf("OpenAI Responses API: response incomplete")
+	}
+	return fmt.Errorf("OpenAI Responses API: response incomplete: %s", reason)
 }
 
 func buildResponsesParams(model string, req ai.AIRequest) (responses.ResponseNewParams, error) {

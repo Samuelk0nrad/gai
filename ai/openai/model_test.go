@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
+	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/internal/obstest"
 )
 
@@ -309,6 +311,128 @@ func TestModelGenerateWithResponsesTransportRejectsFailedResponseWithoutErrorMes
 	_, err = any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
 	if err == nil || err.Error() != "OpenAI Responses API: response failed" {
 		t.Fatalf("Generate error = %v, want failed response error", err)
+	}
+}
+
+func TestModelGenerateWithResponsesTransportRejectsIncompleteResponse(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/responses" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_incomplete","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"partial"}]}],"usage":{"input_tokens":11,"output_tokens":7}}`))
+	}))
+	defer ts.Close()
+
+	p := New("test-key", nil, WithResponsesTransport())
+	p.baseURL = ts.URL
+	m, err := p.Model("gpt-5.6-terra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
+	if err == nil || !strings.Contains(err.Error(), "max_output_tokens") {
+		t.Fatalf("Generate error = %v, want incomplete reason", err)
+	}
+	if response != nil {
+		t.Fatalf("Generate response = %#v, want nil unsuccessful response", response)
+	}
+}
+
+func TestModelGenerateStreamWithResponsesTransportReportsIncompleteMetadataBeforeError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_incomplete\",\"model\":\"gpt-5.6-terra\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"output_tokens_details\":{\"reasoning_tokens\":3},\"input_tokens_details\":{\"cached_tokens\":2}}}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer ts.Close()
+
+	p := New("test-key", nil, WithResponsesTransport())
+	p.baseURL = ts.URL
+	m, err := p.Model("gpt-5.6-terra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tokens []ai.Token
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		tokens = append(tokens, token)
+	}
+	if len(tokens) != 3 || tokens[0].Type() != ai.TokenTypeText || tokens[0].Text() != "partial" || tokens[1].Type() != ai.TokenTypeCompletion || tokens[2].Type() != ai.TokenTypeErr {
+		t.Fatalf("tokens = %#v", tokens)
+	}
+	completion := tokens[1].Completion
+	if completion == nil || completion.FinishReason != "incomplete" || completion.RequestID != "resp_incomplete" || completion.Model != "gpt-5.6-terra" ||
+		!completion.UsageReported || completion.Usage != (ai.Usage{InputTokens: 11, OutputTokens: 7, ReasoningTokens: 3, CachedTokens: 2}) ||
+		!strings.Contains(string(completion.Raw), `"reason":"max_output_tokens"`) {
+		t.Fatalf("completion = %#v", completion)
+	}
+	if !strings.Contains(tokens[2].Err.Error(), "max_output_tokens") {
+		t.Fatalf("error = %v, want incomplete reason", tokens[2].Err)
+	}
+}
+
+func TestModelGenerateStreamWithResponsesTransportReportsIncompleteWithoutVisibleText(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_incomplete\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"content_filter\"}}}\n\n"))
+	}))
+	defer ts.Close()
+
+	p := New("test-key", nil, WithResponsesTransport())
+	p.baseURL = ts.URL
+	m, err := p.Model("gpt-5.6-terra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tokens []ai.Token
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		tokens = append(tokens, token)
+	}
+	if len(tokens) != 2 || tokens[0].Type() != ai.TokenTypeCompletion || tokens[0].Completion.FinishReason != "incomplete" || tokens[1].Type() != ai.TokenTypeErr || !strings.Contains(tokens[1].Err.Error(), "content_filter") {
+		t.Fatalf("tokens = %#v", tokens)
+	}
+}
+
+func TestResponsesIncompleteFailsWorkflowWithoutAcceptingPartialOutput(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_incomplete\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":11,\"output_tokens\":7}}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer ts.Close()
+
+	p := New("test-key", nil, WithResponsesTransport())
+	p.baseURL = ts.URL
+	m, err := p.Model("gpt-5.6-terra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := agent.New(agent.Definition{
+		Model: m,
+		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+			return gaictx.New(gaictx.Definition{Renderer: &gaictx.SimpleRenderer{}}), nil
+		},
+	})
+	workflow, err := a.NewRun(t.Context(), agent.RunInput{Prompt: gaictx.PromptInput{User: ai.TextParts("hello")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range workflow.RunEvents(t.Context()) {
+	}
+	result, err := workflow.Wait()
+	if err == nil || !strings.Contains(err.Error(), "max_output_tokens") {
+		t.Fatalf("Wait error = %v, want incomplete reason", err)
+	}
+	if !result.Complete || result.Text != "" || result.Primary.Text != "" || result.AttemptedText != "partial" || len(result.Primary.Messages) != 0 || len(result.Primary.Iterations) != 0 {
+		t.Fatalf("workflow result = %#v", result)
+	}
+	if result.BilledUsage != (ai.Usage{InputTokens: 11, OutputTokens: 7}) {
+		t.Fatalf("billed usage = %#v", result.BilledUsage)
 	}
 }
 
