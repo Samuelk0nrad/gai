@@ -377,3 +377,26 @@ func (o *historyObserver) emit(ctx context.Context, name string, fields map[stri
 	}
 	o.operation.Emit(ctx, name, fields, err)
 }
+
+// Selection reports the pure selector's observations without coupling selection
+// to telemetry or allowing diagnostic callbacks to mutate the selected state.
+func (o *historyObserver) Selection(ctx context.Context, state *HistoryState, result selection, err error) {
+	if state == nil {
+		return
+	}
+	if result.summaryFailed {
+		o.SummaryTokenCountFailed(ctx, state.Summary, err)
+	}
+	if result.failedTurn != nil {
+		o.TurnTokenizeFailed(ctx, result.failedTurn, err)
+	}
+	if state.Summary == nil {
+		o.SummaryMissing(ctx)
+	}
+	if result.summaryIncluded {
+		o.SummaryIncluded(ctx, state.Summary, result.summaryTokens)
+	}
+	if result.budgetReached {
+		o.BudgetReached(ctx, result.tokens, result.budgetTurn)
+	}
+}

@@ -227,14 +227,14 @@ func TestHistorySourceDoesNotDiscardTurnsExcludedFromPrompt(t *testing.T) {
 	if part == nil {
 		t.Fatal("expected history part")
 	}
-	if store.saved == nil {
-		t.Fatal("expected history state to be saved")
+	if store.saved != nil {
+		t.Fatal("unchanged history was saved")
 	}
-	if store.saved.Summary == nil || store.saved.Summary.ID != "summary-1" {
-		t.Fatalf("expected summary to be preserved, got %+v", store.saved.Summary)
+	if store.state.Summary == nil || store.state.Summary.ID != "summary-1" {
+		t.Fatalf("expected summary to be preserved, got %+v", store.state.Summary)
 	}
-	if len(store.saved.Turns) != 2 || store.saved.Turns[0].ID != "turn-3" || store.saved.Turns[1].ID != "turn-4" {
-		t.Fatalf("expected all persisted turns to be preserved, got %+v", store.saved.Turns)
+	if len(store.state.Turns) != 2 || store.state.Turns[0].ID != "turn-3" || store.state.Turns[1].ID != "turn-4" {
+		t.Fatalf("expected all persisted turns to be preserved, got %+v", store.state.Turns)
 	}
 }
 
@@ -275,8 +275,11 @@ func TestHistorySourceIncludesNewestFittingTurnsInChronologicalOrder(t *testing.
 	if len(part.Messages) != 2 || part.Messages[0].Text() != "middle" || part.Messages[1].Text() != "newest" {
 		t.Fatalf("expected newest fitting turns in chronological order, got %+v", part.Messages)
 	}
-	if len(store.saved.Turns) != 3 {
-		t.Fatalf("expected all persisted turns to be preserved, got %+v", store.saved.Turns)
+	if store.saved != nil {
+		t.Fatal("selection persisted history")
+	}
+	if len(store.state.Turns) != 3 {
+		t.Fatalf("expected all persisted turns to be preserved, got %+v", store.state.Turns)
 	}
 }
 
@@ -346,14 +349,14 @@ func TestHistorySourceDoesNotSummarizeWhenHistoryFitsBudget(t *testing.T) {
 	if model.Count != 0 {
 		t.Fatalf("expected summarizer not to run, got %d calls", model.Count)
 	}
-	if store.saved == nil {
-		t.Fatal("expected history state to be saved")
+	if store.saved != nil {
+		t.Fatal("unchanged history was saved")
 	}
-	if store.saved.Summary != nil {
-		t.Fatalf("expected no summary when history fits budget, got %+v", store.saved.Summary)
+	if store.state.Summary != nil {
+		t.Fatalf("expected no summary when history fits budget, got %+v", store.state.Summary)
 	}
-	if len(store.saved.Turns) != 3 {
-		t.Fatalf("expected all turns to remain unsummarized, got %+v", store.saved.Turns)
+	if len(store.state.Turns) != 3 {
+		t.Fatalf("expected all turns to remain unsummarized, got %+v", store.state.Turns)
 	}
 }
 
@@ -483,7 +486,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 			},
 			tokenBudget:      10,
 			wantPart:         true,
-			wantSaved:        true,
+			wantSaved:        false,
 			wantSavedSummary: true,
 			wantSavedTurnIDs: []string{"turn-3", "turn-4"},
 		},
@@ -520,7 +523,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 				Amount:  0.67,
 			},
 			wantPart:         true,
-			wantSaved:        true,
+			wantSaved:        false,
 			wantSavedSummary: false,
 			wantSavedTurnIDs: []string{"turn-1", "turn-2", "turn-3"},
 			wantModelCalls:   0,
