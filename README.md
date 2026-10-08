@@ -365,8 +365,17 @@ See [request budgets and migration](docs/request-budgets.md).
 ## History and summarization
 
 `history.NewHistory(sessionID, reader)` supplies read-only, budgeted history selection.
-Building context never invokes a summarizer or writes history. Token counts are local
+Ordinary context builds never invoke a summarizer or write history. Token counts are local
 and are not persisted.
+
+To compact automatically before an agent answers, set `AutoCompactHistory: true`
+on `agent.Definition`. Return a standard `*context.Builder` containing
+`history.NewHistory(sessionID, store)`, with a writable `history.HistoryStore` and
+an enabled request budget. The agent uses its effective model and counter to
+compact only when history exceeds its remaining allocation. Compaction runs once
+at workflow start; conflicts or remaining pressure stop the run without retries.
+The flag does not persist new turns or provide session locking. See
+[automatic compaction](docs/history.md#automatic-compaction-in-agents) for usage.
 
 Use `history.NewCompactor(sessionID, store, history.CompactorDefinition{Model: model})`
 and call `Compact(ctx, historyBudget)` explicitly when older completed turns should
