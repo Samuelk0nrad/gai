@@ -22,6 +22,7 @@ func TestGenerateStreamEmitsIncrementalTextToolCallsAndCompletion(t *testing.T) 
 			t.Errorf("request = %s %s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
 		}
 		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("X-Request-Id", "req-success")
 		fmt.Fprintln(w, `{"model":"qwen3:8b","message":{"role":"assistant","content":"Hel"},"done":false}`)
 		fmt.Fprintln(w, `{"model":"qwen3:8b","message":{"role":"assistant","content":"lo","tool_calls":[{"function":{"name":"weather","arguments":{"city":"Tokyo"}}},{"id":"provided","function":{"name":"time","arguments":{}}}]},"done":false}`)
 		fmt.Fprint(w, `{"model":"qwen3:8b","message":{"role":"assistant","content":"!"},"done":true,"done_reason":"stop","prompt_eval_count":12,"eval_count":4}`)
@@ -48,7 +49,7 @@ func TestGenerateStreamEmitsIncrementalTextToolCallsAndCompletion(t *testing.T) 
 		t.Fatalf("provided call = %#v", second)
 	}
 	completion := events[5].Completion
-	if completion == nil || completion.Provider != "ollama" || completion.Model != "qwen3:8b" || completion.FinishReason != "stop" || !completion.UsageReported || completion.Usage.InputTokens != 12 || completion.Usage.OutputTokens != 4 {
+	if completion == nil || completion.Provider != "ollama" || completion.RequestID != "req-success" || completion.Model != "qwen3:8b" || completion.FinishReason != "stop" || !completion.UsageReported || completion.Usage.InputTokens != 12 || completion.Usage.OutputTokens != 4 {
 		t.Fatalf("completion = %#v", completion)
 	}
 	for i, event := range events {
@@ -175,6 +176,9 @@ func TestGenerateStreamSharesModelAcrossConcurrentRuns(t *testing.T) {
 func TestGenerateStreamDeliversTextBeforeTerminalRecord(t *testing.T) {
 	firstFlushed := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseServer := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseServer()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `{"model":"test","message":{"role":"assistant","content":"first"},"done":false}`)
 		w.(http.Flusher).Flush()
@@ -197,7 +201,7 @@ func TestGenerateStreamDeliversTextBeforeTerminalRecord(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first text was not delivered incrementally")
 	}
-	close(release)
+	releaseServer()
 	events := collectEvents(t, stream)
 	if len(events) != 2 || events[0].Text() != "second" || events[1].Completion == nil {
 		t.Fatalf("remaining events = %#v", events)

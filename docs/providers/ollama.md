@@ -24,6 +24,7 @@ package main
 
 import (
     "context"
+    "encoding/json"
     "fmt"
 
     "github.com/lace-ai/gai/agent"
@@ -59,7 +60,11 @@ func main() {
             if err := loop.DecodeToolArgs(call, &args); err != nil {
                 return "", err
             }
-            return `{"city":"` + args.City + `","celsius":21}`, nil
+            result, err := json.Marshal(struct {
+                City    string `json:"city"`
+                Celsius int    `json:"celsius"`
+            }{City: args.City, Celsius: 21})
+            return string(result), err
         },
     )
     if err != nil {

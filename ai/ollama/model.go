@@ -153,7 +153,7 @@ func (m *Model) generateStream(ctx context.Context, req ai.AIRequest, emit func(
 
 	scanner := bufio.NewScanner(response.Body)
 	scanner.Buffer(make([]byte, 64<<10), maxStreamRecordSize)
-	completion := ai.Completion{Provider: "ollama"}
+	completion := ai.Completion{Provider: "ollama", RequestID: response.Header.Get("X-Request-Id")}
 	var pendingCalls []ai.ToolCall
 	for scanner.Scan() {
 		record := bytes.TrimSpace(scanner.Bytes())
