@@ -221,6 +221,7 @@ func TestMixedTerminalBatchIsRejectedBeforeHandlers(t *testing.T) {
 		return "ok", nil
 	}
 	model := &scriptedStreamModel{sequences: [][]ai.Token{{
+		{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "must stay hidden"}},
 		terminalCall("terminal", "present", json.RawMessage(`{}`)),
 		terminalCall("ordinary", "lookup", json.RawMessage(`{}`)),
 	}}}
@@ -228,6 +229,7 @@ func TestMixedTerminalBatchIsRejectedBeforeHandlers(t *testing.T) {
 		namedTerminalTool(t, "present", handler),
 		namedOrdinaryTool(t, "lookup", handler),
 	}, testPromptBuilder(), nil)
+	l.ToolChoice = ai.ToolChoice{Mode: ai.ToolChoiceRequired, Names: []string{"present"}}
 	events := collectLoopEvents(t, l, context.Background())
 	if err := loopError(events); !errors.Is(err, loop.ErrMixedTerminalToolBatch) {
 		t.Fatalf("error = %v, want ErrMixedTerminalToolBatch", err)
@@ -238,6 +240,46 @@ func TestMixedTerminalBatchIsRejectedBeforeHandlers(t *testing.T) {
 	for _, event := range events {
 		if event.Type == loop.EventToolStart {
 			t.Fatalf("mixed batch emitted tool start: %#v", events)
+		}
+		if event.Type == loop.EventToken && event.Token != nil && event.Token.Text() != "" {
+			t.Fatalf("mixed batch exposed response text: %#v", event)
+		}
+	}
+}
+
+func TestExcludedTerminalBatchFailsWithoutExposingResponseText(t *testing.T) {
+	t.Parallel()
+
+	var invoked atomic.Int32
+	model := &scriptedStreamModel{sequences: [][]ai.Token{{
+		{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "must stay hidden"}},
+		terminalCall("present", "present", json.RawMessage(`{}`)),
+	}}}
+	l := loop.New(model, []loop.Tool{
+		namedTerminalTool(t, "present", func(context.Context, ai.ToolCall) (string, error) {
+			invoked.Add(1)
+			return "presented", nil
+		}),
+		namedOrdinaryTool(t, "lookup", func(context.Context, ai.ToolCall) (string, error) {
+			invoked.Add(1)
+			return "found", nil
+		}),
+	}, testPromptBuilder(), nil)
+	l.ToolChoice = ai.ToolChoice{Mode: ai.ToolChoiceRequired, Names: []string{"lookup"}}
+
+	events := collectLoopEvents(t, l, context.Background())
+	if err := loopError(events); !errors.Is(err, loop.ErrTerminalToolBatch) {
+		t.Fatalf("error = %v, want ErrTerminalToolBatch", err)
+	}
+	if got := invoked.Load(); got != 0 {
+		t.Fatalf("handler invocations = %d, want 0", got)
+	}
+	if got := len(model.Requests()); got != 1 {
+		t.Fatalf("model requests = %d, want 1", got)
+	}
+	for _, event := range events {
+		if event.Type == loop.EventToken && event.Token != nil && event.Token.Text() != "" {
+			t.Fatalf("excluded terminal batch exposed response text: %#v", event)
 		}
 	}
 }

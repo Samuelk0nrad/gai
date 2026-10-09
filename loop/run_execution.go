@@ -365,15 +365,12 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		return iterationTerminal
 	}
 	if mixedTerminalBatch {
-		for _, token := range attempt.deferredTokens {
-			r.state.recordToken(token)
-			attempt.state.recordToken(token)
-			if err := sendEvent(r.ctx, r.events, TokenEvent(attempt.iteration.Count, attempt.state.attemptID(), r.state.retryCount, token)); err != nil {
-				attempt.terminateSendFailure(err)
-				return iterationTerminal
-			}
-		}
 		attempt.terminateError(ErrMixedTerminalToolBatch)
+		return iterationTerminal
+	}
+	if terminalBatch && deferTokens && len(attempt.toolCalls) > 0 &&
+		!hasAnyPermittedToolCall(attempt.toolCalls, r.owner.Tools, r.owner.ToolChoice.Names) {
+		attempt.terminateError(fmt.Errorf("%w: no permitted terminal call", ErrTerminalToolBatch))
 		return iterationTerminal
 	}
 	if !terminalBatch && deferTokens && (!r.requiredToolCallSatisfied || len(attempt.toolCalls) > 0) &&

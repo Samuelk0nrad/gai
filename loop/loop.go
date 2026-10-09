@@ -292,6 +292,23 @@ func hasPermittedToolCall(toolCalls []pendingToolCall, tools []Tool, allowedName
 	return hasPermittedCall
 }
 
+// hasAnyPermittedToolCall reports whether at least one valid requested call is
+// registered and selected, without letting an invalid sibling erase that fact.
+func hasAnyPermittedToolCall(toolCalls []pendingToolCall, tools []Tool, allowedNames []string) bool {
+	for _, toolCall := range toolCalls {
+		if err := toolCall.call.Validate(); err != nil ||
+			(len(allowedNames) > 0 && !slices.Contains(allowedNames, toolCall.call.Name)) {
+			continue
+		}
+		for _, tool := range tools {
+			if tool != nil && tool.Name() == toolCall.call.Name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // toolsNamed selects registered tools without changing their configured order.
 func toolsNamed(tools []Tool, names []string) []Tool {
 	selected := make([]Tool, 0, len(names))
