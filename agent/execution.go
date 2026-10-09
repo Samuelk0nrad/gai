@@ -70,9 +70,11 @@ type ExecutionOverrides struct {
 }
 
 type resolvedExecution struct {
-	model                     ai.Model
-	limits                    Limits
-	tools                     []loop.Tool
+	model  ai.Model
+	limits Limits
+	tools  []loop.Tool
+	// executionTools is the ToolChoice-filtered set used for text prompt definitions;
+	// tools retains all registrations so the loop can snapshot and filter them itself.
 	executionTools            []loop.Tool
 	toolExecution             loop.ToolExecutionConfig
 	toolPolicy                loop.ToolPolicy
