@@ -7,6 +7,7 @@ import (
 	"math"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -49,6 +50,49 @@ func newCompactor(t *testing.T, store history.HistoryStore, model ai.Model) *his
 		t.Fatal(err)
 	}
 	return c
+}
+
+type compactionObservations struct {
+	mu     sync.Mutex
+	events []gai.Observation
+}
+
+func (o *compactionObservations) Emit(_ context.Context, event gai.Observation) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.events = append(o.events, event)
+}
+
+func (o *compactionObservations) named(name string) []gai.Observation {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var events []gai.Observation
+	for _, event := range o.events {
+		if event.Name == name {
+			events = append(events, event)
+		}
+	}
+	return events
+}
+
+func requireCompactionObservation(t *testing.T, observations *compactionObservations, name string, wantErr error, fields map[string]any) {
+	t.Helper()
+	events := observations.named(name)
+	if len(events) != 1 {
+		t.Fatalf("%s observations = %d, want 1", name, len(events))
+	}
+	event := events[0]
+	if event.Source != "context:Compactor" || event.Err != nil {
+		t.Fatalf("%s source/raw error = %s/%v", name, event.Source, event.Err)
+	}
+	if wantErr != nil && (event.Fields["outcome"] != "error" || event.Fields["error_type"] != fmt.Sprintf("%T", wantErr)) {
+		t.Fatalf("%s error metadata = %+v", name, event.Fields)
+	}
+	for key, want := range fields {
+		if got := event.Fields[key]; got != want {
+			t.Fatalf("%s field %s = %v, want %v", name, key, got, want)
+		}
+	}
 }
 
 func TestCASConcurrentWritersHaveExactlyOneWinner(t *testing.T) {
@@ -164,13 +208,29 @@ func TestCompactorReportsCommittedRevisionAndRemainingPressure(t *testing.T) {
 	for _, budget := range []int{0, 100} {
 		store := &sharedHistoryStore{state: oldHistory()}
 		initial, _ := store.LoadHistory(t.Context(), "session")
-		result, err := newCompactor(t, store, summaryModel()).Compact(t.Context(), budget)
+		observations := &compactionObservations{}
+		c, err := history.NewCompactor("session", store, history.CompactorDefinition{Model: summaryModel(), Amount: 1, ObservationSink: observations})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := c.Compact(t.Context(), budget)
 		if err != nil || !result.Changed || result.Revision == initial.Revision || result.PressureRemaining != (budget == 0) {
 			t.Fatalf("compact = %+v %v", result, err)
 		}
 		stored, _ := store.LoadHistory(t.Context(), "session")
 		if stored.Revision != result.Revision || stored.State.Summary == nil || len(stored.State.Turns) != 0 || store.casCalls != 1 {
 			t.Fatal("commit/result mismatch")
+		}
+		pressure := observations.named("history_compactor_token_budget_reached")
+		wantPressureEvents := 1
+		if result.PressureRemaining {
+			wantPressureEvents = 2
+		}
+		if len(pressure) != wantPressureEvents || pressure[0].Fields["last_turn_id"] != "old" {
+			t.Fatalf("input/candidate pressure observations = %+v, want %d", pressure, wantPressureEvents)
+		}
+		if !result.PressureRemaining {
+			requireCompactionObservation(t, observations, "history_compactor_summary_included", nil, map[string]any{"summary_start_turn": "old", "summary_end_turn": "old"})
 		}
 	}
 }
@@ -188,8 +248,8 @@ func TestCompactionRejectsConcurrentAppend(t *testing.T) {
 		}
 	}}
 	errorsOut := make(chan error, 1)
-	var events []gai.Observation
-	c, err := history.NewCompactor("session", store, history.CompactorDefinition{Model: model, Amount: 1, ObservationSink: gai.ObservationSinkFunc(func(_ context.Context, event gai.Observation) { events = append(events, event) })})
+	observations := &compactionObservations{}
+	c, err := history.NewCompactor("session", store, history.CompactorDefinition{Model: model, Amount: 1, ObservationSink: observations})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,15 +278,7 @@ func TestCompactionRejectsConcurrentAppend(t *testing.T) {
 	if stored.State.Summary != nil || len(stored.State.Turns) != 2 || stored.State.Turns[1].ID != "new" || model.calls.Load() != 1 {
 		t.Fatal("append lost or compaction retried")
 	}
-	found := false
-	for _, event := range events {
-		if event.Name == "history_compactor_conflict" && event.Source == "context:Compactor" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("missing distinct compaction conflict observation")
-	}
+	requireCompactionObservation(t, observations, "history_compactor_conflict", err, nil)
 }
 
 func TestConcurrentCompactorsDoNotRetry(t *testing.T) {
@@ -295,29 +347,47 @@ func (s failingStore) CompareAndSwapHistory(ctx context.Context, id string, expe
 
 func TestCompactionFailuresDoNotPersistCandidates(t *testing.T) {
 	failure := errors.New("injected failure")
-	for _, stage := range []string{"load", "model", "count input", "count candidate", "cancel before commit", "save"} {
+	for _, stage := range []string{"load", "invalid snapshot", "model", "count input", "count input summary", "count candidate", "cancel before commit", "save"} {
 		t.Run(stage, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			store := &sharedHistoryStore{state: oldHistory()}
-			before := store.state.Clone()
 			model := summaryModel()
 			wrapper := failingStore{HistoryStore: store}
-			def := history.CompactorDefinition{Amount: 1, Model: model}
+			observations := &compactionObservations{}
+			def := history.CompactorDefinition{Amount: 1, Model: model, ObservationSink: observations}
 			want := failure
+			wantEvent := ""
+			wantFields := map[string]any{"session_id": "session", "counter_id": (ai.TextTokenEstimator{}).ID()}
 			switch stage {
 			case "load":
 				wrapper.loadErr = failure
+				wantEvent = "history_compactor_state_load_failed"
+			case "invalid snapshot":
+				wrapper.HistoryStore = invalidSnapshotStore{store}
+				want = history.ErrInvalidHistorySnapshot
+				wantEvent = "history_compactor_state_load_failed"
 			case "model":
 				model.respond = func(context.Context, ai.AIRequest) (string, error) { return "", failure }
 			case "save":
 				wrapper.saveErr = failure
 			default:
+				switch stage {
+				case "count input":
+					wantEvent = "history_compactor_turn_tokenize_failed"
+					wantFields["turn_id"], wantFields["turn_count"] = "old", 1
+				case "count input summary", "count candidate":
+					wantEvent = "history_compactor_summary_token_count_failed"
+					wantFields["summary_start_turn"], wantFields["summary_end_turn"] = "old", "old"
+					if stage == "count input summary" {
+						store.state.Summary = history.NewSummary("summary", "old", "old", 1, 1, ai.ContentPart{Kind: ai.ContentText, Text: "existing summary"})
+					}
+				}
 				if stage == "cancel before commit" {
 					want = context.Canceled
 				}
 				def.TokenCounter = compactionCounter{count: func(ctx context.Context, text string) (int, error) {
-					if stage == "count input" {
+					if stage == "count input" || stage == "count input summary" {
 						return 0, failure
 					}
 					if strings.Contains(text, "Conversation summary:") {
@@ -330,6 +400,7 @@ func TestCompactionFailuresDoNotPersistCandidates(t *testing.T) {
 					return (ai.TextTokenEstimator{}).CountTokens(ctx, text)
 				}}
 			}
+			before := store.state.Clone()
 			c, err := history.NewCompactor("session", wrapper, def)
 			if err != nil {
 				t.Fatal(err)
@@ -340,6 +411,10 @@ func TestCompactionFailuresDoNotPersistCandidates(t *testing.T) {
 			}
 			if !reflect.DeepEqual(store.state, before) || len(store.saved) != 0 {
 				t.Fatal("failed compaction persisted candidate")
+			}
+			requireCompactionObservation(t, observations, "history_compactor_finished", err, nil)
+			if wantEvent != "" {
+				requireCompactionObservation(t, observations, wantEvent, err, wantFields)
 			}
 		})
 	}

@@ -103,19 +103,21 @@ func (c *Compactor) Compact(ctx context.Context, historyBudget int) (result Comp
 	if err = ctx.Err(); err != nil {
 		return result, err
 	}
+	obs.SetTokenCounterID(c.counter.ID())
 	snapshot, err := c.store.LoadHistory(ctx, c.sessionID)
 	if err != nil {
 		obs.StateLoadFailed(ctx, err)
 		return result, err
 	}
 	if err = snapshot.validate(); err != nil {
+		obs.StateLoadFailed(ctx, err)
 		return result, err
 	}
-	obs.SetTokenCounterID(c.counter.ID())
 	if snapshot.State != nil {
 		obs.ObserveState(len(snapshot.State.Turns), snapshot.State.Summary != nil)
 	}
 	selected, err := selectHistory(ctx, snapshot.State, historyBudget, c.counter)
+	obs.Selection(ctx, snapshot.State, selected, err)
 	if err != nil {
 		return result, err
 	}
@@ -130,6 +132,7 @@ func (c *Compactor) Compact(ctx context.Context, historyBudget int) (result Comp
 		return CompactionResult{Revision: snapshot.Revision, PressureRemaining: selected.budgetReached}, nil
 	}
 	selected, err = selectHistory(ctx, next, historyBudget, c.counter)
+	obs.Selection(ctx, next, selected, err)
 	if err != nil {
 		return result, err
 	}

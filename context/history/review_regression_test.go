@@ -71,6 +71,9 @@ func TestPlainSavedAndGeneratedSummariesFitTightBudget(t *testing.T) {
 				if generated && (len(store.saved) != 1 || store.saved[0].Summary == nil || store.saved[0].Summary.Content.Text != "x") {
 					t.Fatal("semantic summary was not saved")
 				}
+				if !generated && len(store.saved) != 0 {
+					t.Fatal("selecting a saved summary wrote history")
+				}
 			})
 		}
 	}

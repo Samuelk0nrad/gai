@@ -436,8 +436,8 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 		summaryDef           *history.CompactorDefinition
 		wantPart             bool
 		wantSaved            bool
-		wantSavedSummary     bool
-		wantSavedTurnIDs     []string
+		wantStoredSummary    bool
+		wantStoredTurnIDs    []string
 		wantSummaryStartTurn string
 		wantSummaryEndTurn   string
 		wantSummaryContent   string
@@ -478,11 +478,11 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 					},
 				},
 			},
-			tokenBudget:      10,
-			wantPart:         true,
-			wantSaved:        false,
-			wantSavedSummary: true,
-			wantSavedTurnIDs: []string{"turn-3", "turn-4"},
+			tokenBudget:       10,
+			wantPart:          true,
+			wantSaved:         false,
+			wantStoredSummary: true,
+			wantStoredTurnIDs: []string{"turn-3", "turn-4"},
 		},
 		{
 			name: "summary enabled but budget fits skips summarizer",
@@ -515,11 +515,11 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 			summaryDef: &history.CompactorDefinition{
 				Amount: 0.67,
 			},
-			wantPart:         true,
-			wantSaved:        false,
-			wantSavedSummary: false,
-			wantSavedTurnIDs: []string{"turn-1", "turn-2", "turn-3"},
-			wantModelCalls:   0,
+			wantPart:          true,
+			wantSaved:         false,
+			wantStoredSummary: false,
+			wantStoredTurnIDs: []string{"turn-1", "turn-2", "turn-3"},
+			wantModelCalls:    0,
 		},
 		{
 			name: "summary enabled and budget reached summarizes oldest turns",
@@ -554,8 +554,8 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 			},
 			wantPart:             true,
 			wantSaved:            true,
-			wantSavedSummary:     true,
-			wantSavedTurnIDs:     []string{"turn-3"},
+			wantStoredSummary:    true,
+			wantStoredTurnIDs:    []string{"turn-3"},
 			wantSummaryStartTurn: "turn-1",
 			wantSummaryEndTurn:   "turn-2",
 			wantSummaryContent:   "summary text",
@@ -605,34 +605,38 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 				t.Fatalf("unexpected summarizer calls: want %d got %d", tt.wantModelCalls, model.Count)
 			}
 
-			if !tt.wantSaved {
+			stored := store.state
+			if tt.wantSaved {
+				stored = store.saved[0]
+			}
+			if stored == nil {
 				return
 			}
-			if got := store.saved[0].Summary != nil; got != tt.wantSavedSummary {
-				t.Fatalf("unexpected saved summary presence: want %v got %v", tt.wantSavedSummary, got)
+			if got := stored.Summary != nil; got != tt.wantStoredSummary {
+				t.Fatalf("unexpected stored summary presence: want %v got %v", tt.wantStoredSummary, got)
 			}
-			if tt.wantSavedSummary {
-				if tt.wantSummaryStartTurn != "" && store.saved[0].Summary.StartTurnID != tt.wantSummaryStartTurn {
-					t.Fatalf("unexpected summary start turn: want %q got %q", tt.wantSummaryStartTurn, store.saved[0].Summary.StartTurnID)
+			if tt.wantStoredSummary {
+				if tt.wantSummaryStartTurn != "" && stored.Summary.StartTurnID != tt.wantSummaryStartTurn {
+					t.Fatalf("unexpected summary start turn: want %q got %q", tt.wantSummaryStartTurn, stored.Summary.StartTurnID)
 				}
-				if tt.wantSummaryEndTurn != "" && store.saved[0].Summary.EndTurnID != tt.wantSummaryEndTurn {
-					t.Fatalf("unexpected summary end turn: want %q got %q", tt.wantSummaryEndTurn, store.saved[0].Summary.EndTurnID)
+				if tt.wantSummaryEndTurn != "" && stored.Summary.EndTurnID != tt.wantSummaryEndTurn {
+					t.Fatalf("unexpected summary end turn: want %q got %q", tt.wantSummaryEndTurn, stored.Summary.EndTurnID)
 				}
-				if got := store.saved[0].Summary.Content.Text; tt.wantSummaryContent != "" && got != tt.wantSummaryContent {
+				if got := stored.Summary.Content.Text; tt.wantSummaryContent != "" && got != tt.wantSummaryContent {
 					t.Fatalf("unexpected summary content: want %q got %q", tt.wantSummaryContent, got)
 				}
 			}
 
-			gotTurnIDs := make([]string, 0, len(store.saved[0].Turns))
-			for _, turn := range store.saved[0].Turns {
+			gotTurnIDs := make([]string, 0, len(stored.Turns))
+			for _, turn := range stored.Turns {
 				gotTurnIDs = append(gotTurnIDs, turn.ID)
 			}
-			if len(gotTurnIDs) != len(tt.wantSavedTurnIDs) {
-				t.Fatalf("unexpected saved turn count: want %d got %d", len(tt.wantSavedTurnIDs), len(gotTurnIDs))
+			if len(gotTurnIDs) != len(tt.wantStoredTurnIDs) {
+				t.Fatalf("unexpected stored turn count: want %d got %d", len(tt.wantStoredTurnIDs), len(gotTurnIDs))
 			}
 			for i := range gotTurnIDs {
-				if gotTurnIDs[i] != tt.wantSavedTurnIDs[i] {
-					t.Fatalf("unexpected saved turn id at %d: want %q got %q", i, tt.wantSavedTurnIDs[i], gotTurnIDs[i])
+				if gotTurnIDs[i] != tt.wantStoredTurnIDs[i] {
+					t.Fatalf("unexpected stored turn id at %d: want %q got %q", i, tt.wantStoredTurnIDs[i], gotTurnIDs[i])
 				}
 			}
 		})
