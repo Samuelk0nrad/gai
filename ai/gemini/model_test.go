@@ -117,6 +117,45 @@ func TestGenerateAndStreamRejectMaxTokens(t *testing.T) {
 	}
 }
 
+func TestGenerateTerminalFailurePrecedesMappingAndSuccessObservation(t *testing.T) {
+	for _, test := range []struct{ name, reason, part string }{
+		{"partial text", "MAX_TOKENS", `{"text":"partial"}`},
+		{"unsupported payload", "MAX_TOKENS", `{"inlineData":{"mimeType":"image/png","data":"eA=="}}`},
+		{"blocked content", "SAFETY", `{"text":"partial"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := obstest.Install(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"responseId":"resp_limited","modelVersion":"gemini-test","candidates":[{"content":{"role":"model","parts":[` + test.part + `]},"finishReason":"` + test.reason + `"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3}}`))
+			}))
+			defer server.Close()
+			successEvents := 0
+			provider := New("test-api-key", gai.ObservationSinkFunc(func(_ context.Context, event gai.Observation) {
+				if event.Name == "gemini_generate_content_success" {
+					successEvents++
+				}
+			}))
+			provider.baseURL = server.URL
+			provider.httpClient = server.Client()
+			model, err := provider.Model("gemini-test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := any(model).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
+			var terminal *ai.TerminalError
+			if response != nil || !errors.As(err, &terminal) || terminal.Reason != test.reason || !errors.Is(err, ai.ErrUnsuccessfulGeneration) || successEvents != 0 {
+				t.Fatalf("response = %#v, error = %v, success events = %d", response, err, successEvents)
+			}
+			span := obstest.RequireGenerationSpans(t, recorder, 1)[0]
+			attrs := obstest.Attributes(span)
+			if span.Status().Code.String() != "Error" || attrs["gen_ai.response.id"].AsString() != "resp_limited" || attrs["gen_ai.response.model"].AsString() != "gemini-test" || attrs["gen_ai.usage.input_tokens"].AsInt64() != 5 || attrs["gen_ai.usage.output_tokens"].AsInt64() != 3 || strings.Join(attrs["gen_ai.response.finish_reasons"].AsStringSlice(), ",") != test.reason {
+				t.Fatalf("terminal response metadata = %#v", attrs)
+			}
+		})
+	}
+}
+
 func TestGenerateAndStreamRejectBlockedPrompt(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		response := `{"responseId":"resp_blocked","modelVersion":"gemini-test","promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":5,"totalTokenCount":5}}`

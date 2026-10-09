@@ -967,8 +967,19 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	if err := json.Unmarshal(resBody, &parsed); err != nil {
 		return nil, err
 	}
+	usage := ai.Usage{}
+	if parsed.Usage != nil {
+		usage = ai.Usage{InputTokens: parsed.Usage.PromptTokens, OutputTokens: parsed.Usage.CompletionTokens}
+		generationResult.Usage = &usage
+	}
+	generationResult.ResponseModel = parsed.Model
+	generationResult.RequestID = parsed.ID
 	if len(parsed.Choices) == 0 {
 		return nil, ErrNoChoices
+	}
+	generationResult.FinishReason = parsed.Choices[0].FinishReason
+	if err := mistralTerminalError(generationResult.FinishReason); err != nil {
+		return nil, err
 	}
 	contentParts, err := parseResponseContent(parsed.Choices[0].Message.Content)
 	if err != nil {
@@ -988,18 +999,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		c := call
 		semantic.Parts = append(semantic.Parts, ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &c})
 	}
-	usage := ai.Usage{}
-	if parsed.Usage != nil {
-		usage = ai.Usage{InputTokens: parsed.Usage.PromptTokens, OutputTokens: parsed.Usage.CompletionTokens}
-		generationResult.Usage = &usage
-	}
-	generationResult.ResponseModel = parsed.Model
-	generationResult.RequestID = parsed.ID
-	generationResult.FinishReason = parsed.Choices[0].FinishReason
 	generationResult.ToolCallCount = len(toolCalls)
-	if err := mistralTerminalError(generationResult.FinishReason); err != nil {
-		return nil, err
-	}
 	if gai.ObservationEnabled(ctx, m.debug) {
 		fields := map[string]any{
 			"input_tokens":  usage.InputTokens,
