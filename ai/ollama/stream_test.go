@@ -181,6 +181,31 @@ func TestGenerateStreamPreservesTransportErrorsWithoutHTTPResponse(t *testing.T)
 	}
 }
 
+func TestGenerateStreamPreservesTransportErrorsAfterRedirect(t *testing.T) {
+	transportErr := errors.New("redirect target dial failed")
+	client := &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == "/api/chat" {
+			return &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Status:     "307 Temporary Redirect",
+				Header:     http.Header{"Location": []string{"http://ollama.test/next"}},
+				Body:       http.NoBody,
+				Request:    request,
+			}, nil
+		}
+		return nil, transportErr
+	})}
+	model, err := New(nil, WithBaseURL("http://ollama.test"), WithHTTPClient(client)).TypedModel("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events := collectEvents(t, model.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "x")}}))
+	if len(events) != 1 || !errors.Is(events[0].Err, transportErr) {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
 func TestGenerateStreamDoesNotExposeMalformedResponseContent(t *testing.T) {
 	const secret = "private model output"
 	model := fixtureModel(t, http.StatusOK, `{"message":{"content":"`+secret, nil)

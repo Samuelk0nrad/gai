@@ -220,6 +220,12 @@ func (m *Model) generateStream(ctx context.Context, req ai.AIRequest, emit func(
 		emit(ai.Token{Err: io.ErrUnexpectedEOF})
 		return
 	}
+	if err != nil && status >= http.StatusMultipleChoices && status < http.StatusBadRequest {
+		// A redirect may have been captured before its target failed or the
+		// redirect policy rejected it. Preserve that later client error.
+		emit(ai.Token{Err: ai.ClassifyProviderError(err, 0, "", headers.Get("X-Request-Id"), headers)})
+		return
+	}
 	if status < http.StatusOK || status >= http.StatusMultipleChoices {
 		httpErr := newHTTPError(status, errorBody)
 		emit(ai.Token{Err: ai.ClassifyProviderError(httpErr, status, ollamaErrorCode(errorBody), headers.Get("X-Request-Id"), headers)})
