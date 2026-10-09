@@ -447,6 +447,9 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	if message.JSON.Usage.Valid() {
 		generationResult.Usage = &usage
 	}
+	if err := anthropicTerminalError(string(message.StopReason)); err != nil {
+		return nil, err
+	}
 	if gai.ObservationEnabled(ctx, m.debug) {
 		fields := map[string]any{"input_tokens": input, "output_tokens": output}
 		gai.AddObservationContent(ctx, m.debug, fields, "response_text", gai.ContentKindCompletion, text)
@@ -560,6 +563,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		stream := client.Messages.NewStreaming(generationCtx, payload)
 		defer stream.Close()
 		blocks := map[int64]*streamBlock{}
+		var pendingToolErr error
 		completion := ai.Completion{Provider: "anthropic"}
 		for stream.Next() {
 			event := stream.Current()
@@ -651,8 +655,10 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				if block.typ == "tool_use" {
 					call, callErr := streamToolCall(block)
 					if callErr != nil {
-						streamErr = callErr
-						break
+						if pendingToolErr == nil {
+							pendingToolErr = callErr
+						}
+						continue
 					}
 					if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: call}}) {
 						return
@@ -669,11 +675,27 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		if streamErr == nil && len(blocks) != 0 {
 			streamErr = fmt.Errorf("anthropic stream ended with %d open content block(s)", len(blocks))
 		}
+		if streamErr == nil {
+			if terminalErr := anthropicTerminalError(completion.FinishReason); terminalErr != nil {
+				streamErr = terminalErr
+			} else {
+				streamErr = pendingToolErr
+			}
+		}
 		if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
 			emit(ai.Token{Err: streamErr})
 		}
 	}()
 	return ai.DetectToolCallsInStream(ctx, out, m.debug)
+}
+
+func anthropicTerminalError(reason string) error {
+	switch reason {
+	case "", "end_turn", "stop_sequence", "tool_use":
+		return nil
+	default:
+		return &ai.TerminalError{Provider: "anthropic", Reason: reason}
+	}
 }
 
 type streamBlock struct {
