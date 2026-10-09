@@ -11,11 +11,13 @@ import (
 )
 
 type runExecution struct {
-	owner                     *Loop
-	callerCtx                 context.Context
-	ctx                       context.Context
-	events                    chan<- Event
-	state                     *loopRunState
+	owner     *Loop
+	callerCtx context.Context
+	ctx       context.Context
+	events    chan<- Event
+	state     *loopRunState
+	// registrationTools keeps every snapped registration for terminal-batch classification;
+	// executionTools is the EffectiveTools result used for native definitions and dispatch.
 	registrationTools         []Tool
 	executionTools            []Tool
 	toolDefinitions           []ai.ToolDefinition
