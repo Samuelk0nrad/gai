@@ -34,6 +34,77 @@ schema; custom tool implementations own the stability of their name and schema.
 Traits are application assertions, not inferred guarantees. Idempotency is
 metadata only: GAI never automatically retries tool invocations.
 
+## Finish with a terminal presentation batch
+
+Mark application-owned presentation tools as terminal when their successful
+execution is the complete primary response. Terminal behavior is trusted
+registration metadata; it is never inferred from an empty result, a tool name,
+or model-supplied arguments.
+
+```go
+displayText, err := loop.NewTool("display_text", "Append response text",
+    ai.ToolParameters{}, func(ctx context.Context, call ai.ToolCall) (string, error) {
+        // Decode and validate call.Args, then append one application response part.
+        return "", response.AppendText(ctx, call.Args)
+    })
+if err != nil { return err }
+displayText, err = loop.WithToolOptions(displayText, loop.ToolOptions{
+    Terminal: true,
+})
+if err != nil { return err }
+
+displayProducts, err := loop.NewTool("display_products", "Append product cards",
+    ai.ToolParameters{}, func(ctx context.Context, call ai.ToolCall) (string, error) {
+        // Product validation and rendering remain application responsibilities.
+        return "", response.AppendProducts(ctx, call.Args)
+    })
+if err != nil { return err }
+displayProducts, err = loop.WithToolOptions(displayProducts, loop.ToolOptions{
+    Terminal: true,
+})
+if err != nil { return err }
+
+presentationTools := []loop.Tool{displayText, displayProducts}
+worker := agent.New(agent.Definition{
+    Model:         model,
+    Prompt:        promptFactory,
+    Tools:         presentationTools,
+    ToolExecution: loop.ToolExecutionConfig{MaxConcurrent: 1},
+})
+
+// Low-level users register the same tools directly.
+runner := loop.New(model, presentationTools, promptBuilder, nil)
+runner.ToolExecution.MaxConcurrent = 1
+```
+
+When one generation contains only registered terminal calls, GAI validates the
+whole batch, applies the normal policy and approval checks, executes every call,
+processes every result, and joins all started work. It then accepts the iteration
+and completes the primary loop without another model generation. Empty successful
+handler results are valid. The same registrations work in `agent.Definition.Tools`
+and per-run `ExecutionOverrides.Tools`.
+
+Canonical tool results always retain the model's requested call order, even when
+independent handlers finish out of order. If handler side effects must have that
+same order across different tool names, set `MaxConcurrent: 1` as above.
+`Serial` orders repeated calls to the same name only; a shared `*ToolGuard`
+provides mutual exclusion across registrations and runs, not a cross-run ordering
+contract.
+
+A generation that mixes registered terminal and ordinary calls is rejected before
+policy, approval, or handler callbacks. A terminal candidate also cannot succeed
+when any call is malformed, unknown, excluded, denied, unapproved, failed,
+canceled, or rejected by result processing. Eligible siblings may already have
+run; GAI joins started pipelines before returning and does not roll back, replay,
+or automatically retry calls. Terminal-batch failure does not trigger another
+model generation.
+
+Terminal completion ends only the current loop/primary stage. Workflow middleware
+continues normally. Usage, events, execution diagnostics, call/result identity,
+and canonical conversation remain available, but terminal result strings are not
+promoted to visible answer text. Applications own response rendering and may
+therefore complete successfully with an empty `AgentResult.Text`.
+
 ## Configure execution and authorization
 
 ```go
@@ -70,6 +141,7 @@ The examples assume application-owned `model`, `promptFactory`, `updateRecord`,
 | `DefaultTimeout` | Zero adds no handler deadline. Parent deadlines still apply. Negative values are invalid. |
 | `ToolOptions.Timeout` | Nil inherits; a pointer to zero disables the default. The duration is copied. |
 | `ToolOptions.Serial` | Preserves same-name FIFO within a run, including result processing. It does not serialize other names or runs. |
+| `ToolOptions.Terminal` | False preserves ordinary result-to-model behavior. True allows a successful terminal-only generation to finish the primary loop without another model request. |
 | `ToolOptions.Guard` | The exact shared `*ToolGuard` serializes invoked pipelines across runs. Synthetic refusals bypass it. Zero value is ready; never copy a used guard. It is an in-process gate. |
 | `ToolPolicy` | Nil permits registered calls. A decision is allow, deny, or require approval. |
 | `ToolApprovalResolver` | Nil refuses approval-required calls with `ErrToolApprovalRequired`; it never implies consent. |

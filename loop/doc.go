@@ -8,8 +8,13 @@
 //
 // A Loop builds a canonical request, streams model tokens, executes Tools, adds
 // identified results to subsequent requests, and stops when the model returns a final
-// response. Each run exposes one ordered Event stream containing tokens,
-// attempt starts, retries, completed iterations, and terminal results.
+// response. Tools registered with ToolOptions.Terminal may instead complete the
+// loop after a whole terminal-only batch succeeds, without another model request.
+// Mixed terminal and ordinary batches are rejected before execution. Terminal
+// calls retain normal policy, approval, scheduling, processing, canonical result,
+// accounting, and event behavior. Each run exposes one ordered Event stream
+// containing tokens, attempt starts, retries, completed iterations, and terminal
+// results.
 // Iteration retains attempt execution diagnostics and canonical message snapshots.
 // ToolExecution.MaxConcurrent bounds active tool pipelines; zero preserves
 // unlimited concurrency. WithToolOptions adds per-name Serial execution and

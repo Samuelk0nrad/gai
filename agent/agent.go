@@ -238,17 +238,17 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 			return nil, err
 		}
 	} else if !nativeTools {
-		if execution.reconfigureTools && hasToolDefinitions && len(execution.tools) == 0 {
+		if execution.reconfigureTools && hasToolDefinitions && len(execution.executionTools) == 0 {
 			if !hasContextSourceManager {
 				return nil, fmt.Errorf("prompt builder cannot remove existing tool definitions")
 			}
 			if err := manager.RemoveContextSource(ctx, "tool_definitions"); err != nil {
 				return nil, err
 			}
-		} else if len(execution.tools) > 0 && (!hasToolDefinitions || execution.reconfigureTools) {
+		} else if len(execution.executionTools) > 0 && (!hasToolDefinitions || execution.reconfigureTools) {
 			toolOptions := append([]tooldefinitions.Option(nil), a.def.ToolDefinitionOptions...)
 			toolOptions = append(toolOptions, tooldefinitions.WithToolChoice(execution.toolChoice))
-			toolSource, err := tooldefinitions.New(nil, toolSignatures(execution.tools), a.def.ObservationSink, toolOptions...)
+			toolSource, err := tooldefinitions.New(nil, toolSignatures(execution.executionTools), a.def.ObservationSink, toolOptions...)
 			if err != nil {
 				return nil, err
 			}

@@ -33,6 +33,10 @@ func (c ToolExecutionConfig) Validate() error {
 type ToolOptions struct {
 	Traits ToolTraits
 	Serial bool
+	// Terminal marks calls that can complete the loop after a whole successful
+	// generation consists only of terminal tools. It is trusted registration
+	// metadata and is never exposed to or controlled by the model.
+	Terminal bool
 	// Timeout nil inherits DefaultTimeout; a pointer to zero disables that default.
 	// Parent context deadlines always apply. The pointed value is copied.
 	Timeout *time.Duration

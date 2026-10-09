@@ -16,6 +16,7 @@ type runExecution struct {
 	ctx                       context.Context
 	events                    chan<- Event
 	state                     *loopRunState
+	registrationTools         []Tool
 	executionTools            []Tool
 	toolDefinitions           []ai.ToolDefinition
 	userMessage               *ai.Message
@@ -100,7 +101,13 @@ func (r *runExecution) prepareValidatedRun() bool {
 		return false
 	}
 
-	executionTools, err := EffectiveTools(r.owner.Tools, r.owner.ToolChoice, r.owner.ToolTransport)
+	registrationTools, err := snapshotToolRegistrations(r.owner.Tools)
+	if err != nil {
+		sendLoopError(r.ctx, r.events, r.state, err)
+		return false
+	}
+	r.registrationTools = registrationTools
+	executionTools, err := EffectiveTools(registrationTools, r.owner.ToolChoice, r.owner.ToolTransport)
 	if err != nil {
 		sendLoopError(r.ctx, r.events, r.state, err)
 		return false
@@ -345,7 +352,31 @@ func (a *attemptExecution) scheduleRetry(retryErr error) attemptOutcome {
 
 // postAttempt executes tool calls and commits only accepted iteration output.
 func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) iterationOutcome {
-	if deferTokens && (!r.requiredToolCallSatisfied || len(attempt.toolCalls) > 0) &&
+	if r.owner.ToolChoice.Mode == ai.ToolChoiceNone {
+		attempt.toolCalls = nil
+	}
+	if err := validateToolCallBatch(attempt.toolCalls); err != nil {
+		attempt.terminateError(err)
+		return iterationTerminal
+	}
+	terminalBatch, mixedTerminalBatch, err := classifyTerminalBatch(attempt.toolCalls, r.registrationTools)
+	if err != nil {
+		attempt.terminateError(err)
+		return iterationTerminal
+	}
+	if mixedTerminalBatch {
+		for _, token := range attempt.deferredTokens {
+			r.state.recordToken(token)
+			attempt.state.recordToken(token)
+			if err := sendEvent(r.ctx, r.events, TokenEvent(attempt.iteration.Count, attempt.state.attemptID(), r.state.retryCount, token)); err != nil {
+				attempt.terminateSendFailure(err)
+				return iterationTerminal
+			}
+		}
+		attempt.terminateError(ErrMixedTerminalToolBatch)
+		return iterationTerminal
+	}
+	if !terminalBatch && deferTokens && (!r.requiredToolCallSatisfied || len(attempt.toolCalls) > 0) &&
 		!hasPermittedToolCall(attempt.toolCalls, r.owner.Tools, r.owner.ToolChoice.Names) {
 		// A text-transport response that does not satisfy a required tool call is
 		// not part of the conversation and must not expose its response content.
@@ -357,9 +388,6 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		r.state.resetRetries()
 		attempt.finish(nil)
 		return iterationContinue
-	}
-	if r.owner.ToolChoice.Mode == ai.ToolChoiceNone {
-		attempt.toolCalls = nil
 	}
 	for _, token := range attempt.deferredTokens {
 		r.state.recordToken(token)
@@ -383,6 +411,12 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		return iterationTerminal
 	}
 	attempt.state.recordToolResults(attempt.iteration)
+	if terminalBatch {
+		if err := terminalBatchError(attempt.iteration, attempt.toolCalls); err != nil {
+			attempt.terminateError(err)
+			return iterationTerminal
+		}
+	}
 
 	attemptID := attempt.state.attemptID()
 	retryCount := r.state.retryCount
@@ -409,7 +443,7 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		attempt.finish(nil)
 		return iterationContinue
 	}
-	if len(attempt.toolCalls) == 0 {
+	if len(attempt.toolCalls) == 0 || terminalBatch {
 		attempt.cancelAttempt()
 		attempt.state.markFinal()
 		attempt.finish(nil)

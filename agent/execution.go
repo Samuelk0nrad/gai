@@ -73,6 +73,7 @@ type resolvedExecution struct {
 	model                     ai.Model
 	limits                    Limits
 	tools                     []loop.Tool
+	executionTools            []loop.Tool
 	toolExecution             loop.ToolExecutionConfig
 	toolPolicy                loop.ToolPolicy
 	toolApprovalResolver      loop.ToolApprovalResolver
@@ -200,7 +201,8 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 	if err != nil {
 		return resolvedExecution{}, fmt.Errorf("execution.tools: %w", err)
 	}
-	r.tools = cloneTools(tools)
+	r.executionTools = cloneTools(tools)
+	r.tools = cloneTools(r.tools)
 	r.toolChoice = cloneToolChoice(r.toolChoice)
 	r.responseFormat = cloneResponseFormat(r.responseFormat)
 	r.retryPolicy = cloneRetryPolicy(r.retryPolicy)
