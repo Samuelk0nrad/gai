@@ -268,7 +268,23 @@ func (b *Builder) AppendSystemInstructions(ctx context.Context, instructions ...
 	return nil
 }
 
-func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err error) {
+func (b *Builder) BuildContext(ctx context.Context) ([]Part, error) {
+	return b.buildContext(ctx, nil)
+}
+
+// BuildContextWithPreparation explicitly prepares each source immediately before
+// selecting it. The callback receives the same remaining allocation and local
+// counter as source selection, after earlier sources have been evaluated once.
+// It is called only with an enabled budget, including a valid zero allocation.
+// Unlike BuildContext, this opt-in path may have side effects through prepare.
+// Errors stop the build without rollback. Required input or a preceding source
+// that already exceeds the window fails before preparing subsequent sources.
+// Callers must not retain the callback arguments or modify builder configuration.
+func (b *Builder) BuildContextWithPreparation(ctx context.Context, prepare func(context.Context, ContextSource, int, ai.TokenCounter) error) ([]Part, error) {
+	return b.buildContext(ctx, prepare)
+}
+
+func (b *Builder) buildContext(ctx context.Context, prepare func(context.Context, ContextSource, int, ai.TokenCounter) error) (contextParts []Part, err error) {
 	ctx, obs := newPromptBuilderContextObserver(ctx, b)
 	limit, outputReserve := b.TokenBudget, b.OutputTokenReserve
 	additionalReserve := 0
@@ -292,6 +308,11 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 	}
 
 	if limit > 0 {
+		fixedOverflow := false
+		spendFixed := func(tokens int) {
+			fixedOverflow = fixedOverflow || tokens > stats.RemainingTokens
+			stats.RemainingTokens = spendBudget(stats.RemainingTokens, tokens)
+		}
 		if b.allocationOverride && b.counter != nil && len(b.SystemInstructions) > 0 {
 			var messages []ai.Message
 			messages, err = b.renderMessages(ctx, []Part{NewSystemPart(b.SystemInstructions)}, ai.RoleSystem, true)
@@ -304,9 +325,10 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 		if err != nil {
 			return nil, err
 		}
-		stats.RemainingTokens = spendBudget(limit, outputReserve)
-		stats.RemainingTokens = spendBudget(stats.RemainingTokens, additionalReserve)
-		stats.RemainingTokens = spendBudget(stats.RemainingTokens, stats.SystemTokens)
+		stats.RemainingTokens = limit
+		spendFixed(outputReserve)
+		spendFixed(additionalReserve)
+		spendFixed(stats.SystemTokens)
 		// Required user/machine input takes priority over optional sources. These
 		// use their emitted messages during request-budget allocation; the loop
 		// checks the final rendered request before every generation attempt.
@@ -315,7 +337,7 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 			if countErr != nil {
 				return nil, countErr
 			}
-			stats.RemainingTokens = spendBudget(stats.RemainingTokens, tokens)
+			spendFixed(tokens)
 		}
 		for _, part := range b.input.Context {
 			if part == nil {
@@ -332,8 +354,11 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 				return nil, countErr
 			}
 			if b.counter != nil {
-				stats.RemainingTokens = spendBudget(stats.RemainingTokens, tokens)
+				spendFixed(tokens)
 			}
+		}
+		if prepare != nil && fixedOverflow {
+			return nil, fmt.Errorf("%w: required prompt content exceeds the source allocation window", ai.ErrRequestBudgetExceeded)
 		}
 	} else {
 		obs.TokenBudgetSkipped(ctx)
@@ -351,6 +376,15 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 		}
 		if setter, ok := source.(TokenCounterSetter); ok && b.counter != nil {
 			setter.SetTokenCounter(b.counter)
+		}
+		if prepare != nil && limit > 0 {
+			if err = prepare(ctx, source, stats.RemainingTokens, b.counter); err != nil {
+				obs.SourceFailed(ctx, source.Name(), stats.RemainingTokens, err)
+				return nil, err
+			}
+			if err = ctx.Err(); err != nil {
+				return nil, err
+			}
 		}
 		var part Part
 		var sourceTokens int
@@ -396,6 +430,9 @@ func (b *Builder) BuildContext(ctx context.Context) (contextParts []Part, err er
 				}
 				tokenStats = promptPartTokenStats{Tokens: tokens, TokensCounted: b.counter != nil}
 				if tokenStats.TokensCounted {
+					if prepare != nil && tokens > stats.RemainingTokens {
+						return nil, fmt.Errorf("%w: context source %q exceeds its allocation", ai.ErrRequestBudgetExceeded, source.Name())
+					}
 					stats.RemainingTokens = spendBudget(stats.RemainingTokens, tokens)
 				}
 			}

@@ -32,6 +32,35 @@ type ProviderError struct {
 	Err        error
 }
 
+// TerminalError reports a provider terminal state that did not produce a
+// successful generation. Stream adapters emit completion metadata before this
+// error so callers can retain usage and diagnostics without accepting partial
+// output.
+type TerminalError struct {
+	Provider string
+	Reason   string
+}
+
+func (e *TerminalError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	provider := strings.TrimSpace(e.Provider)
+	reason := strings.TrimSpace(e.Reason)
+	if provider == "" {
+		if reason == "" {
+			return "generation ended unsuccessfully"
+		}
+		return fmt.Sprintf("generation ended unsuccessfully: %s", reason)
+	}
+	if reason == "" {
+		return fmt.Sprintf("%s generation ended unsuccessfully", provider)
+	}
+	return fmt.Sprintf("%s generation ended unsuccessfully: %s", provider, reason)
+}
+
+func (e *TerminalError) Unwrap() error { return ErrUnsuccessfulGeneration }
+
 func (e *ProviderError) Error() string {
 	if e == nil {
 		return "<nil>"
@@ -129,4 +158,7 @@ var (
 	ErrUnsupportedCapability = errors.New("unsupported provider capability")
 	// ErrTokenCounterUnsupported indicates an unsupported local counting algorithm.
 	ErrTokenCounterUnsupported = errors.New("token counter unsupported")
+	// ErrUnsuccessfulGeneration identifies a provider terminal state that must
+	// not be accepted as a completed answer.
+	ErrUnsuccessfulGeneration = errors.New("generation ended unsuccessfully")
 )

@@ -78,6 +78,84 @@ func TestModelGenerateStreamEmitsCompletionForIdentityMetadata(t *testing.T) {
 	}
 }
 
+func TestGenerateAndStreamRejectMaxTokens(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := `{"responseId":"resp_limited","modelVersion":"gemini-test","candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3}}`
+		if strings.Contains(r.URL.Path, ":streamGenerateContent") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: " + response + "\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(response))
+	}))
+	defer server.Close()
+
+	provider := New("test-api-key", nil)
+	provider.baseURL = server.URL
+	provider.httpClient = server.Client()
+	model, err := provider.Model("gemini-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := any(model).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
+	var terminal *ai.TerminalError
+	if response != nil || !errors.As(err, &terminal) || terminal.Provider != "gemini" || terminal.Reason != "MAX_TOKENS" {
+		t.Fatalf("Generate response = %#v, error = %#v", response, err)
+	}
+
+	var tokens []ai.Token
+	for token := range model.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		tokens = append(tokens, token)
+	}
+	if len(tokens) != 3 || tokens[0].Text() != "partial" || tokens[1].Type() != ai.TokenTypeCompletion || tokens[1].Completion.FinishReason != "MAX_TOKENS" || tokens[1].Completion.Usage.OutputTokens != 3 || tokens[2].Type() != ai.TokenTypeErr {
+		t.Fatalf("tokens = %#v", tokens)
+	}
+	terminal = nil
+	if !errors.As(tokens[2].Err, &terminal) || terminal.Provider != "gemini" || terminal.Reason != "MAX_TOKENS" {
+		t.Fatalf("stream error = %#v", tokens[2].Err)
+	}
+}
+
+func TestGenerateAndStreamRejectBlockedPrompt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := `{"responseId":"resp_blocked","modelVersion":"gemini-test","promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":5,"totalTokenCount":5}}`
+		if strings.Contains(r.URL.Path, ":streamGenerateContent") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: " + response + "\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(response))
+	}))
+	defer server.Close()
+
+	provider := New("test-api-key", nil)
+	provider.baseURL = server.URL
+	provider.httpClient = server.Client()
+	model, err := provider.Model("gemini-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := any(model).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
+	var terminal *ai.TerminalError
+	if response != nil || !errors.As(err, &terminal) || terminal.Provider != "gemini" || terminal.Reason != "SAFETY" {
+		t.Fatalf("Generate response = %#v, error = %#v", response, err)
+	}
+
+	var tokens []ai.Token
+	for token := range model.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		tokens = append(tokens, token)
+	}
+	if len(tokens) != 2 || tokens[0].Type() != ai.TokenTypeCompletion || tokens[0].Completion.FinishReason != "SAFETY" || tokens[0].Completion.Usage.InputTokens != 5 || tokens[1].Type() != ai.TokenTypeErr {
+		t.Fatalf("tokens = %#v", tokens)
+	}
+	terminal = nil
+	if !errors.As(tokens[1].Err, &terminal) || terminal.Provider != "gemini" || terminal.Reason != "SAFETY" {
+		t.Fatalf("stream error = %#v", tokens[1].Err)
+	}
+}
+
 func TestModelGenerateStreamPreservesCompletionBeforeError(t *testing.T) {
 	recorder := obstest.Install(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

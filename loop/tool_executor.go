@@ -27,6 +27,83 @@ type toolCompletion struct {
 	err       error
 }
 
+// snapshotToolRegistrations captures trusted execution options once per run so
+// classification and scheduling cannot observe different mutable provider values.
+func snapshotToolRegistrations(tools []Tool) ([]Tool, map[string]ToolOptions, error) {
+	snapshots := make([]Tool, len(tools))
+	optionsByName := make(map[string]ToolOptions, len(tools))
+	for i, tool := range tools {
+		if nilImplementation(tool) {
+			return nil, nil, fmt.Errorf("%w: tool is nil", ai.ErrInvalidToolDefinition)
+		}
+		name := tool.Name()
+		if _, exists := optionsByName[name]; exists {
+			return nil, nil, fmt.Errorf("%w: duplicate tool %q", ai.ErrInvalidToolDefinition, name)
+		}
+		options, err := optionsForTool(tool)
+		if err != nil {
+			return nil, nil, err
+		}
+		optionsByName[name] = options.clone()
+		snapshots[i] = &configuredTool{Tool: tool, options: options.clone()}
+	}
+	return snapshots, optionsByName, nil
+}
+
+func validateToolCallBatch(calls []pendingToolCall) error {
+	ids := make(map[string]struct{}, len(calls))
+	for _, pending := range calls {
+		id := pending.call.ID
+		if _, exists := ids[id]; exists {
+			return fmt.Errorf("%w: duplicate tool call ID %q", ai.ErrInvalidToolCall, id)
+		}
+		ids[id] = struct{}{}
+	}
+	return nil
+}
+
+// classifyTerminalBatch uses trusted registration metadata to classify the
+// complete model-requested batch. Unknown calls do not make a known terminal
+// batch ordinary; execution will retain their normal synthetic failures. A
+// permissive terminal call mixed with ordinary calls behaves as ordinary, while
+// any non-permissive terminal call makes that mixed batch invalid.
+func classifyTerminalBatch(calls []pendingToolCall, optionsByName map[string]ToolOptions) (terminal, mixed bool) {
+	var ordinary, rejectsOrdinary bool
+	for _, pending := range calls {
+		options, known := optionsByName[pending.call.Name]
+		if !known {
+			continue
+		}
+		if options.Terminal {
+			terminal = true
+			if !options.AllowNonTerminalCalls {
+				rejectsOrdinary = true
+			}
+		} else {
+			ordinary = true
+		}
+	}
+	return terminal && !ordinary, ordinary && rejectsOrdinary
+}
+
+func terminalBatchError(iteration Iteration, calls []pendingToolCall) error {
+	for _, pending := range calls {
+		if pending.partIndex < 0 || pending.partIndex >= len(iteration.Parts) {
+			return fmt.Errorf("%w: tool %q has no execution result", ErrTerminalToolBatch, pending.call.Name)
+		}
+		part := iteration.Parts[pending.partIndex]
+		if part.ToolExecution == nil || part.ToolExecution.State != ToolSucceeded ||
+			part.ToolExecution.Output == ToolOutputRejected || part.ToolResp == nil || part.ToolResp.Err != nil {
+			state := ToolNotStarted
+			if part.ToolExecution != nil {
+				state = part.ToolExecution.State
+			}
+			return fmt.Errorf("%w: tool %q did not succeed (state=%s)", ErrTerminalToolBatch, pending.call.Name, state)
+		}
+	}
+	return nil
+}
+
 // reflect.Select accepts at most 65,536 cases; reserve two for completion/context.
 const maxToolGuardWaits = 65534
 

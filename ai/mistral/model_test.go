@@ -83,6 +83,47 @@ func TestModelGenerate(t *testing.T) {
 	}
 }
 
+func TestGenerateAndStreamRejectOutputLimit(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request chatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, "data: {\"id\":\"cmpl_limited\",\"model\":\"mistral-test\",\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"cmpl_limited","model":"mistral-test","choices":[{"message":{"content":"partial"},"finish_reason":"length"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}`))
+	}))
+	defer ts.Close()
+
+	p := New("test-key", nil)
+	p.baseURL = ts.URL
+	m, err := p.Model(MistralSmallLatest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
+	var terminal *ai.TerminalError
+	if response != nil || !errors.As(err, &terminal) || terminal.Provider != "mistral" || terminal.Reason != "length" {
+		t.Fatalf("Generate response = %#v, error = %#v", response, err)
+	}
+
+	var tokens []ai.Token
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		tokens = append(tokens, token)
+	}
+	if len(tokens) != 3 || tokens[0].Text() != "partial" || tokens[1].Type() != ai.TokenTypeCompletion || tokens[1].Completion.FinishReason != "length" || tokens[1].Completion.Usage.OutputTokens != 3 || tokens[2].Type() != ai.TokenTypeErr {
+		t.Fatalf("tokens = %#v", tokens)
+	}
+	terminal = nil
+	if !errors.As(tokens[2].Err, &terminal) || terminal.Provider != "mistral" || terminal.Reason != "length" {
+		t.Fatalf("stream error = %#v", tokens[2].Err)
+	}
+}
+
 func TestModelGenerateUsesContentCapturePolicy(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

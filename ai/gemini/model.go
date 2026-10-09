@@ -208,6 +208,11 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				hasCompletion = true
 				responseHasCompletion = true
 			}
+			if resp.PromptFeedback != nil && resp.PromptFeedback.BlockReason != "" {
+				completion.FinishReason = string(resp.PromptFeedback.BlockReason)
+				hasCompletion = true
+				responseHasCompletion = true
+			}
 			if len(resp.Candidates) > 0 && resp.Candidates[0] != nil && resp.Candidates[0].FinishReason != "" {
 				completion.FinishReason = string(resp.Candidates[0].FinishReason)
 				hasCompletion = true
@@ -316,7 +321,13 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		if hasCompletion {
 			snapshot := completion
 			snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
-			emit(ai.Token{Completion: &snapshot})
+			if !emit(ai.Token{Completion: &snapshot}) {
+				return
+			}
+			if terminalErr := geminiTerminalError(completion.FinishReason); terminalErr != nil {
+				streamErr = terminalErr
+				emit(ai.Token{Err: terminalErr})
+			}
 		}
 	}()
 
@@ -427,8 +438,14 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		}
 		generationResult.Usage = &usage
 	}
-	if len(result.Candidates) > 0 && result.Candidates[0] != nil {
+	if result.PromptFeedback != nil && result.PromptFeedback.BlockReason != "" {
+		generationResult.FinishReason = string(result.PromptFeedback.BlockReason)
+	}
+	if len(result.Candidates) > 0 && result.Candidates[0] != nil && result.Candidates[0].FinishReason != "" {
 		generationResult.FinishReason = string(result.Candidates[0].FinishReason)
+	}
+	if err := geminiTerminalError(generationResult.FinishReason); err != nil {
+		return nil, err
 	}
 	response = &ai.AIResponse{
 		Raw:             raw,
@@ -439,6 +456,15 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	}
 	response.SetMessage(semantic)
 	return response, nil
+}
+
+func geminiTerminalError(reason string) error {
+	switch reason {
+	case "", "STOP":
+		return nil
+	default:
+		return &ai.TerminalError{Provider: "gemini", Reason: reason}
+	}
 }
 
 // nativeContents maps only the conversation; system messages are mapped to

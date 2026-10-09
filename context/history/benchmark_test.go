@@ -104,10 +104,6 @@ func (benchmarkTool) Params() ai.ToolParameters {
 
 type benchmarkHistoryStore struct{ state *history.HistoryState }
 
-func (s *benchmarkHistoryStore) GetLastHistoryState(context.Context, string) (*history.HistoryState, error) {
-	return s.state, nil
-}
-func (s *benchmarkHistoryStore) SaveHistoryState(_ context.Context, _ string, state *history.HistoryState) error {
-	s.state = state
-	return nil
+func (s *benchmarkHistoryStore) LoadHistory(context.Context, string) (history.HistorySnapshot, error) {
+	return history.HistorySnapshot{Revision: "benchmark", State: s.state.Clone()}, nil
 }

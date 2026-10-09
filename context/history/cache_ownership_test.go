@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -15,25 +16,52 @@ import (
 	"github.com/lace-ai/gai/testutil/mocks"
 )
 
-// This store owns its immutable loaded state. Saving records only a separate
-// build result and is safe for concurrent callers. No token-persistence API is
-// needed to implement HistoryStore.
+// This single-session test store clones under its lock at both boundaries.
 type sharedHistoryStore struct {
-	state *history.HistoryState
-	mu    sync.Mutex
-	saved []*history.HistoryState
+	mu       sync.Mutex
+	state    *history.HistoryState
+	revision uint64
+	saved    []*history.HistoryState
+	casCalls int
 }
 
 var _ history.HistoryStore = (*sharedHistoryStore)(nil)
 
-func (s *sharedHistoryStore) GetLastHistoryState(context.Context, string) (*history.HistoryState, error) {
-	return s.state, nil
+func (s *sharedHistoryStore) currentRevision() history.Revision {
+	if s.state != nil && s.revision == 0 {
+		s.revision = 1
+	}
+	if s.revision == 0 {
+		return ""
+	}
+	return history.Revision(fmt.Sprint(s.revision))
 }
-func (s *sharedHistoryStore) SaveHistoryState(_ context.Context, _ string, state *history.HistoryState) error {
+func (s *sharedHistoryStore) LoadHistory(ctx context.Context, _ string) (history.HistorySnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.saved = append(s.saved, state)
-	return nil
+	if err := ctx.Err(); err != nil {
+		return history.HistorySnapshot{}, err
+	}
+	return history.HistorySnapshot{Revision: s.currentRevision(), State: s.state.Clone()}, nil
+}
+func (s *sharedHistoryStore) CompareAndSwapHistory(ctx context.Context, sessionID string, expected history.Revision, next *history.HistoryState) (history.Revision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.casCalls++
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if next == nil {
+		return "", history.ErrHistoryStateRequired
+	}
+	actual := s.currentRevision()
+	if expected != actual {
+		return "", &history.RevisionConflictError{SessionID: sessionID, Expected: expected, Actual: actual}
+	}
+	s.state = next.Clone()
+	s.saved = append(s.saved, next.Clone())
+	s.revision++
+	return s.currentRevision(), nil
 }
 
 func TestConcurrentHistoryBuildsLeaveLoadedStateUntouched(t *testing.T) {
@@ -74,14 +102,10 @@ func TestConcurrentHistoryBuildsLeaveLoadedStateUntouched(t *testing.T) {
 	if err != nil || string(after) != string(before) || state.SchemaVersion != 0 {
 		t.Fatal("build changed the store's loaded value")
 	}
-	if len(store.saved) != 16 {
-		t.Fatalf("saves = %d, want 16", len(store.saved))
+	if len(store.saved) != 0 {
+		t.Fatalf("unchanged builds saved %d states", len(store.saved))
 	}
-	for _, saved := range store.saved {
-		if saved == state || saved.SchemaVersion != history.HistorySchemaVersion || saved.Turns[0].ID != "old" || saved.Turns[1].ID != "new" {
-			t.Fatal("wrong saved snapshot")
-		}
-	}
+
 }
 
 func TestLegacyCalculatedCountsAreIgnoredAndNotPersisted(t *testing.T) {
@@ -105,7 +129,7 @@ func TestLegacyCalculatedCountsAreIgnoredAndNotPersisted(t *testing.T) {
 	if len(part.Messages) != 2 || part.Messages[1].Text() != "hello" || counter.CountCalls != 2 {
 		t.Fatalf("old counts affected selection: %#v; calls %d", part, counter.CountCalls)
 	}
-	encoded, err := json.Marshal(store.saved[0])
+	encoded, err := json.Marshal(&state)
 	if err != nil {
 		t.Fatal(err)
 	}

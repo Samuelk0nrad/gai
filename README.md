@@ -60,7 +60,7 @@ GAI is aimed at Go teams that want a small runtime they can compose into an appl
 
 ## Requirements
 
-- Go `1.26.8` or newer
+- Go `1.26.9` or newer
 - Credentials for the model provider you use
 
 Install the module in an existing application:
@@ -251,7 +251,7 @@ support := agent.New(agent.Definition{
 })
 ```
 
-The loop sends definitions to the model, executes requested calls, appends tool results to the conversation, and continues until the model commits a normal response or the iteration limit is reached.
+The loop sends definitions to the model, executes requested calls, appends tool results to the conversation, and continues until the model commits a normal response or the iteration limit is reached. Tools registered with `ToolOptions.Terminal` complete the primary loop without another model generation. A terminal registration can set `AllowNonTerminalCalls` to execute mixed batches normally and continue instead.
 
 Use `ToolExecution` to set concurrency and default handler deadlines, and
 `loop.WithToolOptions` for per-tool traits, serial execution, timeouts, or a shared
@@ -259,8 +259,9 @@ guard. `ToolPolicy` authorizes before admission; `ToolApprovalResolver` handles
 in-process approval. `ToolResultProcessor` transforms output before it reaches
 events, conversation history, and loop telemetry. These settings are available
 on both `loop.Loop` and `agent.Definition`, with per-run agent overrides. See
-[tool execution and migration](docs/tool-execution.md) for examples, defaults,
-approval semantics, and cancellation guarantees.
+[tool execution and migration](docs/tool-execution.md) for examples, terminal
+presentation batches, defaults, approval semantics, ordering, and cancellation
+guarantees.
 
 Use `RunInput.Execution` to override an agent's defaults for one run. Omitted
 fields inherit from `Definition`.
@@ -369,9 +370,26 @@ See [request budgets and migration](docs/request-budgets.md).
 
 ## History and summarization
 
-`context/history` provides a `ContextSource` backed by a `HistoryStore`. It loads persisted state, selects recent turns that fit the available budget, and counts candidate turns locally on demand. Calculated counts are not persisted.
+`history.NewHistory(sessionID, reader)` supplies read-only, budgeted history selection.
+Ordinary context builds never invoke a summarizer or write history. Token counts are local
+and are not persisted.
 
-Use `history.NewHistory(sessionID, store)` for budgeted history selection. Use `history.New(sessionID, store, summarizerDefinition)` when older turns should be summarized under token pressure. The built-in `agent/summary` package can supply the summarizer agent.
+To compact automatically before an agent answers, set `AutoCompactHistory: true`
+on `agent.Definition`. Return a standard `*context.Builder` containing
+`history.NewHistory(sessionID, store)`, with a writable `history.HistoryStore` and
+an enabled request budget. The agent uses its effective model and counter to
+compact only when history exceeds its remaining allocation. Compaction runs once
+at workflow start; conflicts or remaining pressure stop the run without retries.
+The flag does not persist new turns or provide session locking. See
+[automatic compaction](docs/history.md#automatic-compaction-in-agents) for usage.
+
+Use `history.NewCompactor(sessionID, store, history.CompactorDefinition{Model: model})`
+and call `Compact(ctx, historyBudget)` explicitly when older completed turns should
+be summarized. Stores load revisioned snapshots and commit through atomic
+compare-and-swap; conflicts are returned to the application without retrying.
+See [history persistence and migration](docs/history.md) for the store contract,
+compaction results, and session ordering. The [offline history-session example](examples/history-session)
+demonstrates the complete application lifecycle and concurrent-session tests.
 
 Built-in summarization uses a text projection. If the selected turns contain media,
 signed reasoning, or other opaque provider state, it returns

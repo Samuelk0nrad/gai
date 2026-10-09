@@ -101,6 +101,13 @@ type Definition struct {
 	// RequestBudget atomically replaces the prompt builder's window/reserve.
 	// Nil inherits standard Builder settings; explicit zero limits disable checks.
 	RequestBudget *ai.RequestBudgetConfig
+	// AutoCompactHistory opts into persistent history compaction at workflow
+	// start, before history selection. Requires a *context.Builder and history
+	// sources backed by a writable HistoryStore. Uses the effective run model,
+	// counter, and remaining source budget. Disabled budgets skip compaction.
+	// Conflicts, summary errors, or remaining pressure stop the run; no retry is
+	// added. Applications still own session ordering and accepted-turn writes.
+	AutoCompactHistory bool
 	// ToolResultProcessor can transform tool responses before they enter the transcript.
 	ToolResultProcessor loop.ToolResultProcessor
 	// ObservationSink receives agent and workflow lifecycle events.
@@ -238,17 +245,17 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 			return nil, err
 		}
 	} else if !nativeTools {
-		if execution.reconfigureTools && hasToolDefinitions && len(execution.tools) == 0 {
+		if execution.reconfigureTools && hasToolDefinitions && len(execution.executionTools) == 0 {
 			if !hasContextSourceManager {
 				return nil, fmt.Errorf("prompt builder cannot remove existing tool definitions")
 			}
 			if err := manager.RemoveContextSource(ctx, "tool_definitions"); err != nil {
 				return nil, err
 			}
-		} else if len(execution.tools) > 0 && (!hasToolDefinitions || execution.reconfigureTools) {
+		} else if len(execution.executionTools) > 0 && (!hasToolDefinitions || execution.reconfigureTools) {
 			toolOptions := append([]tooldefinitions.Option(nil), a.def.ToolDefinitionOptions...)
 			toolOptions = append(toolOptions, tooldefinitions.WithToolChoice(execution.toolChoice))
-			toolSource, err := tooldefinitions.New(nil, toolSignatures(execution.tools), a.def.ObservationSink, toolOptions...)
+			toolSource, err := tooldefinitions.New(nil, toolSignatures(execution.executionTools), a.def.ObservationSink, toolOptions...)
 			if err != nil {
 				return nil, err
 			}
@@ -274,6 +281,13 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 		setter.SetTokenCounter(execution.counter)
 	} else if execution.requireTokenCounterSetter {
 		return nil, ErrTokenCounterNotConfigurable
+	}
+	if execution.autoCompactHistory {
+		builder, ok := promptBuilder.(*gaictx.Builder)
+		if !ok {
+			return nil, ErrHistoryCompactionNotConfigurable
+		}
+		promptBuilder = &compactingPromptBuilder{Builder: builder, model: execution.model}
 	}
 
 	l := loop.New(execution.model, execution.tools, promptBuilder, execution.toolResultProcessor)
