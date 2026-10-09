@@ -4,69 +4,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 
 	"github.com/lace-ai/gai/ai"
+	ollamaapi "github.com/ollama/ollama/api"
 )
 
-type chatRequest struct {
-	Model    string         `json:"model"`
-	Messages []chatMessage  `json:"messages"`
-	Stream   bool           `json:"stream"`
-	Think    *bool          `json:"think"`
-	Tools    []chatTool     `json:"tools,omitempty"`
-	Options  map[string]any `json:"options,omitempty"`
-}
-
-type chatMessage struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content"`
-	Thinking   string         `json:"thinking,omitempty"`
-	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
-	ToolName   string         `json:"tool_name,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
-}
-
-type chatToolCall struct {
-	ID       string           `json:"id,omitempty"`
-	Function chatToolFunction `json:"function"`
-}
-
-type chatToolFunction struct {
-	Index     *int            `json:"index,omitempty"`
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
-}
-
-type chatTool struct {
-	Type     string           `json:"type"`
-	Function chatToolMetadata `json:"function"`
-}
-
-type chatToolMetadata struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters"`
-}
-
-func (m *Model) chatRequest(req ai.AIRequest) (chatRequest, error) {
+func (m *Model) chatRequest(req ai.AIRequest) (*ollamaapi.ChatRequest, error) {
 	req = req.Copy()
 	if err := ai.ValidateModelRequest(m, req); err != nil {
-		return chatRequest{}, err
+		return nil, err
 	}
 	if req.MaxTokens < 0 {
-		return chatRequest{}, fmt.Errorf("max tokens must be non-negative")
+		return nil, fmt.Errorf("max tokens must be non-negative")
 	}
 	if err := validateOptions(m.options); err != nil {
-		return chatRequest{}, err
+		return nil, err
 	}
 	messages, err := mapMessages(req.Messages)
 	if err != nil {
-		return chatRequest{}, err
+		return nil, err
 	}
 	tools, err := mapTools(req.Tools)
 	if err != nil {
-		return chatRequest{}, err
+		return nil, err
 	}
 	options := mapOptions(m.options)
 	if req.MaxTokens > 0 {
@@ -75,17 +37,25 @@ func (m *Model) chatRequest(req ai.AIRequest) (chatRequest, error) {
 		}
 		options["num_predict"] = req.MaxTokens
 	}
-	think := false
-	return chatRequest{Model: m.name, Messages: messages, Stream: true, Think: &think, Tools: tools, Options: options}, nil
+	stream := true
+	think := ollamaapi.ThinkValue{Value: false}
+	return &ollamaapi.ChatRequest{
+		Model:    m.name,
+		Messages: messages,
+		Stream:   &stream,
+		Think:    &think,
+		Tools:    tools,
+		Options:  options,
+	}, nil
 }
 
-func mapMessages(messages []ai.Message) ([]chatMessage, error) {
-	out := make([]chatMessage, 0, len(messages))
+func mapMessages(messages []ai.Message) ([]ollamaapi.Message, error) {
+	out := make([]ollamaapi.Message, 0, len(messages))
 	for _, message := range messages {
 		if err := rejectRequiredExtensions(message.Extensions); err != nil {
 			return nil, err
 		}
-		wire := chatMessage{Role: string(message.Role)}
+		wire := ollamaapi.Message{Role: string(message.Role)}
 		for _, part := range message.Parts {
 			if err := rejectRequiredExtensions(part.Extensions); err != nil {
 				return nil, err
@@ -106,16 +76,23 @@ func mapMessages(messages []ai.Message) ([]chatMessage, error) {
 				if err := rejectRequiredExtensions(call.Extensions); err != nil {
 					return nil, err
 				}
-				if !jsonObject(call.Args) {
+				arguments, err := mapToolCallArguments(call.Args)
+				if err != nil {
 					return nil, fmt.Errorf("%w: Ollama tool %q arguments must be a JSON object", ai.ErrInvalidToolCall, call.Name)
 				}
-				wire.ToolCalls = append(wire.ToolCalls, chatToolCall{ID: call.ID, Function: chatToolFunction{Name: call.Name, Arguments: append(json.RawMessage(nil), call.Args...)}})
+				wire.ToolCalls = append(wire.ToolCalls, ollamaapi.ToolCall{
+					ID: call.ID,
+					Function: ollamaapi.ToolCallFunction{
+						Name:      call.Name,
+						Arguments: arguments,
+					},
+				})
 			case ai.ContentToolResult:
 				content, err := toolResultContent(part.ToolResult)
 				if err != nil {
 					return nil, err
 				}
-				out = append(out, chatMessage{Role: "tool", Content: content, ToolName: part.ToolResult.Name, ToolCallID: part.ToolResult.ToolCallID})
+				out = append(out, ollamaapi.Message{Role: "tool", Content: content, ToolName: part.ToolResult.Name, ToolCallID: part.ToolResult.ToolCallID})
 			case ai.ContentExtension:
 				// Optional extensions may be dropped. Required ones were rejected.
 			default:
@@ -129,11 +106,28 @@ func mapMessages(messages []ai.Message) ([]chatMessage, error) {
 	return out, nil
 }
 
-func mapTools(definitions []ai.ToolDefinition) ([]chatTool, error) {
+func mapToolCallArguments(raw json.RawMessage) (ollamaapi.ToolCallFunctionArguments, error) {
+	var values map[string]json.RawMessage
+	if json.Unmarshal(raw, &values) != nil || values == nil {
+		return ollamaapi.ToolCallFunctionArguments{}, ai.ErrInvalidToolCall
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	arguments := ollamaapi.NewToolCallFunctionArguments()
+	for _, key := range keys {
+		arguments.Set(key, append(json.RawMessage(nil), values[key]...))
+	}
+	return arguments, nil
+}
+
+func mapTools(definitions []ai.ToolDefinition) (ollamaapi.Tools, error) {
 	if len(definitions) == 0 {
 		return nil, nil
 	}
-	tools := make([]chatTool, 0, len(definitions))
+	tools := make(ollamaapi.Tools, 0, len(definitions))
 	for _, definition := range definitions {
 		if err := definition.Validate(); err != nil {
 			return nil, err
@@ -141,7 +135,18 @@ func mapTools(definitions []ai.ToolDefinition) ([]chatTool, error) {
 		if !jsonObject(definition.Parameters) {
 			return nil, fmt.Errorf("%w: Ollama tool %q parameters must be a JSON object", ai.ErrInvalidToolDefinition, definition.Name)
 		}
-		tools = append(tools, chatTool{Type: "function", Function: chatToolMetadata{Name: definition.Name, Description: definition.Description, Parameters: append(json.RawMessage(nil), definition.Parameters...)}})
+		var parameters ollamaapi.ToolFunctionParameters
+		if err := json.Unmarshal(definition.Parameters, &parameters); err != nil {
+			return nil, fmt.Errorf("%w: Ollama tool %q parameters: %v", ai.ErrInvalidToolDefinition, definition.Name, err)
+		}
+		tools = append(tools, ollamaapi.Tool{
+			Type: "function",
+			Function: ollamaapi.ToolFunction{
+				Name:        definition.Name,
+				Description: definition.Description,
+				Parameters:  parameters,
+			},
+		})
 	}
 	return tools, nil
 }

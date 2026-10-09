@@ -32,7 +32,7 @@ func TestBuildChatRequestMapsCanonicalToolRoundTripAndOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payload.Model != "test-model" || !payload.Stream || payload.Think == nil || *payload.Think {
+	if payload.Model != "test-model" || payload.Stream == nil || !*payload.Stream || payload.Think == nil || payload.Think.Value != false {
 		t.Fatalf("request identity = %#v", payload)
 	}
 	if !reflect.DeepEqual(payload.Options, map[string]any{"num_ctx": 8192, "num_predict": 123}) {
@@ -42,14 +42,29 @@ func TestBuildChatRequestMapsCanonicalToolRoundTripAndOptions(t *testing.T) {
 		t.Fatalf("messages = %#v", payload.Messages)
 	}
 	assistant := payload.Messages[2]
-	if assistant.Content != "Checking." || len(assistant.ToolCalls) != 1 || assistant.ToolCalls[0].ID != "call-1" || string(assistant.ToolCalls[0].Function.Arguments) != `{"city":"Tokyo"}` {
+	arguments, err := json.Marshal(assistant.ToolCalls[0].Function.Arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assistant.Content != "Checking." || len(assistant.ToolCalls) != 1 || assistant.ToolCalls[0].ID != "call-1" || string(arguments) != `{"city":"Tokyo"}` {
 		t.Fatalf("assistant = %#v", assistant)
 	}
 	result := payload.Messages[3]
 	if result.Role != "tool" || result.ToolName != "weather" || result.ToolCallID != "call-1" || result.Content != `{"celsius":21}` {
 		t.Fatalf("result = %#v", result)
 	}
-	if len(payload.Tools) != 1 || payload.Tools[0].Function.Name != "weather" || string(payload.Tools[0].Function.Parameters) != string(tool.Parameters) {
+	parameters, err := json.Marshal(payload.Tools[0].Function.Parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotParameters, wantParameters any
+	if err := json.Unmarshal(parameters, &gotParameters); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(tool.Parameters, &wantParameters); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Tools) != 1 || payload.Tools[0].Function.Name != "weather" || !reflect.DeepEqual(gotParameters, wantParameters) {
 		t.Fatalf("tools = %#v", payload.Tools)
 	}
 }

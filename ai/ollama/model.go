@@ -1,8 +1,6 @@
 package ollama
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,11 +10,14 @@ import (
 	"strings"
 
 	"github.com/lace-ai/gai/ai"
+	ollamaapi "github.com/ollama/ollama/api"
 )
 
-const (
-	maxStreamRecordSize = 8 << 20
-	maxErrorBodySize    = 1 << 20
+const maxErrorBodySize = 1 << 20
+
+var (
+	errSDKStreamDone      = errors.New("ollama SDK stream complete")
+	errSDKCallbackHandled = errors.New("ollama SDK callback error handled")
 )
 
 // Model is an immutable, concurrency-safe Ollama chat model.
@@ -48,14 +49,20 @@ func (m *Model) Descriptor() ai.ModelDescriptor {
 	}
 }
 
-type chatResponse struct {
-	Model           string      `json:"model"`
-	Message         chatMessage `json:"message"`
-	Done            bool        `json:"done"`
-	Reason          string      `json:"done_reason"`
-	Error           string      `json:"error"`
-	PromptEvalCount *int        `json:"prompt_eval_count"`
-	EvalCount       *int        `json:"eval_count"`
+type rawChatResponse struct {
+	Message struct {
+		Role      string `json:"role"`
+		Thinking  string `json:"thinking"`
+		ToolCalls []struct {
+			ID       string `json:"id"`
+			Function struct {
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			} `json:"function"`
+		} `json:"tool_calls"`
+	} `json:"message"`
+	PromptEvalCount *int `json:"prompt_eval_count"`
+	EvalCount       *int `json:"eval_count"`
 }
 
 func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.Token {
@@ -106,137 +113,134 @@ func (m *Model) generateStream(ctx context.Context, req ai.AIRequest, emit func(
 		emit(ai.Token{Err: err})
 		return
 	}
-	body, err := json.Marshal(payload)
+	schemas := make([]json.RawMessage, len(req.Tools))
+	for index := range req.Tools {
+		schemas[index] = req.Tools[index].Parameters
+	}
+	client, capture, err := m.provider.sdkClient(schemas)
 	if err != nil {
-		emit(ai.Token{Err: fmt.Errorf("marshal Ollama request: %w", err)})
-		return
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(m.provider.baseURL, "/")+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		emit(ai.Token{Err: fmt.Errorf("create Ollama request: %w", err)})
-		return
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/x-ndjson")
-	if m.provider.bearerToken != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+m.provider.bearerToken)
-	}
-	client, err := m.provider.requestClient()
-	if err != nil {
-		emit(ai.Token{Err: fmt.Errorf("configure Ollama HTTP client: %w", err)})
-		return
-	}
-	response, err := client.Do(httpReq)
-	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			emit(ai.Token{Err: ctxErr})
-			return
-		}
-		emit(ai.Token{Err: ai.ClassifyProviderError(err, 0, "", "", nil)})
-		return
-	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		limited := io.LimitReader(response.Body, maxErrorBodySize+1)
-		errorBody, readErr := io.ReadAll(limited)
-		if readErr != nil {
-			errorBody = nil
-		}
-		if len(errorBody) > maxErrorBodySize {
-			errorBody = errorBody[:maxErrorBodySize]
-		}
-		httpErr := newHTTPError(response.StatusCode, errorBody)
-		requestID := response.Header.Get("X-Request-Id")
-		emit(ai.Token{Err: ai.ClassifyProviderError(httpErr, response.StatusCode, ollamaErrorCode(errorBody), requestID, response.Header)})
+		emit(ai.Token{Err: fmt.Errorf("configure Ollama SDK client: %w", err)})
 		return
 	}
 
-	scanner := bufio.NewScanner(response.Body)
-	scanner.Buffer(make([]byte, 64<<10), maxStreamRecordSize)
-	completion := ai.Completion{Provider: "ollama", RequestID: response.Header.Get("X-Request-Id")}
+	completion := ai.Completion{Provider: "ollama"}
 	var pendingCalls []ai.ToolCall
-	for scanner.Scan() {
-		record := bytes.TrimSpace(scanner.Bytes())
+	err = client.Chat(ctx, payload, func(chunk ollamaapi.ChatResponse) error {
+		record := capture.popRecord()
 		if len(record) == 0 {
-			continue
+			emit(ai.Token{Err: fmt.Errorf("decode Ollama SDK stream: response record unavailable")})
+			return errSDKCallbackHandled
 		}
-		var chunk chatResponse
-		if err := json.Unmarshal(record, &chunk); err != nil {
-			emit(ai.Token{Err: fmt.Errorf("decode Ollama stream: %w", err)})
-			return
+		var raw rawChatResponse
+		if err := json.Unmarshal(record, &raw); err != nil {
+			emit(ai.Token{Err: fmt.Errorf("decode Ollama SDK stream metadata: %w", err)})
+			return errSDKCallbackHandled
 		}
-		if chunk.Error != "" {
-			emit(ai.Token{Err: ai.ClassifyProviderError(errors.New("Ollama stream error: "+chunk.Error), 0, chunk.Error, completion.RequestID, response.Header)})
-			return
-		}
+		_, headers, _ := capture.metadata()
+		completion.RequestID = headers.Get("X-Request-Id")
 		if chunk.Model != "" {
 			completion.Model = chunk.Model
 		}
-		if chunk.Message.Role != "" && chunk.Message.Role != "assistant" {
-			emit(ai.Token{Err: fmt.Errorf("invalid Ollama stream role %q", chunk.Message.Role)})
-			return
+		if raw.Message.Role != "" && raw.Message.Role != "assistant" {
+			emit(ai.Token{Err: fmt.Errorf("invalid Ollama stream role %q", raw.Message.Role)})
+			return errSDKCallbackHandled
 		}
-		if chunk.Message.Thinking != "" {
+		if raw.Message.Thinking != "" {
 			emit(ai.Token{Err: fmt.Errorf("%w: Ollama reasoning output", ai.ErrUnsupportedCapability)})
-			return
+			return errSDKCallbackHandled
 		}
-		if chunk.Message.Content != "" {
-			if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: chunk.Message.Content}}) {
-				return
-			}
+		if chunk.Message.Content != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: chunk.Message.Content}}) {
+			return errSDKCallbackHandled
 		}
-		for _, wireCall := range chunk.Message.ToolCalls {
-			name := strings.TrimSpace(wireCall.Function.Name)
-			if name == "" || !jsonObject(wireCall.Function.Arguments) {
+		if len(raw.Message.ToolCalls) != len(chunk.Message.ToolCalls) {
+			emit(ai.Token{Err: fmt.Errorf("%w: malformed Ollama tool calls", ai.ErrInvalidToolCall)})
+			return errSDKCallbackHandled
+		}
+		for index, sdkCall := range chunk.Message.ToolCalls {
+			rawCall := raw.Message.ToolCalls[index]
+			name := strings.TrimSpace(sdkCall.Function.Name)
+			if name == "" || !jsonObject(rawCall.Function.Arguments) {
 				emit(ai.Token{Err: fmt.Errorf("%w: malformed Ollama tool call", ai.ErrInvalidToolCall)})
-				return
+				return errSDKCallbackHandled
 			}
-			id := strings.TrimSpace(wireCall.ID)
+			id := strings.TrimSpace(sdkCall.ID)
 			if id == "" {
 				id = ai.GenerateToolCallID(name)
 			}
-			pendingCalls = append(pendingCalls, ai.ToolCall{ID: id, Type: "function", Name: name, Args: append(json.RawMessage(nil), wireCall.Function.Arguments...)})
+			pendingCalls = append(pendingCalls, ai.ToolCall{
+				ID:   id,
+				Type: "function",
+				Name: name,
+				Args: append(json.RawMessage(nil), rawCall.Function.Arguments...),
+			})
 		}
 		if !chunk.Done {
-			continue
+			return nil
 		}
-		// Ollama's wire message stores content and tool calls in separate
-		// fields, so it cannot represent their interleaving. Emit all streamed
-		// text first and complete calls at the terminal record. The resulting
-		// canonical assistant message can therefore be replayed losslessly in
-		// the next tool-result request.
-		for i := range pendingCalls {
-			call := pendingCalls[i].Clone()
+		// Ollama stores content and tool calls in separate fields, so emit all
+		// streamed text before completing calls for canonical replay.
+		for index := range pendingCalls {
+			call := pendingCalls[index].Clone()
 			if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &call}}) {
-				return
+				return errSDKCallbackHandled
 			}
 		}
-		completion.FinishReason = chunk.Reason
-		if chunk.PromptEvalCount != nil || chunk.EvalCount != nil {
+		completion.FinishReason = chunk.DoneReason
+		if raw.PromptEvalCount != nil || raw.EvalCount != nil {
 			completion.UsageReported = true
-			if chunk.PromptEvalCount != nil {
-				completion.Usage.InputTokens = *chunk.PromptEvalCount
+			if raw.PromptEvalCount != nil {
+				completion.Usage.InputTokens = *raw.PromptEvalCount
 			}
-			if chunk.EvalCount != nil {
-				completion.Usage.OutputTokens = *chunk.EvalCount
+			if raw.EvalCount != nil {
+				completion.Usage.OutputTokens = *raw.EvalCount
 			}
 		}
 		completion.Raw = append(json.RawMessage(nil), record...)
 		snapshot := completion
 		snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
-		emit(ai.Token{Completion: &snapshot})
-		return
-	}
-	if err := scanner.Err(); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			emit(ai.Token{Err: ctxErr})
-			return
+		if !emit(ai.Token{Completion: &snapshot}) {
+			return errSDKCallbackHandled
 		}
-		emit(ai.Token{Err: fmt.Errorf("read Ollama stream: %w", err)})
+		return errSDKStreamDone
+	})
+
+	if errors.Is(err, errSDKStreamDone) || errors.Is(err, errSDKCallbackHandled) {
 		return
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		emit(ai.Token{Err: ctxErr})
+		return
+	}
+	status, headers, errorBody := capture.metadata()
+	if status == 0 {
+		if err != nil {
+			emit(ai.Token{Err: ai.ClassifyProviderError(err, 0, "", "", nil)})
+			return
+		}
+		emit(ai.Token{Err: io.ErrUnexpectedEOF})
+		return
+	}
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		httpErr := newHTTPError(status, errorBody)
+		emit(ai.Token{Err: ai.ClassifyProviderError(httpErr, status, ollamaErrorCode(errorBody), headers.Get("X-Request-Id"), headers)})
+		return
+	}
+	if err != nil {
+		record := capture.unconsumedRecord()
+		if len(record) == 0 {
+			emit(ai.Token{Err: ai.ClassifyProviderError(err, 0, "", headers.Get("X-Request-Id"), headers)})
+			return
+		}
+		var inBand struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(record, &inBand) == nil && inBand.Error != "" {
+			emit(ai.Token{Err: ai.ClassifyProviderError(errors.New("ollama stream error"), 0, inBand.Error, headers.Get("X-Request-Id"), headers)})
+			return
+		}
+		// The SDK includes malformed response records verbatim in its error.
+		// Do not expose model output through errors or observation telemetry.
+		emit(ai.Token{Err: errors.New("decode Ollama SDK stream: malformed response record")})
 		return
 	}
 	emit(ai.Token{Err: io.ErrUnexpectedEOF})

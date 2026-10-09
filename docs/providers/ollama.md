@@ -1,9 +1,9 @@
 # Ollama provider
 
-Package `github.com/lace-ai/gai/ai/ollama` uses Ollama's native `POST /api/chat`
-NDJSON protocol. It does not route through Ollama's OpenAI-compatible endpoint.
-Named lookup accepts every non-empty model name and does not require discovery or
-a hard-coded catalog.
+Package `github.com/lace-ai/gai/ai/ollama` uses Ollama's official Go SDK to
+stream the native `POST /api/chat` NDJSON protocol. It does not route through
+Ollama's OpenAI-compatible endpoint. Named lookup accepts every non-empty model
+name and does not require discovery or a hard-coded catalog.
 
 ## Prerequisites
 
@@ -123,7 +123,10 @@ caller-owned and must be safe for concurrent use. Context deadlines and the
 client's own timeout control request lifetime; the provider does not impose a
 short whole-stream timeout. Redirects are restricted to the configured origin
 before a prompt or bearer token is sent. Bearer authentication is intended for
-protected Ollama-compatible endpoints.
+protected Ollama-compatible endpoints. The official SDK also honors
+`OLLAMA_AUTH` and its built-in `ollama.com` signing flow before the HTTP
+transport runs; bearer-only clients should leave `OLLAMA_AUTH` unset and use a
+non-`ollama.com` endpoint.
 
 `AIRequest.MaxTokens` maps to native `options.num_predict`. `Options.NumCtx` maps
 to `options.num_ctx`; it controls Ollama's context window and does not truncate

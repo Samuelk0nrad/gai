@@ -2,11 +2,13 @@ package ollama
 
 import (
 	"context"
+	"encoding/json"
 
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +17,80 @@ import (
 
 	"github.com/lace-ai/gai/ai"
 )
+
+func TestGenerateStreamUsesOfficialSDKClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/prefix/api/chat" {
+			t.Errorf("path = %q, want /prefix/api/chat", r.URL.Path)
+		}
+		if got := r.Header.Get("User-Agent"); !strings.HasPrefix(got, "ollama/") {
+			t.Errorf("User-Agent = %q, want official Ollama SDK user agent", got)
+		}
+		fmt.Fprintln(w, `{"model":"test","message":{"role":"assistant","content":"ok"},"done":true,"done_reason":"stop"}`)
+	}))
+	defer server.Close()
+
+	model, err := New(nil, WithBaseURL(server.URL+"/prefix")).TypedModel("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectEvents(t, model.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "x")}}))
+	if len(events) != 2 || events[0].Text() != "ok" || events[1].Completion == nil {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestGenerateStreamPreservesCanonicalToolSchemaThroughSDK(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{"unit":{"type":"string","default":"celsius"},"location":{"$ref":"#/$defs/location"}},"$defs":{"location":{"type":"string"}},"additionalProperties":false}`)
+	var wantSchema any
+	if err := json.Unmarshal(schema, &wantSchema); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Tools []struct {
+				Function struct {
+					Parameters json.RawMessage `json:"parameters"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		if len(payload.Tools) != 1 {
+			t.Errorf("tools = %#v", payload.Tools)
+			return
+		}
+		var gotSchema any
+		if err := json.Unmarshal(payload.Tools[0].Function.Parameters, &gotSchema); err != nil {
+			t.Errorf("decode schema: %v", err)
+			return
+		}
+		if !reflect.DeepEqual(gotSchema, wantSchema) {
+			t.Errorf("schema = %s, want %s", payload.Tools[0].Function.Parameters, schema)
+		}
+		fmt.Fprintln(w, `{"model":"test","message":{"role":"assistant","content":"ok"},"done":true,"done_reason":"stop"}`)
+	}))
+	defer server.Close()
+
+	tool, err := ai.NewToolDefinition("weather", "Get weather", schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := New(nil, WithBaseURL(server.URL)).TypedModel("test", WithToolSupport(ai.FeatureSupportSupported))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectEvents(t, model.GenerateStream(context.Background(), ai.AIRequest{
+		Messages:   []ai.Message{ai.TextMessage(ai.RoleUser, "weather")},
+		Tools:      []ai.ToolDefinition{tool},
+		ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceAuto},
+	}))
+	if len(events) != 2 || events[1].Completion == nil {
+		t.Fatalf("events = %#v", events)
+	}
+}
 
 func TestGenerateStreamEmitsIncrementalTextToolCallsAndCompletion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +162,34 @@ func TestGenerateStreamRejectsMalformedAndTruncatedStreams(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGenerateStreamPreservesTransportErrorsWithoutHTTPResponse(t *testing.T) {
+	transportErr := errors.New("dial failed")
+	client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, transportErr
+	})}
+	model, err := New(nil, WithHTTPClient(client)).TypedModel("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events := collectEvents(t, model.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "x")}}))
+	if len(events) != 1 || !errors.Is(events[0].Err, transportErr) {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestGenerateStreamDoesNotExposeMalformedResponseContent(t *testing.T) {
+	const secret = "private model output"
+	model := fixtureModel(t, http.StatusOK, `{"message":{"content":"`+secret, nil)
+	events := collectEvents(t, model.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "x")}}))
+	if len(events) != 1 || events[0].Err == nil {
+		t.Fatalf("events = %#v", events)
+	}
+	if strings.Contains(events[0].Err.Error(), secret) {
+		t.Fatalf("error exposed response content: %v", events[0].Err)
 	}
 }
 
@@ -265,6 +369,12 @@ func TestGenerateStreamRejectsCrossOriginRedirectsBeforeSendingSecrets(t *testin
 	if targetCalls.Load() != 0 {
 		t.Fatalf("redirect target received %d requests", targetCalls.Load())
 	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
 }
 
 func fixtureModel(t *testing.T, status int, body string, headers http.Header) *Model {
