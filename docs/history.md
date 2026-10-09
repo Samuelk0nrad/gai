@@ -98,5 +98,7 @@ This is a breaking pre-v1 change; no legacy unconditional-save adapter is provid
 
 Compaction has separate `context.history.compact` observations, including
 `history_compactor_conflict` and `history_compactor_finished`. A generated summary
-is not a committed summary: inspect `changed` on successful completion. Build
+is not a committed summary: inspect `changed` on successful completion. Selection
+events carry `selection_stage: loaded` or `selection_stage: candidate`; candidate
+events describe the proposed state before CAS and do not imply persistence. Build
 observations describe selection only.

@@ -12,16 +12,22 @@ import (
 
 const contextTracerName = "github.com/lace-ai/gai/context"
 
+const (
+	selectionStageLoaded    = "loaded"
+	selectionStageCandidate = "candidate"
+)
+
 type historyObserver struct {
 	op string
 
 	debug     gai.ObservationSink
 	operation *observe.Operation
 
-	sessionID     string
-	counterID     string
-	tokenBudget   int
-	summaryAmount float32
+	sessionID      string
+	counterID      string
+	tokenBudget    int
+	summaryAmount  float32
+	selectionStage string
 
 	statePresent    bool
 	summaryIncluded bool
@@ -313,8 +319,20 @@ func (o *historyObserver) emit(ctx context.Context, name string, fields map[stri
 	}
 	if o.op == "compact" {
 		name = strings.Replace(name, "history_source_", "history_compactor_", 1)
+		if o.selectionStage != "" {
+			fields["selection_stage"] = o.selectionStage
+		}
 	}
 	o.operation.Emit(ctx, name, fields, err)
+}
+
+// CompactionSelection identifies whether diagnostics describe loaded history
+// or an uncommitted candidate, without changing ordinary build observations.
+func (o *historyObserver) CompactionSelection(ctx context.Context, state *HistoryState, result selection, err error, stage string) {
+	previousStage := o.selectionStage
+	o.selectionStage = stage
+	defer func() { o.selectionStage = previousStage }()
+	o.Selection(ctx, state, result, err)
 }
 
 // Selection reports the pure selector's observations without coupling selection

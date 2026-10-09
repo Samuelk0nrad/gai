@@ -93,6 +93,11 @@ func requireCompactionObservation(t *testing.T, observations *compactionObservat
 			t.Fatalf("%s field %s = %v, want %v", name, key, got, want)
 		}
 	}
+	if _, wantStage := fields["selection_stage"]; !wantStage {
+		if _, hasStage := event.Fields["selection_stage"]; hasStage {
+			t.Fatalf("%s leaked selection stage: %+v", name, event.Fields)
+		}
+	}
 }
 
 func TestCASConcurrentWritersHaveExactlyOneWinner(t *testing.T) {
@@ -226,12 +231,17 @@ func TestCompactorReportsCommittedRevisionAndRemainingPressure(t *testing.T) {
 		if result.PressureRemaining {
 			wantPressureEvents = 2
 		}
-		if len(pressure) != wantPressureEvents || pressure[0].Fields["last_turn_id"] != "old" {
+		if len(pressure) != wantPressureEvents || pressure[0].Fields["last_turn_id"] != "old" || pressure[0].Fields["selection_stage"] != "loaded" {
 			t.Fatalf("input/candidate pressure observations = %+v, want %d", pressure, wantPressureEvents)
 		}
-		if !result.PressureRemaining {
-			requireCompactionObservation(t, observations, "history_compactor_summary_included", nil, map[string]any{"summary_start_turn": "old", "summary_end_turn": "old"})
+		if result.PressureRemaining && pressure[1].Fields["selection_stage"] != "candidate" {
+			t.Fatalf("candidate pressure lacks stage: %+v", pressure[1])
 		}
+		if !result.PressureRemaining {
+			requireCompactionObservation(t, observations, "history_compactor_summary_included", nil, map[string]any{"summary_start_turn": "old", "summary_end_turn": "old", "selection_stage": "candidate"})
+		}
+		requireCompactionObservation(t, observations, "history_compactor_summary_generated", nil, nil)
+		requireCompactionObservation(t, observations, "history_compactor_finished", nil, map[string]any{"changed": true})
 	}
 }
 
@@ -279,6 +289,9 @@ func TestCompactionRejectsConcurrentAppend(t *testing.T) {
 		t.Fatal("append lost or compaction retried")
 	}
 	requireCompactionObservation(t, observations, "history_compactor_conflict", err, nil)
+	requireCompactionObservation(t, observations, "history_compactor_summary_included", nil, map[string]any{"selection_stage": "candidate"})
+	requireCompactionObservation(t, observations, "history_compactor_summary_generated", nil, nil)
+	requireCompactionObservation(t, observations, "history_compactor_finished", err, map[string]any{"changed": false})
 }
 
 func TestConcurrentCompactorsDoNotRetry(t *testing.T) {
@@ -375,11 +388,14 @@ func TestCompactionFailuresDoNotPersistCandidates(t *testing.T) {
 				switch stage {
 				case "count input":
 					wantEvent = "history_compactor_turn_tokenize_failed"
+					wantFields["selection_stage"] = "loaded"
 					wantFields["turn_id"], wantFields["turn_count"] = "old", 1
 				case "count input summary", "count candidate":
 					wantEvent = "history_compactor_summary_token_count_failed"
+					wantFields["selection_stage"] = "candidate"
 					wantFields["summary_start_turn"], wantFields["summary_end_turn"] = "old", "old"
 					if stage == "count input summary" {
+						wantFields["selection_stage"] = "loaded"
 						store.state.Summary = history.NewSummary("summary", "old", "old", 1, 1, ai.ContentPart{Kind: ai.ContentText, Text: "existing summary"})
 					}
 				}
@@ -487,12 +503,20 @@ func TestReaderOnlySourceAndInvalidSnapshot(t *testing.T) {
 		}
 		source := history.NewHistory("session", snapshotReader{snapshot: snapshot})
 		source.SetTokenCounter(ai.TextTokenEstimator{})
+		observations := &compactionObservations{}
+		source.ObservationSink(observations, nil)
 		_, err := source.Function(t.Context(), 1)
 		if invalid && !errors.Is(err, history.ErrInvalidHistorySnapshot) {
 			t.Fatalf("invalid snapshot error = %v", err)
 		}
 		if !invalid && err != nil {
 			t.Fatal(err)
+		}
+		if !invalid {
+			events := observations.named("history_source_token_budget_reached")
+			if len(events) != 1 || events[0].Source != "context:HistorySource" || events[0].Fields["selection_stage"] != nil {
+				t.Fatalf("ordinary build diagnostics changed: %+v", events)
+			}
 		}
 	}
 	store := &sharedHistoryStore{}

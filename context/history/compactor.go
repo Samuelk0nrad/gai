@@ -117,7 +117,7 @@ func (c *Compactor) Compact(ctx context.Context, historyBudget int) (result Comp
 		obs.ObserveState(len(snapshot.State.Turns), snapshot.State.Summary != nil)
 	}
 	selected, err := selectHistory(ctx, snapshot.State, historyBudget, c.counter)
-	obs.Selection(ctx, snapshot.State, selected, err)
+	obs.CompactionSelection(ctx, snapshot.State, selected, err, selectionStageLoaded)
 	if err != nil {
 		return result, err
 	}
@@ -132,7 +132,7 @@ func (c *Compactor) Compact(ctx context.Context, historyBudget int) (result Comp
 		return CompactionResult{Revision: snapshot.Revision, PressureRemaining: selected.budgetReached}, nil
 	}
 	selected, err = selectHistory(ctx, next, historyBudget, c.counter)
-	obs.Selection(ctx, next, selected, err)
+	obs.CompactionSelection(ctx, next, selected, err, selectionStageCandidate)
 	if err != nil {
 		return result, err
 	}
