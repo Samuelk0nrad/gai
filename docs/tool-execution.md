@@ -91,13 +91,20 @@ same order across different tool names, set `MaxConcurrent: 1` as above.
 provides mutual exclusion across registrations and runs, not a cross-run ordering
 contract.
 
-A generation that mixes registered terminal and ordinary calls is rejected before
-policy, approval, or handler callbacks. A terminal candidate also cannot succeed
-when any call is malformed, unknown, excluded, denied, unapproved, failed,
-canceled, or rejected by result processing. Eligible siblings may already have
-run; GAI joins started pipelines before returning and does not roll back, replay,
-or automatically retry calls. Terminal-batch failure does not trigger another
-model generation.
+By default, a generation that mixes registered terminal and ordinary calls is
+rejected before policy, approval, or handler callbacks. Set
+`AllowNonTerminalCalls: true` on a terminal registration when that tool may share
+a generation with ordinary tools. The mixed batch then executes normally, appends
+all tool results, and continues to another model generation instead of terminating.
+If any terminal call in the mixed batch does not allow ordinary siblings, the
+whole batch is rejected before execution. A generation containing only terminal
+calls still terminates, including when those registrations allow ordinary siblings.
+
+A terminal candidate also cannot succeed when any call is malformed, unknown,
+excluded, denied, unapproved, failed, canceled, or rejected by result processing.
+Eligible siblings may already have run; GAI joins started pipelines before
+returning and does not roll back, replay, or automatically retry calls.
+Terminal-batch failure does not trigger another model generation.
 
 Terminal completion ends only the current loop/primary stage. Workflow middleware
 continues normally. Usage, events, execution diagnostics, call/result identity,
@@ -142,6 +149,7 @@ The examples assume application-owned `model`, `promptFactory`, `updateRecord`,
 | `ToolOptions.Timeout` | Nil inherits; a pointer to zero disables the default. The duration is copied. |
 | `ToolOptions.Serial` | Preserves same-name FIFO within a run, including result processing. It does not serialize other names or runs. |
 | `ToolOptions.Terminal` | False preserves ordinary result-to-model behavior. True allows a successful terminal-only generation to finish the primary loop without another model request. |
+| `ToolOptions.AllowNonTerminalCalls` | False rejects an ordinary sibling in the same generation. True lets a terminal registration participate in a mixed batch that executes and continues; it requires `Terminal: true`. |
 | `ToolOptions.Guard` | The exact shared `*ToolGuard` serializes invoked pipelines across runs. Synthetic refusals bypass it. Zero value is ready; never copy a used guard. It is an in-process gate. |
 | `ToolPolicy` | Nil permits registered calls. A decision is allow, deny, or require approval. |
 | `ToolApprovalResolver` | Nil refuses approval-required calls with `ErrToolApprovalRequired`; it never implies consent. |

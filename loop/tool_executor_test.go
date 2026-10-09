@@ -231,6 +231,13 @@ func TestToolOptionsAreCopiedAndExecutionOnly(t *testing.T) {
 	}
 }
 
+func TestToolOptionsRejectAllowNonTerminalCallsWithoutTerminal(t *testing.T) {
+	_, err := WithToolOptions(NewEchoTool(), ToolOptions{AllowNonTerminalCalls: true})
+	if !errors.Is(err, ErrToolExecutionConfig) {
+		t.Fatalf("error = %v, want ErrToolExecutionConfig", err)
+	}
+}
+
 func TestUninvokedProcessorPanicIsTerminal(t *testing.T) {
 	l := &Loop{ToolResultProcessor: ToolResultProcessorFunc(func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error) { panic("private panic") })}
 	iteration, calls := schedulerCalls("missing")

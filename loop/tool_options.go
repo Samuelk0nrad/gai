@@ -37,6 +37,10 @@ type ToolOptions struct {
 	// generation consists only of terminal tools. It is trusted registration
 	// metadata and is never exposed to or controlled by the model.
 	Terminal bool
+	// AllowNonTerminalCalls lets this terminal tool share a generation with
+	// ordinary tools. Such a mixed batch executes normally and the loop continues.
+	// It is invalid unless Terminal is true.
+	AllowNonTerminalCalls bool
 	// Timeout nil inherits DefaultTimeout; a pointer to zero disables that default.
 	// Parent context deadlines always apply. The pointed value is copied.
 	Timeout *time.Duration
@@ -50,6 +54,9 @@ type ToolOptions struct {
 func (o ToolOptions) Validate() error {
 	if o.Timeout != nil && *o.Timeout < 0 {
 		return fmt.Errorf("%w: tool timeout must be non-negative", ErrToolExecutionConfig)
+	}
+	if o.AllowNonTerminalCalls && !o.Terminal {
+		return fmt.Errorf("%w: AllowNonTerminalCalls requires Terminal", ErrToolExecutionConfig)
 	}
 	switch o.Traits.Effect {
 	case ToolEffectUnknown, ToolEffectReadOnly, ToolEffectMutating, ToolEffectDestructive:

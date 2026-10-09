@@ -246,7 +246,7 @@ support := agent.New(agent.Definition{
 })
 ```
 
-The loop sends definitions to the model, executes requested calls, appends tool results to the conversation, and continues until the model commits a normal response or the iteration limit is reached. Tools registered with `ToolOptions.Terminal` complete the primary loop without another model generation.
+The loop sends definitions to the model, executes requested calls, appends tool results to the conversation, and continues until the model commits a normal response or the iteration limit is reached. Tools registered with `ToolOptions.Terminal` complete the primary loop without another model generation. A terminal registration can set `AllowNonTerminalCalls` to execute mixed batches normally and continue instead.
 
 Use `ToolExecution` to set concurrency and default handler deadlines, and
 `loop.WithToolOptions` for per-tool traits, serial execution, timeouts, or a shared

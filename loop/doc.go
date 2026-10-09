@@ -10,7 +10,8 @@
 // identified results to subsequent requests, and stops when the model returns a final
 // response. Tools registered with ToolOptions.Terminal may instead complete the
 // loop after a whole terminal-only batch succeeds, without another model request.
-// Mixed terminal and ordinary batches are rejected before execution. Terminal
+// By default, mixed terminal and ordinary batches are rejected before execution;
+// terminal registrations can allow such batches to execute and continue. Terminal
 // calls retain normal policy, approval, scheduling, processing, canonical result,
 // accounting, and event behavior. Each run exposes one ordered Event stream
 // containing tokens, attempt starts, retries, completed iterations, and terminal

@@ -27,6 +27,58 @@ func agentTerminalTool(t *testing.T) loop.Tool {
 	return tool
 }
 
+func TestAgentTerminalToolCanAllowOrdinarySiblingAndContinue(t *testing.T) {
+	var invoked atomic.Int32
+	handler := func(context.Context, ai.ToolCall) (string, error) {
+		invoked.Add(1)
+		return "ok", nil
+	}
+	present, err := loop.NewTool("present", "Present the response", ai.ToolParameters{}, handler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	present, err = loop.WithToolOptions(present, loop.ToolOptions{
+		Terminal:              true,
+		AllowNonTerminalCalls: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup, err := loop.NewTool("lookup", "Lookup information", ai.ToolParameters{}, handler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &scriptedWorkflowModel{scripts: [][]ai.Token{
+		{
+			{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "present-1", Type: "function", Name: "present", Args: json.RawMessage(`{}`)}}},
+			{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "lookup-1", Type: "function", Name: "lookup", Args: json.RawMessage(`{}`)}}},
+		},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}},
+	}}
+	workflow, err := agent.New(agent.Definition{
+		Model:  nativeToolWorkflowModel{base},
+		Prompt: executionPrompt,
+		Tools:  []loop.Tool{present, lookup},
+		Limits: agent.Limits{MaxLoopIterations: 2},
+	}).NewRun(t.Context(), agent.RunInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := workflow.Run(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := invoked.Load(); got != 2 {
+		t.Fatalf("handler invocations = %d, want 2", got)
+	}
+	if got := len(base.Requests()); got != 2 {
+		t.Fatalf("model requests = %d, want 2", got)
+	}
+	if !result.Complete || result.Text != "done" || len(result.Primary.Iterations) != 2 {
+		t.Fatalf("workflow result = %#v", result)
+	}
+}
+
 func TestAgentTerminalToolsFinishPrimaryAndRetainMiddlewareLifecycle(t *testing.T) {
 	for _, override := range []bool{false, true} {
 		t.Run(map[bool]string{false: "definition", true: "run override"}[override], func(t *testing.T) {

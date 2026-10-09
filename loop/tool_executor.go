@@ -64,7 +64,9 @@ func validateToolCallBatch(calls []pendingToolCall) error {
 
 // classifyTerminalBatch uses trusted registration metadata to classify the
 // complete model-requested batch. Unknown calls do not make a known terminal
-// batch ordinary; execution will retain their normal synthetic failures.
+// batch ordinary; execution will retain their normal synthetic failures. A
+// permissive terminal call mixed with ordinary calls behaves as ordinary, while
+// any non-permissive terminal call makes that mixed batch invalid.
 func classifyTerminalBatch(calls []pendingToolCall, tools []Tool) (terminal, mixed bool, err error) {
 	registered := make(map[string]ToolOptions, len(tools))
 	for _, tool := range tools {
@@ -81,7 +83,7 @@ func classifyTerminalBatch(calls []pendingToolCall, tools []Tool) (terminal, mix
 		}
 		registered[name] = options
 	}
-	var ordinary bool
+	var ordinary, rejectsOrdinary bool
 	for _, pending := range calls {
 		options, known := registered[pending.call.Name]
 		if !known {
@@ -89,11 +91,14 @@ func classifyTerminalBatch(calls []pendingToolCall, tools []Tool) (terminal, mix
 		}
 		if options.Terminal {
 			terminal = true
+			if !options.AllowNonTerminalCalls {
+				rejectsOrdinary = true
+			}
 		} else {
 			ordinary = true
 		}
 	}
-	return terminal, terminal && ordinary, nil
+	return terminal && !ordinary, ordinary && rejectsOrdinary, nil
 }
 
 func terminalBatchError(iteration Iteration, calls []pendingToolCall) error {

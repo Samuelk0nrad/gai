@@ -21,8 +21,8 @@ var (
 
 	// ErrToolExecutionConfig identifies invalid scheduling or registration options.
 	ErrToolExecutionConfig = errors.New("invalid tool execution configuration")
-	// ErrMixedTerminalToolBatch identifies a generation that combines terminal
-	// and ordinary registered tools. No handler is invoked for such a batch.
+	// ErrMixedTerminalToolBatch identifies a generation that combines ordinary
+	// calls with a terminal registration that disallows them. No handler is invoked.
 	ErrMixedTerminalToolBatch = errors.New("terminal tool batch mixes terminal and ordinary calls")
 	// ErrTerminalToolBatch identifies a terminal batch that did not complete
 	// every call successfully.

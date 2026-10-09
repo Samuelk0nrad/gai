@@ -23,6 +23,18 @@ func configuredTerminalTool(t *testing.T, tool loop.Tool) loop.Tool {
 	return configured
 }
 
+func configuredMixedTerminalTool(t *testing.T, tool loop.Tool) loop.Tool {
+	t.Helper()
+	configured, err := loop.WithToolOptions(tool, loop.ToolOptions{
+		Terminal:              true,
+		AllowNonTerminalCalls: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return configured
+}
+
 func namedTerminalTool(t *testing.T, name string, fn loop.ToolFunc) loop.Tool {
 	t.Helper()
 	tool, err := loop.NewTool(name, name, ai.ToolParameters{}, fn)
@@ -223,10 +235,12 @@ func TestMixedTerminalBatchIsRejectedBeforeHandlers(t *testing.T) {
 	model := &scriptedStreamModel{sequences: [][]ai.Token{{
 		{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "must stay hidden"}},
 		terminalCall("terminal", "present", json.RawMessage(`{}`)),
+		terminalCall("permissive", "notify", json.RawMessage(`{}`)),
 		terminalCall("ordinary", "lookup", json.RawMessage(`{}`)),
 	}}}
 	l := loop.New(model, []loop.Tool{
 		namedTerminalTool(t, "present", handler),
+		configuredMixedTerminalTool(t, namedOrdinaryTool(t, "notify", handler)),
 		namedOrdinaryTool(t, "lookup", handler),
 	}, testPromptBuilder(), nil)
 	l.ToolChoice = ai.ToolChoice{Mode: ai.ToolChoiceRequired, Names: []string{"present"}}
@@ -244,6 +258,62 @@ func TestMixedTerminalBatchIsRejectedBeforeHandlers(t *testing.T) {
 		if event.Type == loop.EventToken && event.Token != nil && event.Token.Text() != "" {
 			t.Fatalf("mixed batch exposed response text: %#v", event)
 		}
+	}
+}
+
+func TestTerminalToolCanAllowOrdinarySiblingAndContinue(t *testing.T) {
+	t.Parallel()
+
+	var invoked atomic.Int32
+	handler := func(context.Context, ai.ToolCall) (string, error) {
+		invoked.Add(1)
+		return "ok", nil
+	}
+	model := &scriptedStreamModel{sequences: [][]ai.Token{
+		{
+			terminalCall("terminal", "present", json.RawMessage(`{}`)),
+			terminalCall("ordinary", "lookup", json.RawMessage(`{}`)),
+		},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}},
+	}}
+	l := loop.New(model, []loop.Tool{
+		configuredMixedTerminalTool(t, namedOrdinaryTool(t, "present", handler)),
+		namedOrdinaryTool(t, "lookup", handler),
+	}, testPromptBuilder(), nil)
+	l.MaxLoopIterations = 2
+
+	events := collectLoopEvents(t, l, context.Background())
+	if err := loopError(events); err != nil {
+		t.Fatal(err)
+	}
+	if got := invoked.Load(); got != 2 {
+		t.Fatalf("handler invocations = %d, want 2", got)
+	}
+	if got := len(model.Requests()); got != 2 {
+		t.Fatalf("model requests = %d, want 2", got)
+	}
+	if got := len(l.Iterations); got != 2 {
+		t.Fatalf("accepted iterations = %d, want 2", got)
+	}
+}
+
+func TestTerminalToolAllowingOrdinarySiblingsStillTerminatesAlone(t *testing.T) {
+	t.Parallel()
+
+	model := &scriptedStreamModel{sequences: [][]ai.Token{
+		{terminalCall("terminal", "present", json.RawMessage(`{}`))},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "must not be requested"}}},
+	}}
+	tool := configuredMixedTerminalTool(t, namedOrdinaryTool(t, "present", func(context.Context, ai.ToolCall) (string, error) {
+		return "ok", nil
+	}))
+	l := loop.New(model, []loop.Tool{tool}, testPromptBuilder(), nil)
+
+	if err := loopError(collectLoopEvents(t, l, context.Background())); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(model.Requests()); got != 1 {
+		t.Fatalf("model requests = %d, want 1", got)
 	}
 }
 
