@@ -29,25 +29,25 @@ type toolCompletion struct {
 
 // snapshotToolRegistrations captures trusted execution options once per run so
 // classification and scheduling cannot observe different mutable provider values.
-func snapshotToolRegistrations(tools []Tool) ([]Tool, error) {
+func snapshotToolRegistrations(tools []Tool) ([]Tool, map[string]ToolOptions, error) {
 	snapshots := make([]Tool, len(tools))
-	registered := make(map[string]struct{}, len(tools))
+	optionsByName := make(map[string]ToolOptions, len(tools))
 	for i, tool := range tools {
 		if nilImplementation(tool) {
-			return nil, fmt.Errorf("%w: tool is nil", ai.ErrInvalidToolDefinition)
+			return nil, nil, fmt.Errorf("%w: tool is nil", ai.ErrInvalidToolDefinition)
 		}
 		name := tool.Name()
-		if _, exists := registered[name]; exists {
-			return nil, fmt.Errorf("%w: duplicate tool %q", ai.ErrInvalidToolDefinition, name)
+		if _, exists := optionsByName[name]; exists {
+			return nil, nil, fmt.Errorf("%w: duplicate tool %q", ai.ErrInvalidToolDefinition, name)
 		}
 		options, err := optionsForTool(tool)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		registered[name] = struct{}{}
+		optionsByName[name] = options.clone()
 		snapshots[i] = &configuredTool{Tool: tool, options: options.clone()}
 	}
-	return snapshots, nil
+	return snapshots, optionsByName, nil
 }
 
 func validateToolCallBatch(calls []pendingToolCall) error {
@@ -67,25 +67,10 @@ func validateToolCallBatch(calls []pendingToolCall) error {
 // batch ordinary; execution will retain their normal synthetic failures. A
 // permissive terminal call mixed with ordinary calls behaves as ordinary, while
 // any non-permissive terminal call makes that mixed batch invalid.
-func classifyTerminalBatch(calls []pendingToolCall, tools []Tool) (terminal, mixed bool, err error) {
-	registered := make(map[string]ToolOptions, len(tools))
-	for _, tool := range tools {
-		if nilImplementation(tool) {
-			return false, false, fmt.Errorf("%w: tool is nil", ai.ErrInvalidToolDefinition)
-		}
-		name := tool.Name()
-		if _, exists := registered[name]; exists {
-			return false, false, fmt.Errorf("%w: duplicate tool %q", ai.ErrInvalidToolDefinition, name)
-		}
-		options, optionsErr := optionsForTool(tool)
-		if optionsErr != nil {
-			return false, false, optionsErr
-		}
-		registered[name] = options
-	}
+func classifyTerminalBatch(calls []pendingToolCall, optionsByName map[string]ToolOptions) (terminal, mixed bool) {
 	var ordinary, rejectsOrdinary bool
 	for _, pending := range calls {
-		options, known := registered[pending.call.Name]
+		options, known := optionsByName[pending.call.Name]
 		if !known {
 			continue
 		}
@@ -98,7 +83,7 @@ func classifyTerminalBatch(calls []pendingToolCall, tools []Tool) (terminal, mix
 			ordinary = true
 		}
 	}
-	return terminal && !ordinary, ordinary && rejectsOrdinary, nil
+	return terminal && !ordinary, ordinary && rejectsOrdinary
 }
 
 func terminalBatchError(iteration Iteration, calls []pendingToolCall) error {

@@ -16,9 +16,9 @@ type runExecution struct {
 	ctx       context.Context
 	events    chan<- Event
 	state     *loopRunState
-	// registrationTools keeps every snapped registration for terminal-batch classification;
-	// executionTools is the EffectiveTools result used for native definitions and dispatch.
-	registrationTools         []Tool
+	// registrationOptions keeps every snapped registration for terminal-batch
+	// classification; executionTools is used for native definitions and dispatch.
+	registrationOptions       map[string]ToolOptions
 	executionTools            []Tool
 	toolDefinitions           []ai.ToolDefinition
 	userMessage               *ai.Message
@@ -103,12 +103,12 @@ func (r *runExecution) prepareValidatedRun() bool {
 		return false
 	}
 
-	registrationTools, err := snapshotToolRegistrations(r.owner.Tools)
+	registrationTools, registrationOptions, err := snapshotToolRegistrations(r.owner.Tools)
 	if err != nil {
 		sendLoopError(r.ctx, r.events, r.state, err)
 		return false
 	}
-	r.registrationTools = registrationTools
+	r.registrationOptions = registrationOptions
 	executionTools, err := EffectiveTools(registrationTools, r.owner.ToolChoice, r.owner.ToolTransport)
 	if err != nil {
 		sendLoopError(r.ctx, r.events, r.state, err)
@@ -361,11 +361,7 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		attempt.terminateError(err)
 		return iterationTerminal
 	}
-	terminalBatch, mixedTerminalBatch, err := classifyTerminalBatch(attempt.toolCalls, r.registrationTools)
-	if err != nil {
-		attempt.terminateError(err)
-		return iterationTerminal
-	}
+	terminalBatch, mixedTerminalBatch := classifyTerminalBatch(attempt.toolCalls, r.registrationOptions)
 	if mixedTerminalBatch {
 		attempt.terminateError(ErrMixedTerminalToolBatch)
 		return iterationTerminal
