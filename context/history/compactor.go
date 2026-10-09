@@ -12,7 +12,7 @@ import (
 )
 
 // CompactorDefinition configures explicit compaction of completed turns.
-// Calling Compact is the opt-in; context building never invokes it.
+// Calling Compact is the explicit opt-in; ordinary context building never invokes it.
 type CompactorDefinition struct {
 	// Provide a Summarizer or a Model used to construct the default summarizer.
 	// When both are supplied, Summarizer takes precedence.

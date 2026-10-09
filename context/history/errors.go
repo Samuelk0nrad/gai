@@ -6,14 +6,16 @@ import (
 )
 
 var (
-	ErrInvalidSummaryAmount    = errors.New("summary amount must be between 0 and 1")
-	ErrInvalidSummaryMaxTokens = errors.New("summary max tokens must be non-negative")
-	ErrSummarizerRequired      = errors.New("compaction requires a model or summarizer")
-	ErrHistoryStateRequired    = errors.New("history state is required")
-	ErrSummarizerMissing       = errors.New("summarizer not configured for compaction")
-	ErrCompactorNil            = errors.New("compactor is nil")
-	ErrInvalidHistoryBudget    = errors.New("history budget must be non-negative")
-	ErrInvalidHistorySnapshot  = errors.New("initialized history requires a nonempty revision")
+	ErrInvalidSummaryAmount     = errors.New("summary amount must be between 0 and 1")
+	ErrInvalidSummaryMaxTokens  = errors.New("summary max tokens must be non-negative")
+	ErrSummarizerRequired       = errors.New("compaction requires a model or summarizer")
+	ErrHistoryStateRequired     = errors.New("history state is required")
+	ErrSummarizerMissing        = errors.New("summarizer not configured for compaction")
+	ErrCompactorNil             = errors.New("compactor is nil")
+	ErrInvalidHistoryBudget     = errors.New("history budget must be non-negative")
+	ErrInvalidHistorySnapshot   = errors.New("initialized history requires a nonempty revision")
+	ErrHistoryStoreRequired     = errors.New("automatic history compaction requires a writable HistoryStore")
+	ErrHistoryPressureRemaining = errors.New("history still exceeds its allocation after compaction")
 )
 
 // RevisionConflictError reports a definite rejected stale write. It may be

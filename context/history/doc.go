@@ -1,7 +1,7 @@
 // Package history provides read-only conversation context and explicit persistent
 // compaction. NewHistory accepts a HistoryReader; its build methods only load,
 // select complete recent turns, and return detached canonical messages. Building
-// context never runs a model or writes storage. Tool-result previews affect only
+// ordinary context never runs a model or writes storage. Tool-result previews affect only
 // the current prompt projection; stored content is unchanged.
 //
 // HistoryState is working history: a summary plus an unsummarized tail of completed
@@ -16,6 +16,14 @@
 // commit. Built-in text summarization rejects media or opaque provider state
 // rather than silently dropping it. Configured summarizer retries remain explicit
 // summarizer policy; a revision conflict never restarts the compaction or agent.
+//
+// agent.Definition.AutoCompactHistory opts into the agent's preparation wrapper.
+// It calls HistorySource.CompactHistory once before selection at workflow start,
+// using the effective run model/counter and remaining allocation. Disabled budgets
+// skip preparation. Conflicts or ErrHistoryPressureRemaining stop the answer;
+// compaction may have committed before remaining pressure or a later run failure.
+// This flag does not serialize sessions or persist accepted new turns. Keep
+// explicit orchestration when pinning a snapshot revision for accepted-turn CAS.
 //
 // HistoryReader returns coherent detached snapshots. HistoryStore compares and
 // writes atomically, returning a fresh opaque Revision or *RevisionConflictError.

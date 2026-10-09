@@ -1,8 +1,8 @@
 # History persistence and compaction
 
 `history.NewHistory(sessionID, reader)` loads a detached snapshot and selects the
-recent complete turns that fit the allocated history budget. All build entry
-points are read-only. Selection may omit turns from a prompt without deleting
+recent complete turns that fit the allocated history budget. Its source functions
+and ordinary `Builder.BuildContext` calls are read-only. Selection may omit turns from a prompt without deleting
 them from storage. Existing summary-first selection and tool-result previews are
 preserved.
 
@@ -37,6 +37,67 @@ Only completed turns belong in this working history. Text summarization rejects
 media and opaque provider content before generation rather than losing it. History
 is a compacted working representation: retain an archival transcript separately
 if original messages must remain available.
+
+## Automatic compaction in agents
+
+Enable the agent wrapper with one flag:
+
+```go
+assistant := agent.New(agent.Definition{
+    Model: model,
+    AutoCompactHistory: true,
+    RequestBudget: &ai.RequestBudgetConfig{Limit: 128000, OutputReserve: 4096},
+    Prompt: func(ctx context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+        return gaictx.New(gaictx.Definition{
+            ContextSources: []gaictx.ContextSource{history.NewHistory(sessionID, store)},
+        }), nil
+    },
+})
+workflow, err := assistant.NewRun(ctx, input)
+if err != nil {
+    return err
+}
+result, err := workflow.Run(ctx) // compacts if needed, then generates the answer
+```
+
+Here `gaictx` is `github.com/lace-ai/gai/context`, and `store` implements
+`history.HistoryStore`. Return a fresh builder and history source for each run.
+Read-only readers are insufficient for this opt-in. Custom builders currently
+return `agent.ErrHistoryCompactionNotConfigurable`; they can orchestrate explicit
+compaction themselves.
+
+`NewRun` does not summarize or write. At `Run`/`RunEvents` start, the agent wraps
+the standard builder's explicit preparation path. Immediately before each history
+source is selected, it calls `CompactHistory` with that source's remaining local
+allocation and the effective run model/counter. The allocation already accounts
+for instructions, current input, fixed context, output reserve, request options,
+native tools, safety margin, and preceding sources. Each source runs once; later
+sources retain their usual declaration-order priority. Per-run execution overrides
+are respected. `ExecutionOverrides.AutoCompactHistory` is an optional `*bool`:
+nil inherits, true enables, and false disables automatic compaction for that run.
+
+Defaults match `NewCompactor`: summarize the oldest 70% of completed turns, at
+least one, only under pressure. Summary output uses the summarizer's default
+limit; the main answer's output limit is not a summary limit. Use explicit
+`NewCompactor` orchestration for a different summary model, amount, output limit,
+or remaining-pressure policy. Disabled budgets skip automatic compaction. A zero
+remaining allocation is still a real budget. Required input or earlier context
+that already exceeds the window stops preparation; compacting history cannot fix it.
+
+The agent attempts at most one compaction per history source during the initial
+build. It does not compact again for model retries or tool iterations. No-op
+compaction performs no summary call or write. Conflicts and summary failures stop
+before the main answer. `history.ErrHistoryPressureRemaining` also stops the run;
+in this case a smaller summary may already have been committed. Compaction is not
+rolled back if the later run fails. Final request-budget checks, including optional
+provider counting, still apply and do not trigger another compaction.
+
+This flag compacts existing working history only. Applications still own session
+serialization and persistence of accepted new turns. Compaction can advance the
+revision during `Run`: do not capture a revision before the run and assume it is
+the revision used for the answer, or reload only at commit time to accept a stale
+answer. Keep explicit compaction when the application needs to load and pin a
+snapshot for accepted-turn CAS, as in the session-lifecycle example below.
 
 ## Store contract
 
@@ -102,3 +163,12 @@ is not a committed summary: inspect `changed` on successful completion. Selectio
 events carry `selection_stage: loaded` or `selection_stage: candidate`; candidate
 events describe the proposed state before CAS and do not imply persistence. Build
 observations describe selection only.
+
+## Runnable session lifecycle
+
+See [the offline history-session example](../examples/history-session) for atomic
+in-memory CAS, cancellation-aware per-session ownership, a prompt pinned to its
+loaded revision, accepted-turn persistence, and deterministic concurrency tests.
+It also demonstrates explicit pre-run compaction and an application policy for
+remaining pressure. The example is process-local; production persistence and
+multi-process ownership remain application responsibilities.
