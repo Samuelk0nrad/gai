@@ -60,7 +60,7 @@ GAI is aimed at Go teams that want a small runtime they can compose into an appl
 
 ## Requirements
 
-- Go `1.26.9` or newer
+- Go `1.26.8` or newer
 - Credentials for the model provider you use
 
 Install the module in an existing application:

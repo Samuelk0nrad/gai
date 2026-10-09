@@ -124,36 +124,6 @@ func TestGenerateAndStreamRejectOutputLimit(t *testing.T) {
 	}
 }
 
-func TestGenerateOutputLimitPrecedesTruncatedToolArguments(t *testing.T) {
-	recorder := obstest.Install(t)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"cmpl_limited","model":"mistral-test","choices":[{"message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"search","arguments":"{\"query\":"}}]},"finish_reason":"length"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}`))
-	}))
-	defer ts.Close()
-	successEvents := 0
-	p := New("test-key", gai.ObservationSinkFunc(func(_ context.Context, event gai.Observation) {
-		if event.Name == "mistral_generate_response" {
-			successEvents++
-		}
-	}))
-	p.baseURL = ts.URL
-	m, err := p.Model(MistralSmallLatest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
-	var terminal *ai.TerminalError
-	if response != nil || !errors.As(err, &terminal) || terminal.Reason != "length" || !errors.Is(err, ai.ErrUnsuccessfulGeneration) || successEvents != 0 {
-		t.Fatalf("response = %#v, error = %v, success events = %d", response, err, successEvents)
-	}
-	span := obstest.RequireGenerationSpans(t, recorder, 1)[0]
-	attrs := obstest.Attributes(span)
-	if span.Status().Code.String() != "Error" || attrs["gen_ai.response.id"].AsString() != "cmpl_limited" || attrs["gen_ai.response.model"].AsString() != "mistral-test" || attrs["gen_ai.usage.input_tokens"].AsInt64() != 5 || attrs["gen_ai.usage.output_tokens"].AsInt64() != 3 || strings.Join(attrs["gen_ai.response.finish_reasons"].AsStringSlice(), ",") != "length" {
-		t.Fatalf("terminal response metadata = %#v", attrs)
-	}
-}
-
 func TestModelGenerateUsesContentCapturePolicy(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

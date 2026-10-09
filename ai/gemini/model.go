@@ -409,8 +409,28 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	if result.UsageMetadata != nil {
 		reasoningTokens = int(result.UsageMetadata.ThoughtsTokenCount)
 	}
+	semantic, err := mapCanonicalResponse(result)
+	text, reasoning, toolCalls := semantic.Text(), semantic.Reasoning(), semantic.ToolCalls()
+	if err != nil {
+		return nil, err
+	}
+	if gai.ObservationEnabled(ctx, m.debug) {
+		fields := map[string]any{
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+		}
+		gai.AddObservationContent(ctx, m.debug, fields, "response_text", gai.ContentKindCompletion, text)
+		gai.AddObservationContent(ctx, m.debug, fields, "reasoning", gai.ContentKindReasoning, reasoning)
+		gai.EmitObservation(ctx, m.debug, gai.Observation{
+			Name:   "gemini_generate_content_success",
+			Source: "ai:gemini.Model.Generate",
+			Fields: fields,
+		})
+	}
+	raw, _ := json.Marshal(result)
 	generationResult.ResponseModel = result.ModelVersion
 	generationResult.RequestID = result.ResponseID
+	generationResult.ToolCallCount = len(toolCalls)
 	if result.UsageMetadata != nil {
 		usage := ai.Usage{
 			InputTokens: inputTokens, OutputTokens: outputTokens, ReasoningTokens: reasoningTokens,
@@ -427,26 +447,6 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	if err := geminiTerminalError(generationResult.FinishReason); err != nil {
 		return nil, err
 	}
-	semantic, err := mapCanonicalResponse(result)
-	text, reasoning, toolCalls := semantic.Text(), semantic.Reasoning(), semantic.ToolCalls()
-	if err != nil {
-		return nil, err
-	}
-	generationResult.ToolCallCount = len(toolCalls)
-	if gai.ObservationEnabled(ctx, m.debug) {
-		fields := map[string]any{
-			"input_tokens":  inputTokens,
-			"output_tokens": outputTokens,
-		}
-		gai.AddObservationContent(ctx, m.debug, fields, "response_text", gai.ContentKindCompletion, text)
-		gai.AddObservationContent(ctx, m.debug, fields, "reasoning", gai.ContentKindReasoning, reasoning)
-		gai.EmitObservation(ctx, m.debug, gai.Observation{
-			Name:   "gemini_generate_content_success",
-			Source: "ai:gemini.Model.Generate",
-			Fields: fields,
-		})
-	}
-	raw, _ := json.Marshal(result)
 	response = &ai.AIResponse{
 		Raw:             raw,
 		InputTokens:     inputTokens,
