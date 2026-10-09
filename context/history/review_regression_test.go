@@ -33,11 +33,14 @@ func TestPlainSavedAndGeneratedSummariesFitTightBudget(t *testing.T) {
 				if generated {
 					store.state.Turns = []gaictx.Turn{{ID: "old", Count: 1, UserMessage: &gaictx.StoredMessage{Message: ai.TextMessage(ai.RoleUser, strings.Repeat("old ", 40))}}}
 					model = &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.TextMessage(ai.RoleAssistant, "x")}}}}
-					var err error
-					source, err = history.New("session", store, &history.SummarizerDefinition{Enabled: true, Amount: 1, Model: model})
+					compactor, err := history.NewCompactor("session", store, history.CompactorDefinition{Amount: 1, Model: model})
 					if err != nil {
 						t.Fatal(err)
 					}
+					if _, err := compactor.Compact(t.Context(), budget); err != nil {
+						t.Fatal(err)
+					}
+					source = history.NewHistory("session", store)
 				} else {
 					store.state.Summary = history.NewSummary("summary", "old", "old", 1, 1, ai.ContentPart{Kind: ai.ContentText, Text: "x"})
 					source = history.NewHistory("session", store)
@@ -67,6 +70,9 @@ func TestPlainSavedAndGeneratedSummariesFitTightBudget(t *testing.T) {
 				}
 				if generated && (len(store.saved) != 1 || store.saved[0].Summary == nil || store.saved[0].Summary.Content.Text != "x") {
 					t.Fatal("semantic summary was not saved")
+				}
+				if !generated && len(store.saved) != 0 {
+					t.Fatal("selecting a saved summary wrote history")
 				}
 			})
 		}

@@ -171,19 +171,7 @@ func TestHistoryPartRendersSummary(t *testing.T) {
 	}
 }
 
-type historyStore struct {
-	state *history.HistoryState
-	saved *history.HistoryState
-}
-
-func (s *historyStore) GetLastHistoryState(ctx context.Context, sessionID string) (*history.HistoryState, error) {
-	return s.state, nil
-}
-
-func (s *historyStore) SaveHistoryState(ctx context.Context, sessionID string, state *history.HistoryState) error {
-	s.saved = state
-	return nil
-}
+type historyStore = sharedHistoryStore
 
 func TestHistorySourceDoesNotDiscardTurnsExcludedFromPrompt(t *testing.T) {
 	t.Parallel()
@@ -283,18 +271,16 @@ func TestHistorySourceIncludesNewestFittingTurnsInChronologicalOrder(t *testing.
 	}
 }
 
-func TestNewHistoryWithSummarizerRequiresModelOrSummarizer(t *testing.T) {
+func TestNewCompactorRequiresModelOrSummarizer(t *testing.T) {
 	t.Parallel()
 
-	_, err := history.New("session-1", &historyStore{}, &history.SummarizerDefinition{
-		Enabled: true,
-	})
+	_, err := history.NewCompactor("session-1", &historyStore{}, history.CompactorDefinition{})
 	if err != history.ErrSummarizerRequired {
 		t.Fatalf("expected ErrSummarizerRequired, got %v", err)
 	}
 }
 
-func TestHistorySourceDoesNotSummarizeWhenHistoryFitsBudget(t *testing.T) {
+func TestCompactorDoesNotSummarizeWhenHistoryFitsBudget(t *testing.T) {
 	t.Parallel()
 
 	store := &historyStore{
@@ -329,16 +315,20 @@ func TestHistorySourceDoesNotSummarizeWhenHistoryFitsBudget(t *testing.T) {
 			{Res: ai.AIResponse{Message: ai.TextMessage(ai.RoleAssistant, "summary text")}},
 		},
 	}
-	source, err := history.New("session-1", store, &history.SummarizerDefinition{
-		Enabled: true,
-		Amount:  0.67,
-		Model:   model,
+	compactor, err := history.NewCompactor("session-1", store, history.CompactorDefinition{
+		Amount:       0.67,
+		Model:        model,
+		TokenCounter: &mocks.MockTokenCounter{},
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
+	source := history.NewHistory("session-1", store)
 	source.SetTokenCounter(&mocks.MockTokenCounter{})
 
+	if _, err := compactor.Compact(t.Context(), 100); err != nil {
+		t.Fatal(err)
+	}
 	part, err := source.Function(context.Background(), 100)
 	if err != nil {
 		t.Fatalf("Function failed: %v", err)
@@ -360,7 +350,7 @@ func TestHistorySourceDoesNotSummarizeWhenHistoryFitsBudget(t *testing.T) {
 	}
 }
 
-func TestHistorySourceSummarizesOldestTurnsWhenBudgetReached(t *testing.T) {
+func TestCompactorSummarizesOldestTurnsWhenBudgetReached(t *testing.T) {
 	t.Parallel()
 
 	store := &historyStore{
@@ -395,16 +385,20 @@ func TestHistorySourceSummarizesOldestTurnsWhenBudgetReached(t *testing.T) {
 			{Res: ai.AIResponse{Message: ai.TextMessage(ai.RoleAssistant, "summary text")}},
 		},
 	}
-	source, err := history.New("session-1", store, &history.SummarizerDefinition{
-		Enabled: true,
-		Amount:  0.67,
-		Model:   model,
+	compactor, err := history.NewCompactor("session-1", store, history.CompactorDefinition{
+		Amount:       0.67,
+		Model:        model,
+		TokenCounter: &mocks.MockTokenCounter{},
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
+	source := history.NewHistory("session-1", store)
 	source.SetTokenCounter(&mocks.MockTokenCounter{})
 
+	if _, err := compactor.Compact(t.Context(), 5); err != nil {
+		t.Fatal(err)
+	}
 	part, err := source.Function(context.Background(), 5)
 	if err != nil {
 		t.Fatalf("Function failed: %v", err)
@@ -418,17 +412,17 @@ func TestHistorySourceSummarizesOldestTurnsWhenBudgetReached(t *testing.T) {
 	if store.saved == nil {
 		t.Fatal("expected summarized state to be saved")
 	}
-	if store.saved.Summary == nil {
+	if store.saved[0].Summary == nil {
 		t.Fatal("expected summary to be saved")
 	}
-	if got := store.saved.Summary.Content.Text; got != "summary text" {
+	if got := store.saved[0].Summary.Content.Text; got != "summary text" {
 		t.Fatalf("unexpected summary content: %q", got)
 	}
-	if store.saved.Summary.StartTurnID != "turn-1" || store.saved.Summary.EndTurnID != "turn-2" {
-		t.Fatalf("expected summary to cover first two turns, got %+v", store.saved.Summary)
+	if store.saved[0].Summary.StartTurnID != "turn-1" || store.saved[0].Summary.EndTurnID != "turn-2" {
+		t.Fatalf("expected summary to cover first two turns, got %+v", store.saved[0].Summary)
 	}
-	if len(store.saved.Turns) != 1 || store.saved.Turns[0].ID != "turn-3" {
-		t.Fatalf("expected newest turn to remain unsummarized, got %+v", store.saved.Turns)
+	if len(store.saved[0].Turns) != 1 || store.saved[0].Turns[0].ID != "turn-3" {
+		t.Fatalf("expected newest turn to remain unsummarized, got %+v", store.saved[0].Turns)
 	}
 }
 
@@ -439,11 +433,11 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 		name                 string
 		state                *history.HistoryState
 		tokenBudget          int
-		summaryDef           *history.SummarizerDefinition
+		summaryDef           *history.CompactorDefinition
 		wantPart             bool
 		wantSaved            bool
-		wantSavedSummary     bool
-		wantSavedTurnIDs     []string
+		wantStoredSummary    bool
+		wantStoredTurnIDs    []string
 		wantSummaryStartTurn string
 		wantSummaryEndTurn   string
 		wantSummaryContent   string
@@ -484,11 +478,11 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 					},
 				},
 			},
-			tokenBudget:      10,
-			wantPart:         true,
-			wantSaved:        false,
-			wantSavedSummary: true,
-			wantSavedTurnIDs: []string{"turn-3", "turn-4"},
+			tokenBudget:       10,
+			wantPart:          true,
+			wantSaved:         false,
+			wantStoredSummary: true,
+			wantStoredTurnIDs: []string{"turn-3", "turn-4"},
 		},
 		{
 			name: "summary enabled but budget fits skips summarizer",
@@ -518,15 +512,14 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 				},
 			},
 			tokenBudget: 100,
-			summaryDef: &history.SummarizerDefinition{
-				Enabled: true,
-				Amount:  0.67,
+			summaryDef: &history.CompactorDefinition{
+				Amount: 0.67,
 			},
-			wantPart:         true,
-			wantSaved:        false,
-			wantSavedSummary: false,
-			wantSavedTurnIDs: []string{"turn-1", "turn-2", "turn-3"},
-			wantModelCalls:   0,
+			wantPart:          true,
+			wantSaved:         false,
+			wantStoredSummary: false,
+			wantStoredTurnIDs: []string{"turn-1", "turn-2", "turn-3"},
+			wantModelCalls:    0,
 		},
 		{
 			name: "summary enabled and budget reached summarizes oldest turns",
@@ -556,14 +549,13 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 				},
 			},
 			tokenBudget: 5,
-			summaryDef: &history.SummarizerDefinition{
-				Enabled: true,
-				Amount:  0.67,
+			summaryDef: &history.CompactorDefinition{
+				Amount: 0.67,
 			},
 			wantPart:             true,
 			wantSaved:            true,
-			wantSavedSummary:     true,
-			wantSavedTurnIDs:     []string{"turn-3"},
+			wantStoredSummary:    true,
+			wantStoredTurnIDs:    []string{"turn-3"},
 			wantSummaryStartTurn: "turn-1",
 			wantSummaryEndTurn:   "turn-2",
 			wantSummaryContent:   "summary text",
@@ -583,17 +575,18 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 				},
 			}
 
-			var source *history.HistorySource
-			var err error
+			source := history.NewHistory("session-1", store)
 			if tt.summaryDef != nil {
 				summaryDef := *tt.summaryDef
 				summaryDef.Model = model
-				source, err = history.New("session-1", store, &summaryDef)
-			} else {
-				source = history.NewHistory("session-1", store)
-			}
-			if err != nil {
-				t.Fatalf("New failed: %v", err)
+				summaryDef.TokenCounter = &mocks.MockTokenCounter{}
+				compactor, err := history.NewCompactor("session-1", store, summaryDef)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := compactor.Compact(t.Context(), tt.tokenBudget); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			source.SetTokenCounter(&mocks.MockTokenCounter{})
@@ -612,34 +605,38 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 				t.Fatalf("unexpected summarizer calls: want %d got %d", tt.wantModelCalls, model.Count)
 			}
 
-			if !tt.wantSaved {
+			stored := store.state
+			if tt.wantSaved {
+				stored = store.saved[0]
+			}
+			if stored == nil {
 				return
 			}
-			if got := store.saved.Summary != nil; got != tt.wantSavedSummary {
-				t.Fatalf("unexpected saved summary presence: want %v got %v", tt.wantSavedSummary, got)
+			if got := stored.Summary != nil; got != tt.wantStoredSummary {
+				t.Fatalf("unexpected stored summary presence: want %v got %v", tt.wantStoredSummary, got)
 			}
-			if tt.wantSavedSummary {
-				if tt.wantSummaryStartTurn != "" && store.saved.Summary.StartTurnID != tt.wantSummaryStartTurn {
-					t.Fatalf("unexpected summary start turn: want %q got %q", tt.wantSummaryStartTurn, store.saved.Summary.StartTurnID)
+			if tt.wantStoredSummary {
+				if tt.wantSummaryStartTurn != "" && stored.Summary.StartTurnID != tt.wantSummaryStartTurn {
+					t.Fatalf("unexpected summary start turn: want %q got %q", tt.wantSummaryStartTurn, stored.Summary.StartTurnID)
 				}
-				if tt.wantSummaryEndTurn != "" && store.saved.Summary.EndTurnID != tt.wantSummaryEndTurn {
-					t.Fatalf("unexpected summary end turn: want %q got %q", tt.wantSummaryEndTurn, store.saved.Summary.EndTurnID)
+				if tt.wantSummaryEndTurn != "" && stored.Summary.EndTurnID != tt.wantSummaryEndTurn {
+					t.Fatalf("unexpected summary end turn: want %q got %q", tt.wantSummaryEndTurn, stored.Summary.EndTurnID)
 				}
-				if got := store.saved.Summary.Content.Text; tt.wantSummaryContent != "" && got != tt.wantSummaryContent {
+				if got := stored.Summary.Content.Text; tt.wantSummaryContent != "" && got != tt.wantSummaryContent {
 					t.Fatalf("unexpected summary content: want %q got %q", tt.wantSummaryContent, got)
 				}
 			}
 
-			gotTurnIDs := make([]string, 0, len(store.saved.Turns))
-			for _, turn := range store.saved.Turns {
+			gotTurnIDs := make([]string, 0, len(stored.Turns))
+			for _, turn := range stored.Turns {
 				gotTurnIDs = append(gotTurnIDs, turn.ID)
 			}
-			if len(gotTurnIDs) != len(tt.wantSavedTurnIDs) {
-				t.Fatalf("unexpected saved turn count: want %d got %d", len(tt.wantSavedTurnIDs), len(gotTurnIDs))
+			if len(gotTurnIDs) != len(tt.wantStoredTurnIDs) {
+				t.Fatalf("unexpected stored turn count: want %d got %d", len(tt.wantStoredTurnIDs), len(gotTurnIDs))
 			}
 			for i := range gotTurnIDs {
-				if gotTurnIDs[i] != tt.wantSavedTurnIDs[i] {
-					t.Fatalf("unexpected saved turn id at %d: want %q got %q", i, tt.wantSavedTurnIDs[i], gotTurnIDs[i])
+				if gotTurnIDs[i] != tt.wantStoredTurnIDs[i] {
+					t.Fatalf("unexpected stored turn id at %d: want %q got %q", i, tt.wantStoredTurnIDs[i], gotTurnIDs[i])
 				}
 			}
 		})

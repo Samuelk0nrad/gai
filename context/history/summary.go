@@ -62,22 +62,6 @@ func NewSummary(id, startTurnID, endTurnID string, startTurnCount, endTurnCount 
 	}
 }
 
-func (s *HistorySource) summarizeState(ctx context.Context, state *HistoryState, maxTokens int) (*HistoryState, bool, error) {
-	if s == nil {
-		return nil, false, ErrHistorySourceNil
-	}
-	ctx, obs := newHistorySummaryObserver(ctx, s.debug, s.sessionID, maxTokens, s.summaryAmount)
-	var err error
-	defer func() {
-		obs.Finish(err)
-	}()
-
-	var next *HistoryState
-	var changed bool
-	next, changed, err = summarizeHistory(ctx, state, s.summarizer, s.counter, s.summaryAmount, s.summaryMaxTokens, obs)
-	return next, changed, err
-}
-
 // summarizeHistory creates a detached replacement without accessing a store.
 func summarizeHistory(ctx context.Context, state *HistoryState, summarizer *summary.Summarizer, counter ai.TokenCounter, amount float32, summaryMaxTokens int, obs *historyObserver) (*HistoryState, bool, error) {
 	var err error

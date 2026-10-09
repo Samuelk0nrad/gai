@@ -1,31 +1,54 @@
-// Package history provides persisted conversation history as a GAI context
-// source.
+// Package history provides read-only conversation context and explicit persistent
+// compaction. NewHistory accepts a HistoryReader; its build methods only load,
+// select complete recent turns, and return detached canonical messages. Building
+// context never runs a model or writes storage. Tool-result previews affect only
+// the current prompt projection; stored content is unchanged.
 //
-// HistorySource loads turns through a HistoryStore, selects the newest history
-// that fits the available prompt budget, and exposes canonical messages through
-// a ConversationPart. Tool-result previews are applied to that shared projection
-// before native mapping or fallback rendering; stored content is unchanged. An
-// optional summarizer can compact older turns when the complete history no
-// longer fits. Only a changed summary state is saved; selection never writes. Persisted history remains canonical; token-budget trimming only
-// changes the prompt projection produced for the current run. JSON persistence
-// requires versioned HistoryState and context.StoredMessage envelopes with
-// canonical messages; old and unversioned formats are rejected.
+// HistoryState is working history: a summary plus an unsummarized tail of completed
+// turns. Compaction replaces older details in that state. Applications needing a
+// full transcript must archive it separately. Do not publish in-progress turns
+// to this compactor: there is no partial-turn/protected-turn policy.
 //
-// Token counts are calculated locally on demand and belong only to the current
-// build and its observations. HistoryStore persists semantic state, never token
-// caches. Selection and Part.Tokens count the same previewed messages, including
-// the summary prefix. Plain summaries are counted as their prefixed text;
-// opaque summary content retains its original part and metadata. HistorySource
-// implements context.ContextSourceWithTokenCount so the builder consumes the
-// selection total without a second counting pass. These are text estimates
-// rather than complete provider request costs. Repeated builds recount the
-// selected messages. Applications choosing an encoding counter pay its
-// tokenization cost on each build; the
-// generic ai.TextTokenEstimator avoids that cost. No runtime cache is implicit.
+// NewCompactor creates an explicit load/summarize/CAS operation. Compact takes the
+// history allocation, not the model's full request budget, and makes at most one
+// summarization attempt and one CAS. It returns without writing when no compaction
+// is needed or no turns remain. PressureRemaining can be true after a successful
+// commit. Built-in text summarization rejects media or opaque provider state
+// rather than silently dropping it. Configured summarizer retries remain explicit
+// summarizer policy; a revision conflict never restarts the compaction or agent.
 //
-// Counting does not mutate messages, turns, parts, or summaries. Shared content
-// must remain read-only, and concurrent counting requires a concurrency-safe
-// counter. Each builder owns its HistorySource configuration; stores must support
-// their application's concurrent load/save operations. Provider-reported usage
-// belongs to execution observations rather than history state.
+// HistoryReader returns coherent detached snapshots. HistoryStore compares and
+// writes atomically, returning a fresh opaque Revision or *RevisionConflictError.
+// Use errors.As to detect wrapped conflicts. All writers must participate in the
+// same revision scheme. A load-then-unconditional-save adapter is not CAS. Store
+// revisions belong to HistorySnapshot, never canonical messages or SchemaVersion.
+// Never-created history has an empty revision; initialized history has a nonempty one.
+// Stores with deletion retain tombstone/generation identity to avoid revision reuse.
+//
+// CAS prevents lost updates but does not make concurrent answers causally ordered.
+// For a linear conversation, applications serialize each whole session workflow:
+// optional compaction, load/build, model/tools, and accepted-turn persistence.
+// Commit against the revision used to build the answer. Locking only a save, or
+// reloading just to append an answer generated from stale context, is insufficient.
+// Different sessions can run concurrently. Multi-process services need shared
+// coordination; a process-local mutex is not a distributed ownership mechanism.
+//
+// Conflicts are definite rejected writes. Other commit errors, including transport
+// cancellation, can have an unknown outcome. Applications decide whether to reload,
+// defer, or retry; operations that require ambiguous-commit recovery need their own
+// durable operation identity. Never blindly replay tool effects or streamed runs.
+//
+// Token counts are build-local estimates over the same previewed messages emitted
+// in the prompt, including summary prefix and framing. Semantic values contain no
+// mutable token caches. HistorySource hands the count to Builder without a second
+// pass. The finalized-request budget guard remains separate from compaction.
+// Each builder owns its HistorySource configuration; shared counters, models,
+// sinks, and stores must support their application's concurrency.
+//
+// Pre-v1 migration: replace GetLastHistoryState/SaveHistoryState with LoadHistory/
+// CompareAndSwapHistory on every writer. Replace New(..., SummarizerDefinition)
+// with NewHistory and a separately configured NewCompactor. Remove Enabled;
+// invoking Compact is the opt-in. Existing canonical HistoryState JSON keeps its
+// schema version; store revision metadata outside that payload. Migrate writers
+// together so an older unconditional writer cannot bypass revision checks.
 package history

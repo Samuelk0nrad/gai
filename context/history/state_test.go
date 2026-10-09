@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/lace-ai/gai/agent/summary"
 	"github.com/lace-ai/gai/ai"
 	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/testutil/mocks"
@@ -40,12 +41,10 @@ func TestSummaryCandidateIsDetachedAndPreservesChronology(t *testing.T) {
 	}
 	before := state.Clone()
 	model := &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.TextMessage(ai.RoleAssistant, "combined")}}}}
-	source, err := New("session", nil, &SummarizerDefinition{Enabled: true, Amount: .5, Model: model})
-	if err != nil {
-		t.Fatal(err)
-	}
-	source.SetTokenCounter(ai.TextTokenEstimator{})
-	next, changed, err := source.summarizeState(t.Context(), state, 10)
+	summarizer := summary.New(model)
+	ctx, obs := newHistoryCompactionObserver(t.Context(), nil, "session", 10, .5)
+	defer obs.Finish(nil)
+	next, changed, err := summarizeHistory(ctx, state, &summarizer, ai.TextTokenEstimator{}, .5, 0, obs)
 	if err != nil || !changed {
 		t.Fatalf("summarize = %v, %v", changed, err)
 	}
