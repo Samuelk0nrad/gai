@@ -687,6 +687,12 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					streamErr = emitErr
 				}
 			}
+			if streamErr == nil {
+				if terminalErr := mistralTerminalError(completion.FinishReason); terminalErr != nil {
+					streamErr = terminalErr
+					emit(ai.Token{Err: terminalErr})
+				}
+			}
 		}()
 
 		flushEvent := func() error {
@@ -991,6 +997,9 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	generationResult.RequestID = parsed.ID
 	generationResult.FinishReason = parsed.Choices[0].FinishReason
 	generationResult.ToolCallCount = len(toolCalls)
+	if err := mistralTerminalError(generationResult.FinishReason); err != nil {
+		return nil, err
+	}
 	if gai.ObservationEnabled(ctx, m.debug) {
 		fields := map[string]any{
 			"input_tokens":  usage.InputTokens,
@@ -1013,6 +1022,15 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	}
 	result.SetMessage(semantic)
 	return result, nil
+}
+
+func mistralTerminalError(reason string) error {
+	switch reason {
+	case "", "stop", "tool_calls", "function_call":
+		return nil
+	default:
+		return &ai.TerminalError{Provider: "mistral", Reason: reason}
+	}
 }
 
 func mapChatResponseToolCalls(raw json.RawMessage) ([]ai.ToolCall, error) {

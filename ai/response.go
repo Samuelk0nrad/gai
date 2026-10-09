@@ -43,6 +43,8 @@ func (u *Usage) Add(other Usage) {
 }
 
 // Completion is terminal metadata emitted by a streaming provider request.
+// It describes the provider outcome but does not guarantee that generation
+// succeeded; callers must continue consuming the stream for a following error.
 type Completion struct {
 	Usage Usage
 	// UsageReported distinguishes an absent provider usage block from a
@@ -67,7 +69,8 @@ var (
 	TokenTypeToolCall TokenType = "tool_call"
 	// TokenTypeErr identifies an error emitted through the token stream.
 	TokenTypeErr TokenType = "error"
-	// TokenTypeCompletion identifies terminal provider metadata for a completed stream.
+	// TokenTypeCompletion identifies terminal provider metadata, including for
+	// unsuccessful outcomes reported before a stream error.
 	TokenTypeCompletion TokenType = "completion"
 	TokenTypePart       TokenType = "part"
 )

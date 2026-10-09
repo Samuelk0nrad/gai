@@ -72,6 +72,79 @@ func TestModelGenerateMapsCapabilitiesAndResponse(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsRejectsOutputLimitForGenerateAndStream(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_limited\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_limited\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3}}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_limited","model":"gpt-test","choices":[{"message":{"content":"partial"},"finish_reason":"length"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}`))
+	}))
+	defer ts.Close()
+
+	p := New("test-key", nil)
+	p.baseURL = ts.URL
+	m, err := p.Model(GPT41Mini)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := any(m).(ai.ModelGenerator).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
+	var terminal *ai.TerminalError
+	if response != nil || !errors.As(err, &terminal) || terminal.Provider != "openai" || terminal.Reason != "length" {
+		t.Fatalf("Generate response = %#v, error = %#v", response, err)
+	}
+
+	var tokens []ai.Token
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		tokens = append(tokens, token)
+	}
+	if len(tokens) != 3 || tokens[0].Text() != "partial" || tokens[1].Type() != ai.TokenTypeCompletion || tokens[1].Completion.FinishReason != "length" || tokens[1].Completion.Usage.OutputTokens != 3 || tokens[2].Type() != ai.TokenTypeErr {
+		t.Fatalf("tokens = %#v", tokens)
+	}
+	terminal = nil
+	if !errors.As(tokens[2].Err, &terminal) || terminal.Provider != "openai" || terminal.Reason != "length" {
+		t.Fatalf("stream error = %#v", tokens[2].Err)
+	}
+}
+
+func TestChatCompletionsRejectsOutputLimitBeforeTruncatedToolCall(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_limited\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"{\\\"q\\\":\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_limited\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer ts.Close()
+
+	p := New("test-key", nil)
+	p.baseURL = ts.URL
+	m, err := p.Model(GPT41Mini)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tokens []ai.Token
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		tokens = append(tokens, token)
+	}
+	if len(tokens) != 2 || tokens[0].Type() != ai.TokenTypeCompletion || tokens[0].Completion.FinishReason != "length" || tokens[0].Completion.Usage.OutputTokens != 3 || tokens[1].Type() != ai.TokenTypeErr {
+		t.Fatalf("tokens = %#v", tokens)
+	}
+	var terminal *ai.TerminalError
+	if !errors.As(tokens[1].Err, &terminal) || terminal.Provider != "openai" || terminal.Reason != "length" {
+		t.Fatalf("stream error = %#v", tokens[1].Err)
+	}
+}
+
 func TestModelGenerateWithResponsesTransportMapsToolContinuationAndNoneEffort(t *testing.T) {
 	var got map[string]any
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

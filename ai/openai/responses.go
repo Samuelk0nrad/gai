@@ -186,11 +186,11 @@ func completionFromResponses(response *responses.Response) ai.Completion {
 }
 
 func responseIncompleteError(response *responses.Response) error {
-	reason := response.IncompleteDetails.Reason
+	reason := string(response.IncompleteDetails.Reason)
 	if reason == "" {
-		return fmt.Errorf("OpenAI Responses API: response incomplete")
+		reason = "incomplete"
 	}
-	return fmt.Errorf("OpenAI Responses API: response incomplete: %s", reason)
+	return &ai.TerminalError{Provider: "openai", Reason: reason}
 }
 
 func buildResponsesParams(model string, req ai.AIRequest) (responses.ResponseNewParams, error) {

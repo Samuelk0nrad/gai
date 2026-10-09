@@ -89,6 +89,66 @@ func TestGenerateSendsAnthropicRequestAndMapsBlocksAndUsage(t *testing.T) {
 	}
 }
 
+func TestGenerateAndStreamRejectMaxTokens(t *testing.T) {
+	m := testModel(t, func(w http.ResponseWriter, r *http.Request) {
+		body := decodeRequest(t, r)
+		if body["stream"] == true {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_limited\",\"model\":\"claude-test\"}}\n\n"))
+			_, _ = w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n"))
+			_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"))
+			_, _ = w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+			_, _ = w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}\n\n"))
+			_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_limited","model":"claude-test","role":"assistant","content":[{"type":"text","text":"partial"}],"stop_reason":"max_tokens","usage":{"input_tokens":5,"output_tokens":3}}`))
+	})
+
+	response, err := m.Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}})
+	var terminal *ai.TerminalError
+	if response != nil || !errors.As(err, &terminal) || terminal.Provider != "anthropic" || terminal.Reason != "max_tokens" {
+		t.Fatalf("Generate response = %#v, error = %#v", response, err)
+	}
+
+	var tokens []ai.Token
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		tokens = append(tokens, token)
+	}
+	if len(tokens) != 3 || tokens[0].Text() != "partial" || tokens[1].Type() != ai.TokenTypeCompletion || tokens[1].Completion.FinishReason != "max_tokens" || tokens[1].Completion.Usage.OutputTokens != 3 || tokens[2].Type() != ai.TokenTypeErr {
+		t.Fatalf("tokens = %#v", tokens)
+	}
+	terminal = nil
+	if !errors.As(tokens[2].Err, &terminal) || terminal.Provider != "anthropic" || terminal.Reason != "max_tokens" {
+		t.Fatalf("stream error = %#v", tokens[2].Err)
+	}
+}
+
+func TestGenerateStreamRejectsOutputLimitBeforeTruncatedToolCall(t *testing.T) {
+	m := testModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_limited\",\"model\":\"claude-test\"}}\n\n"))
+		_, _ = w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"search\"}}\n\n"))
+		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\"}}\n\n"))
+		_, _ = w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		_, _ = w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}\n\n"))
+		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	})
+
+	var tokens []ai.Token
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}}) {
+		tokens = append(tokens, token)
+	}
+	if len(tokens) != 2 || tokens[0].Type() != ai.TokenTypeCompletion || tokens[0].Completion.FinishReason != "max_tokens" || tokens[0].Completion.Usage.OutputTokens != 3 || tokens[1].Type() != ai.TokenTypeErr {
+		t.Fatalf("tokens = %#v", tokens)
+	}
+	var terminal *ai.TerminalError
+	if !errors.As(tokens[1].Err, &terminal) || terminal.Provider != "anthropic" || terminal.Reason != "max_tokens" {
+		t.Fatalf("stream error = %#v", tokens[1].Err)
+	}
+}
+
 func TestNativeMessagesMapUserPayload(t *testing.T) {
 	messages, err := mapNativeMessages([]ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "initial request"}}}})
 	if err != nil {

@@ -98,6 +98,9 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (result *ai.AIRe
 	}
 	message := response.Choices[0].Message
 	generationResult.FinishReason = response.Choices[0].FinishReason
+	if err := chatTerminalError(string(response.Choices[0].FinishReason)); err != nil {
+		return nil, err
+	}
 	semantic := ai.TextMessage(ai.RoleAssistant, message.Content)
 	for _, call := range message.ToolCalls {
 		args := json.RawMessage(strings.TrimSpace(call.Function.Arguments))
@@ -168,6 +171,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		}()
 		calls := map[int64]*streamToolCall{}
 		completion := ai.Completion{Provider: "openai"}
+		emittedFinishReason := ""
 		defer func() { mergeOpenAICompletionResult(&generationResult, completion) }()
 		for stream.Next() {
 			chunk := stream.Current()
@@ -177,21 +181,24 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			if chunk.Model != "" {
 				completion.Model = chunk.Model
 			}
+			if chunk.JSON.Usage.Valid() {
+				completion.UsageReported = true
+				completion.Usage = ai.Usage{
+					InputTokens:     int(chunk.Usage.PromptTokens),
+					OutputTokens:    int(chunk.Usage.CompletionTokens),
+					ReasoningTokens: int(chunk.Usage.CompletionTokensDetails.ReasoningTokens),
+					CachedTokens:    int(chunk.Usage.PromptTokensDetails.CachedTokens),
+				}
+				completion.Raw = append(completion.Raw[:0], []byte(chunk.RawJSON())...)
+			}
 			if len(chunk.Choices) == 0 {
 				if chunk.JSON.Usage.Valid() {
-					completion.UsageReported = true
-					completion.Usage = ai.Usage{
-						InputTokens:     int(chunk.Usage.PromptTokens),
-						OutputTokens:    int(chunk.Usage.CompletionTokens),
-						ReasoningTokens: int(chunk.Usage.CompletionTokensDetails.ReasoningTokens),
-						CachedTokens:    int(chunk.Usage.PromptTokensDetails.CachedTokens),
-					}
-					completion.Raw = append(completion.Raw[:0], []byte(chunk.RawJSON())...)
 					snapshot := completion
 					snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
 					if !emit(ai.Token{Completion: &snapshot}) {
 						return
 					}
+					emittedFinishReason = snapshot.FinishReason
 				}
 				continue
 			}
@@ -229,9 +236,32 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			emit(ai.Token{Err: streamErr})
 			return
 		}
-		sendStreamToolCalls(emit, calls)
+		if terminalErr := chatTerminalError(completion.FinishReason); terminalErr != nil {
+			if emittedFinishReason != completion.FinishReason {
+				snapshot := completion
+				snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
+				if !emit(ai.Token{Completion: &snapshot}) {
+					return
+				}
+			}
+			streamErr = terminalErr
+			emit(ai.Token{Err: terminalErr})
+			return
+		}
+		if !sendStreamToolCalls(emit, calls) {
+			return
+		}
 	}()
 	return out
+}
+
+func chatTerminalError(reason string) error {
+	switch reason {
+	case "", "stop", "tool_calls", "function_call":
+		return nil
+	default:
+		return &ai.TerminalError{Provider: "openai", Reason: reason}
+	}
 }
 
 func mergeOpenAICompletionResult(result *ai.GenerationResult, completion ai.Completion) {
