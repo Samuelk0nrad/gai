@@ -29,8 +29,8 @@ func startRun(ctx context.Context, service *chatService, session, text string) <
 	return done
 }
 
-// Done announces that the waiter reached a cancellation-aware blocking point,
-// letting the test cancel it while the first run still owns the session.
+// Done announces that the waiter reached a cancellation-aware blocking point
+// while the first run still owns the session.
 type waitingContext struct {
 	context.Context
 	waiting chan struct{}
@@ -44,6 +44,9 @@ func (c *waitingContext) Done() <-chan struct{} {
 
 func TestSessionOwnershipCoversGenerationAndNextRunSeesAcceptedTurn(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseFirst()
 	var calls atomic.Int32
 	var secondRequest ai.AIRequest
 	model := textModel(func(ctx context.Context, req ai.AIRequest) (string, error) {
@@ -63,6 +66,7 @@ func TestSessionOwnershipCoversGenerationAndNextRunSeesAcceptedTurn(t *testing.T
 	first := startRun(t.Context(), service, "same", "first question")
 	<-started
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	waiting := &waitingContext{Context: ctx, waiting: make(chan struct{})}
 	blocked := startRun(waiting, service, "same", "canceled question")
 	<-waiting.waiting
@@ -70,15 +74,18 @@ func TestSessionOwnershipCoversGenerationAndNextRunSeesAcceptedTurn(t *testing.T
 	if out := <-blocked; !errors.Is(out.err, context.Canceled) {
 		t.Fatalf("waiting error = %v", out.err)
 	}
+	successfulWaiter := &waitingContext{Context: t.Context(), waiting: make(chan struct{})}
+	second := startRun(successfulWaiter, service, "same", "second question")
+	<-successfulWaiter.waiting
 	if calls.Load() != 1 {
 		t.Fatal("second session run generated before the first committed")
 	}
-	close(release)
+	releaseFirst()
 	if out := <-first; out.err != nil {
 		t.Fatal(out.err)
 	}
-	if _, err := service.Run(t.Context(), "same", "second question"); err != nil {
-		t.Fatal(err)
+	if out := <-second; out.err != nil {
+		t.Fatal(out.err)
 	}
 	var users, assistants []string
 	for _, message := range secondRequest.Messages {
@@ -92,9 +99,15 @@ func TestSessionOwnershipCoversGenerationAndNextRunSeesAcceptedTurn(t *testing.T
 	if !reflect.DeepEqual(users, []string{"first question", "second question"}) || !reflect.DeepEqual(assistants, []string{"first accepted answer"}) {
 		t.Fatalf("unexpected ordered context: %+v", secondRequest.Messages)
 	}
-	stored, _ := service.store.LoadHistory(t.Context(), "same")
-	if len(stored.State.Turns) != 2 || stored.State.Turns[1].Count != 2 {
+	stored, err := service.store.LoadHistory(t.Context(), "same")
+	if err != nil || stored.State == nil || len(stored.State.Turns) != 2 || calls.Load() != 2 {
 		t.Fatal("accepted turns not persisted once")
+	}
+	for i, want := range []struct{ user, assistant string }{{"first question", "first accepted answer"}, {"second question", "second answer"}} {
+		turn := stored.State.Turns[i]
+		if turn.Count != i+1 || turn.UserMessage == nil || turn.UserMessage.Message.Text() != want.user || len(turn.Messages) != 1 || turn.Messages[0].Message.Text() != want.assistant {
+			t.Fatalf("stored turn %d = %+v", i+1, turn)
+		}
 	}
 	if len(service.locks.gates) != 0 {
 		t.Fatal("idle/canceled session gate leaked")
