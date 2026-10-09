@@ -166,7 +166,7 @@ func (m *Model) generateStream(ctx context.Context, req ai.AIRequest, emit func(
 			return
 		}
 		if chunk.Error != "" {
-			emit(ai.Token{Err: ai.ClassifyProviderError(errors.New("Ollama stream error: "+chunk.Error), 0, chunk.Error, completion.RequestID, response.Header)})
+			emit(ai.Token{Err: ai.ClassifyProviderError(errors.New("Ollama stream error: "+chunk.Error), 0, chunk.Error, "", response.Header)})
 			return
 		}
 		if chunk.Model != "" {

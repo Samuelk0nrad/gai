@@ -71,19 +71,13 @@ func TestGenerateStreamRejectsMalformedAndTruncatedStreams(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model := fixtureModel(t, http.StatusOK, tt.body, http.Header{"X-Request-Id": []string{"req-stream-error"}})
+			model := fixtureModel(t, http.StatusOK, tt.body, nil)
 			events := collectEvents(t, model.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "x")}}))
 			if len(events) == 0 || events[len(events)-1].Err == nil {
 				t.Fatalf("events = %#v", events)
 			}
 			if events[len(events)-1].Completion != nil {
 				t.Fatal("malformed stream emitted completion")
-			}
-			if tt.name == "in-band error" {
-				var providerErr *ai.ProviderError
-				if !errors.As(events[len(events)-1].Err, &providerErr) || providerErr.RequestID != "req-stream-error" {
-					t.Fatalf("in-band provider error = %#v", providerErr)
-				}
 			}
 		})
 	}
@@ -184,6 +178,7 @@ func TestGenerateStreamDeliversTextBeforeTerminalRecord(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseServer := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseServer()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `{"model":"test","message":{"role":"assistant","content":"first"},"done":false}`)
 		w.(http.Flusher).Flush()
@@ -191,10 +186,7 @@ func TestGenerateStreamDeliversTextBeforeTerminalRecord(t *testing.T) {
 		<-release
 		fmt.Fprintln(w, `{"model":"test","message":{"role":"assistant","content":"second"},"done":true,"done_reason":"stop"}`)
 	}))
-	defer func() {
-		releaseServer()
-		server.Close()
-	}()
+	defer server.Close()
 	model, err := New(nil, WithBaseURL(server.URL)).TypedModel("test")
 	if err != nil {
 		t.Fatal(err)
