@@ -72,9 +72,12 @@ type ExecutionOverrides struct {
 }
 
 type resolvedExecution struct {
-	model                     ai.Model
-	limits                    Limits
-	tools                     []loop.Tool
+	model  ai.Model
+	limits Limits
+	tools  []loop.Tool
+	// executionTools is the ToolChoice-filtered set used for text prompt definitions;
+	// tools retains all registrations so the loop can snapshot and filter them itself.
+	executionTools            []loop.Tool
 	toolExecution             loop.ToolExecutionConfig
 	toolPolicy                loop.ToolPolicy
 	toolApprovalResolver      loop.ToolApprovalResolver
@@ -207,7 +210,8 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 	if err != nil {
 		return resolvedExecution{}, fmt.Errorf("execution.tools: %w", err)
 	}
-	r.tools = cloneTools(tools)
+	r.executionTools = cloneTools(tools)
+	r.tools = cloneTools(r.tools)
 	r.toolChoice = cloneToolChoice(r.toolChoice)
 	r.responseFormat = cloneResponseFormat(r.responseFormat)
 	r.retryPolicy = cloneRetryPolicy(r.retryPolicy)

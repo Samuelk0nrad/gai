@@ -21,6 +21,12 @@ var (
 
 	// ErrToolExecutionConfig identifies invalid scheduling or registration options.
 	ErrToolExecutionConfig = errors.New("invalid tool execution configuration")
+	// ErrMixedTerminalToolBatch identifies a generation that combines ordinary
+	// calls with a terminal registration that disallows them. No handler is invoked.
+	ErrMixedTerminalToolBatch = errors.New("terminal tool batch mixes terminal and ordinary calls")
+	// ErrTerminalToolBatch identifies a terminal batch that did not complete
+	// every call successfully.
+	ErrTerminalToolBatch = errors.New("terminal tool batch failed")
 	// ErrToolPanic is a terminal handler/processor panic; panic values are not published.
 	ErrToolPanic = errors.New("tool execution panicked")
 	// ErrNilLoop indicates an operation on a nil Loop.
