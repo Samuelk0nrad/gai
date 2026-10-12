@@ -6,8 +6,8 @@ import (
 	"reflect"
 
 	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/context/tooldefinitions"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput/tooldefinitions"
 )
 
 var (

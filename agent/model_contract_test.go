@@ -14,8 +14,8 @@ import (
 	"github.com/lace-ai/gai/ai/gemini"
 	"github.com/lace-ai/gai/ai/mistral"
 	"github.com/lace-ai/gai/ai/openai"
-	gaictx "github.com/lace-ai/gai/context"
-	"github.com/lace-ai/gai/context/history"
+	"github.com/lace-ai/gai/modelinput"
+	"github.com/lace-ai/gai/modelinput/history"
 )
 
 // Deliberately offers only the single runtime method, with no embedded model.
@@ -33,12 +33,12 @@ var _ ai.Model = (*streamOnlyModel)(nil)
 
 func TestStreamOnlyModelRunsWithGenericLocalCounter(t *testing.T) {
 	model := &streamOnlyModel{}
-	var builder *gaictx.Builder
-	a := agent.New(agent.Definition{Model: model, Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
-		builder = gaictx.New(gaictx.Definition{TokenBudget: 100, SystemInstructions: []gaictx.Part{gaictx.NewTextPart("instructions")}})
+	var builder *modelinput.Builder
+	a := agent.New(agent.Definition{Model: model, Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+		builder = modelinput.New(modelinput.Definition{TokenBudget: 100, SystemInstructions: []modelinput.Part{modelinput.NewTextPart("instructions")}})
 		return builder, nil
 	}})
-	workflow, err := a.NewRun(t.Context(), agent.RunInput{Prompt: gaictx.PromptInput{User: ai.TextParts("question")}})
+	workflow, err := a.NewRun(t.Context(), agent.RunInput{Prompt: modelinput.PromptInput{User: ai.TextParts("question")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,8 +70,8 @@ func TestCountOnlyOverrideAndCountingFailureReachCaller(t *testing.T) {
 	sentinel := errors.New("count failed")
 	for _, failure := range []error{nil, sentinel} {
 		counter := &countOnlyCounter{err: failure}
-		a := agent.New(agent.Definition{Model: &streamOnlyModel{}, Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
-			return gaictx.New(gaictx.Definition{TokenBudget: 100, SystemInstructions: []gaictx.Part{gaictx.NewTextPart("instructions")}}), nil
+		a := agent.New(agent.Definition{Model: &streamOnlyModel{}, Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{TokenBudget: 100, SystemInstructions: []modelinput.Part{modelinput.NewTextPart("instructions")}}), nil
 		}})
 		workflow, err := a.NewRun(t.Context(), agent.RunInput{Execution: &agent.ExecutionOverrides{TokenCounter: agent.Optional[ai.TokenCounter]{Set: true, Value: counter}}})
 		if err != nil {
@@ -115,16 +115,16 @@ func TestAutomaticProviderCountersBuildPromptsWithoutNetwork(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var builder *gaictx.Builder
-			a := agent.New(agent.Definition{Model: model, Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
-				builder = gaictx.New(gaictx.Definition{
+			var builder *modelinput.Builder
+			a := agent.New(agent.Definition{Model: model, Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+				builder = modelinput.New(modelinput.Definition{
 					TokenBudget:        100,
-					SystemInstructions: []gaictx.Part{gaictx.NewTextPart("instructions")},
-					ContextSources:     []gaictx.ContextSource{history.NewHistory("test", localCountHistoryStore{})},
+					SystemInstructions: []modelinput.Part{modelinput.NewTextPart("instructions")},
+					ContextSources:     []modelinput.ContextSource{history.NewHistory("test", localCountHistoryStore{})},
 				})
 				return builder, nil
 			}})
-			_, err = a.NewRun(t.Context(), agent.RunInput{Prompt: gaictx.PromptInput{Context: []gaictx.Part{gaictx.NewTextPart("context")}}})
+			_, err = a.NewRun(t.Context(), agent.RunInput{Prompt: modelinput.PromptInput{Context: []modelinput.Part{modelinput.NewTextPart("context")}}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -165,5 +165,5 @@ func TestAutomaticCounterDoesNotConsultPreflight(t *testing.T) {
 type localCountHistoryStore struct{}
 
 func (localCountHistoryStore) LoadHistory(context.Context, string) (history.HistorySnapshot, error) {
-	return history.HistorySnapshot{Revision: "test", State: &history.HistoryState{Turns: []gaictx.Turn{{ID: "turn", Count: 1, UserMessage: &gaictx.StoredMessage{Message: ai.TextMessage(ai.RoleUser, "earlier question")}}}}}, nil
+	return history.HistorySnapshot{Revision: "test", State: &history.HistoryState{Turns: []modelinput.Turn{{ID: "turn", Count: 1, UserMessage: &modelinput.StoredMessage{Message: ai.TextMessage(ai.RoleUser, "earlier question")}}}}}, nil
 }

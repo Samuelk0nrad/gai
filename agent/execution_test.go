@@ -11,15 +11,15 @@ import (
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
-	"github.com/lace-ai/gai/context/tooldefinitions"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
+	"github.com/lace-ai/gai/modelinput/tooldefinitions"
 	"github.com/lace-ai/gai/testutil/mocks"
 )
 
 func executionPtr[T any](value T) *T { return &value }
 
-func executionPrompt(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+func executionPrompt(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 	return &testPromptBuilder{}, nil
 }
 
@@ -101,16 +101,16 @@ func TestExecutionModelSelectsTransportAndObservations(t *testing.T) {
 			base := &executionModel{scriptedWorkflowModel: &scriptedWorkflowModel{}, name: "base", native: !tc.native}
 			selected := &executionModel{scriptedWorkflowModel: &scriptedWorkflowModel{}, name: "selected", native: tc.native, counter: &mocks.MockTokenCounter{}}
 			sink := &agentObservationSink{}
-			var builder *gaictx.Builder
+			var builder *modelinput.Builder
 			a := agent.New(agent.Definition{
 				Model: base, Tools: []loop.Tool{loop.NewEchoTool()}, ObservationSink: sink,
-				Prompt: func(ctx context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+				Prompt: func(ctx context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 					if input.Execution.Model != selected || input.Execution.Limits.MaxTokens != nil {
 						t.Fatal("prompt did not receive requested patch")
 					}
-					builder = gaictx.New(gaictx.Definition{Renderer: &gaictx.SimpleRenderer{}})
+					builder = modelinput.New(modelinput.Definition{Renderer: &modelinput.SimpleRenderer{}})
 					if tc.existing {
-						source, err := tooldefinitions.New(nil, []gaictx.ToolSignature{namedTool{name: "stale"}}, nil)
+						source, err := tooldefinitions.New(nil, []modelinput.ToolSignature{namedTool{name: "stale"}}, nil)
 						if err != nil {
 							return nil, err
 						}
@@ -125,7 +125,7 @@ func TestExecutionModelSelectsTransportAndObservations(t *testing.T) {
 			if tc.clearTools {
 				overrides.Tools = []loop.Tool{}
 			}
-			workflow, err := a.NewRun(t.Context(), agent.RunInput{Execution: overrides, Prompt: gaictx.PromptInput{User: ai.TextParts("")}})
+			workflow, err := a.NewRun(t.Context(), agent.RunInput{Execution: overrides, Prompt: modelinput.PromptInput{User: ai.TextParts("")}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -171,7 +171,7 @@ func TestExecutionTokenCounterSelectionAndExplicitClear(t *testing.T) {
 			builder := &testPromptBuilder{counter: custom}
 			a := agent.New(agent.Definition{
 				Model: &executionModel{scriptedWorkflowModel: &scriptedWorkflowModel{}, counter: tc.model}, TokenCounter: inherited,
-				Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return builder, nil },
+				Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) { return builder, nil },
 			})
 			_, err := a.NewRun(t.Context(), agent.RunInput{Execution: &agent.ExecutionOverrides{TokenCounter: tc.override}})
 			if err != nil || builder.counter != tc.want {
@@ -195,7 +195,7 @@ func TestExecutionOpaqueBuilderRequiresExplicitTokenCounterSupport(t *testing.T)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := agent.New(agent.Definition{Model: &scriptedWorkflowModel{}, TokenCounter: tc.counter,
-				Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+				Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 					return &unclonablePromptBuilder{}, nil
 				},
 			})
@@ -242,7 +242,7 @@ func TestExecutionRejectsInvalidResolvedValuesBeforePrompt(t *testing.T) {
 			sink := &agentObservationSink{}
 			a := agent.New(agent.Definition{
 				Model: &scriptedWorkflowModel{}, Tools: []loop.Tool{loop.NewEchoTool()}, ObservationSink: sink,
-				Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+				Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 					called = true
 					return &testPromptBuilder{}, nil
 				},
@@ -320,7 +320,7 @@ func TestExecutionSnapshotsDefinitionRequestedPatchAndCallback(t *testing.T) {
 		Model: nativeToolWorkflowModel{model}, Tools: []loop.Tool{loop.NewEchoTool()},
 		ResponseFormat: ai.ResponseFormat{Type: ai.ResponseFormatJSONSchema, Name: "result", Schema: []byte("{}")},
 		RetryPolicy:    &loop.RetryPolicy{MaxRetries: 1}, Limits: agent.Limits{MaxTokens: 9},
-		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 			if input.Execution != nil {
 				*input.Execution.Limits.MaxTokens = 999
 				input.Execution.ResponseFormat.Schema[0] = '['
@@ -491,7 +491,7 @@ func TestExecutionOverridesStayLocalToPrimaryAgent(t *testing.T) {
 	var nestedInput agent.RunInput
 	post := agent.New(agent.Definition{
 		Name: "post", Model: nestedModel, Limits: agent.Limits{MaxTokens: 11},
-		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 			nestedInput = input
 			return &testPromptBuilder{}, nil
 		},
@@ -521,10 +521,10 @@ func TestExecutionToolChoiceOverridesPromptSourceOptions(t *testing.T) {
 				Model: model, Tools: []loop.Tool{namedTool{name: "selected"}, namedTool{name: "excluded"}},
 				ToolChoice:            ai.ToolChoice{Mode: ai.ToolChoiceRequired, Names: []string{"selected"}},
 				ToolDefinitionOptions: []tooldefinitions.Option{tooldefinitions.WithToolChoice(ai.ToolChoice{Mode: ai.ToolChoiceNone})},
-				Prompt: func(ctx context.Context, _ agent.RunInput) (gaictx.PromptBuilder, error) {
-					builder := gaictx.New(gaictx.Definition{Renderer: &gaictx.SimpleRenderer{}})
+				Prompt: func(ctx context.Context, _ agent.RunInput) (modelinput.PromptBuilder, error) {
+					builder := modelinput.New(modelinput.Definition{Renderer: &modelinput.SimpleRenderer{}})
 					if existing {
-						source, err := tooldefinitions.New(nil, []gaictx.ToolSignature{namedTool{name: "stale"}}, nil)
+						source, err := tooldefinitions.New(nil, []modelinput.ToolSignature{namedTool{name: "stale"}}, nil)
 						if err != nil {
 							return nil, err
 						}
