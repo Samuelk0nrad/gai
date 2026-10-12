@@ -13,8 +13,8 @@ import (
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
 	"github.com/lace-ai/gai/ai/openai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 const defaultPrompt = "Where is order LACE-1042, and when should it arrive?"
@@ -162,10 +162,10 @@ func run(ctx context.Context) error {
 			MaxLoopIterations: 4,
 			MaxTokens:         500,
 		},
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
-			return gaictx.New(gaictx.Definition{
-				SystemInstructions: []gaictx.Part{
-					gaictx.NewTextPart(
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{
+				SystemInstructions: []modelinput.Part{
+					modelinput.NewTextPart(
 						"You are a concise ecommerce support agent. " +
 							"Always use lookup_order for questions about an order. " +
 							"Never invent shipping details. Explain the status and next step in one or two sentences.",
@@ -177,7 +177,7 @@ func run(ctx context.Context) error {
 
 	userPrompt := promptFromArgs(os.Args[1:])
 	workflow, err := supportAgent.NewRun(ctx, agent.RunInput{
-		Prompt: gaictx.PromptInput{
+		Prompt: modelinput.PromptInput{
 			User: ai.TextParts(userPrompt),
 		},
 	})
