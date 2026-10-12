@@ -4,7 +4,7 @@
   </a>
 
   <p><strong>Type-safe, provider-neutral agent runtime for Go.</strong></p>
-  <p>Build streaming, tool-using agents across OpenAI, Anthropic, Gemini, and Mistral without hiding provider-native capabilities.</p>
+  <p>Build streaming, tool-using agents across OpenAI, Anthropic, Gemini, Mistral, and Ollama without hiding provider-native capabilities.</p>
 
   <p>
     <a href="https://github.com/lace-ai/gai/blob/main/go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/lace-ai/gai"></a>
@@ -157,7 +157,12 @@ GAI currently includes these adapters:
 | Anthropic | `ai/anthropic` |
 | Gemini | `ai/gemini` |
 | Mistral | `ai/mistral` |
+| Ollama | `ai/ollama` |
 | OpenAI | `ai/openai` |
+
+The [Ollama provider guide](docs/providers/ollama.md) documents native `/api/chat`
+streaming, tool-capable model configuration, native options, capability
+boundaries, and the opt-in live compatibility test.
 
 The [Mistral provider guide](docs/providers/mistral.md) documents reasoning,
 image input, typed native options, and capability boundaries. Models with
