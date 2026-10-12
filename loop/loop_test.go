@@ -13,8 +13,8 @@ import (
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 	"github.com/lace-ai/gai/testutil/mocks"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -74,6 +74,7 @@ type sentinelErrorTool struct{}
 func (sentinelErrorTool) Name() string              { return "failure" }
 func (sentinelErrorTool) Description() string       { return "Returns a test error." }
 func (sentinelErrorTool) Params() ai.ToolParameters { return loop.NewEchoTool().Params() }
+
 // Function returns a recognizable private error to detect accidental disclosure through
 // telemetry.
 func (sentinelErrorTool) Function(context.Context, ai.ToolCall) (string, error) {
@@ -86,23 +87,23 @@ func (p failingToolResultProcessor) Process(_ context.Context, _ loop.ToolPolicy
 	return loop.ToolResult{}, p.err
 }
 
-func (b *countingPromptBuilder) PrependContextSource(ctx context.Context, source gaictx.ContextSource) error {
+func (b *countingPromptBuilder) PrependContextSource(ctx context.Context, source modelinput.ContextSource) error {
 	return nil
 }
 
-func (b *countingPromptBuilder) AppendContextSource(ctx context.Context, source gaictx.ContextSource) error {
+func (b *countingPromptBuilder) AppendContextSource(ctx context.Context, source modelinput.ContextSource) error {
 	return nil
 }
 
-func (b *countingPromptBuilder) AppendContextSources(ctx context.Context, sources ...gaictx.ContextSource) error {
+func (b *countingPromptBuilder) AppendContextSources(ctx context.Context, sources ...modelinput.ContextSource) error {
 	return nil
 }
 
-func (b *countingPromptBuilder) AppendSystemInstructions(ctx context.Context, instructions ...gaictx.Part) error {
+func (b *countingPromptBuilder) AppendSystemInstructions(ctx context.Context, instructions ...modelinput.Part) error {
 	return nil
 }
 
-func (b *countingPromptBuilder) BuildContext(ctx context.Context) ([]gaictx.Part, error) {
+func (b *countingPromptBuilder) BuildContext(ctx context.Context) ([]modelinput.Part, error) {
 	return nil, nil
 }
 
@@ -113,6 +114,7 @@ func (t *deadlineRecordingTool) Description() string {
 func (t *deadlineRecordingTool) Params() ai.ToolParameters {
 	return loop.NewEchoTool().Params()
 }
+
 // Function records whether a tool inherits a deadline so tests can distinguish generation and
 // run timeout scopes.
 func (t *deadlineRecordingTool) Function(ctx context.Context, _ ai.ToolCall) (string, error) {
@@ -124,6 +126,7 @@ func (t *deadlineRecordingTool) Function(ctx context.Context, _ ai.ToolCall) (st
 func (t *countingTool) Name() string              { return "count" }
 func (t *countingTool) Description() string       { return "Counts invocations." }
 func (t *countingTool) Params() ai.ToolParameters { return loop.NewEchoTool().Params() }
+
 // Function counts actual invocations atomically to detect execution of calls that should have
 // been discarded.
 func (t *countingTool) Function(context.Context, ai.ToolCall) (string, error) {
@@ -131,21 +134,21 @@ func (t *countingTool) Function(context.Context, ai.ToolCall) (string, error) {
 	return "ok", nil
 }
 
-func (b *deadlineRecordingPromptBuilder) BuildRequest(ctx context.Context, conv gaictx.Conversation) (ai.AIRequest, error) {
+func (b *deadlineRecordingPromptBuilder) BuildRequest(ctx context.Context, conv modelinput.Conversation) (ai.AIRequest, error) {
 	_, hasDeadline := ctx.Deadline()
 	b.hasDeadline.Store(hasDeadline)
 	return b.stubPromptBuilder.BuildRequest(ctx, conv)
 }
-func (b *countingPromptBuilder) BuildRequest(ctx context.Context, conv gaictx.Conversation) (ai.AIRequest, error) {
+func (b *countingPromptBuilder) BuildRequest(ctx context.Context, conv modelinput.Conversation) (ai.AIRequest, error) {
 	count := b.count.Add(1)
 	return ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, fmt.Sprintf("prompt-%d", count))}}, nil
 }
 
-func (b *countingPromptBuilder) Input() gaictx.PromptInput {
-	return gaictx.PromptInput{User: ai.TextParts("Initial prompt")}
+func (b *countingPromptBuilder) Input() modelinput.PromptInput {
+	return modelinput.PromptInput{User: ai.TextParts("Initial prompt")}
 }
 
-func (b *countingPromptBuilder) SetInput(input gaictx.PromptInput) {
+func (b *countingPromptBuilder) SetInput(input modelinput.PromptInput) {
 }
 
 type stubPromptBuilder struct {
@@ -159,30 +162,30 @@ type nonNilConversationPromptBuilder struct {
 	stubPromptBuilder
 }
 
-func (b *stubPromptBuilder) PrependContextSource(ctx context.Context, source gaictx.ContextSource) error {
+func (b *stubPromptBuilder) PrependContextSource(ctx context.Context, source modelinput.ContextSource) error {
 	return nil
 }
 
-func (b *stubPromptBuilder) AppendContextSource(ctx context.Context, source gaictx.ContextSource) error {
+func (b *stubPromptBuilder) AppendContextSource(ctx context.Context, source modelinput.ContextSource) error {
 	return nil
 }
 
-func (b *stubPromptBuilder) AppendContextSources(ctx context.Context, sources ...gaictx.ContextSource) error {
+func (b *stubPromptBuilder) AppendContextSources(ctx context.Context, sources ...modelinput.ContextSource) error {
 	return nil
 }
 
-func (b *stubPromptBuilder) AppendSystemInstructions(ctx context.Context, instructions ...gaictx.Part) error {
+func (b *stubPromptBuilder) AppendSystemInstructions(ctx context.Context, instructions ...modelinput.Part) error {
 	return nil
 }
 
-func (b *stubPromptBuilder) BuildContext(ctx context.Context) ([]gaictx.Part, error) {
+func (b *stubPromptBuilder) BuildContext(ctx context.Context) ([]modelinput.Part, error) {
 	if b.buildContext != nil {
 		b.contextText = b.buildContext()
 	}
 	return nil, nil
 }
 
-func (b *stubPromptBuilder) BuildRequest(ctx context.Context, conv gaictx.Conversation) (ai.AIRequest, error) {
+func (b *stubPromptBuilder) BuildRequest(ctx context.Context, conv modelinput.Conversation) (ai.AIRequest, error) {
 	var base strings.Builder
 	for _, text := range []string{b.systemPrompt, b.contextText, b.userPrompt} {
 		if text != "" {
@@ -196,21 +199,21 @@ func (b *stubPromptBuilder) BuildRequest(ctx context.Context, conv gaictx.Conver
 	}
 	return ai.AIRequest{Messages: messages}, nil
 }
-func (b *nonNilConversationPromptBuilder) BuildRequest(ctx context.Context, conv gaictx.Conversation) (ai.AIRequest, error) {
+func (b *nonNilConversationPromptBuilder) BuildRequest(ctx context.Context, conv modelinput.Conversation) (ai.AIRequest, error) {
 	if conv == nil {
 		return ai.AIRequest{}, errors.New("conversation must not be nil")
 	}
 	return b.stubPromptBuilder.BuildRequest(ctx, conv)
 }
 
-func (b *stubPromptBuilder) Input() gaictx.PromptInput {
+func (b *stubPromptBuilder) Input() modelinput.PromptInput {
 	if b.userPrompt == "" {
-		return gaictx.PromptInput{}
+		return modelinput.PromptInput{}
 	}
-	return gaictx.PromptInput{User: ai.TextParts(b.userPrompt)}
+	return modelinput.PromptInput{User: ai.TextParts(b.userPrompt)}
 }
 
-func (b *stubPromptBuilder) SetInput(input gaictx.PromptInput) {
+func (b *stubPromptBuilder) SetInput(input modelinput.PromptInput) {
 	b.userPrompt = ""
 	if input.User != nil {
 		b.userPrompt = (ai.Message{Parts: input.User}).Text()
@@ -846,7 +849,7 @@ func TestLoopRejectsInvalidResponseFormatWithoutWrapping(t *testing.T) {
 	}
 }
 
-func testPromptBuilder() gaictx.PromptBuilder {
+func testPromptBuilder() modelinput.PromptBuilder {
 	return &stubPromptBuilder{
 		systemPrompt: "System prompt",
 		userPrompt:   "Initial prompt",
@@ -1919,17 +1922,17 @@ func TestLoopNativeRequestRendersInitialPromptOnce(t *testing.T) {
 		{{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-1", Type: "function", Name: "echo", Args: json.RawMessage(`{"text":"payload"}`)}}}},
 		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}},
 	}}
-	renderer := &gaictx.SimpleRenderer{}
+	renderer := &modelinput.SimpleRenderer{}
 	var rendered []string
-	if err := renderer.SetRenderResultCallback(context.Background(), func(_ []gaictx.Part, prompt string) {
+	if err := renderer.SetRenderResultCallback(context.Background(), func(_ []modelinput.Part, prompt string) {
 		rendered = append(rendered, prompt)
 	}); err != nil {
 		t.Fatalf("SetRenderResultCallback failed: %v", err)
 	}
-	promptBuilder := gaictx.New(gaictx.Definition{
+	promptBuilder := modelinput.New(modelinput.Definition{
 		Renderer:           renderer,
-		SystemInstructions: []gaictx.Part{gaictx.NewTextPart("system")},
-		PromptInput:        gaictx.PromptInput{User: ai.TextParts("user")},
+		SystemInstructions: []modelinput.Part{modelinput.NewTextPart("system")},
+		PromptInput:        modelinput.PromptInput{User: ai.TextParts("user")},
 	})
 	l := loop.New(model, []loop.Tool{loop.NewEchoTool()}, promptBuilder, nil)
 	l.MaxLoopIterations = 3

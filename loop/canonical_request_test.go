@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 	"testing"
 )
 
@@ -14,7 +14,7 @@ type customRequestBuilder struct {
 	request ai.AIRequest
 }
 
-func (b *customRequestBuilder) BuildRequest(context.Context, gaictx.Conversation) (ai.AIRequest, error) {
+func (b *customRequestBuilder) BuildRequest(context.Context, modelinput.Conversation) (ai.AIRequest, error) {
 	return b.request.Copy(), nil
 }
 

@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 // Each local text/projection call costs one token. Plain-message framing
@@ -48,17 +48,17 @@ func (m *requestCounterModel) TokenCounter() ai.TokenCounter { return m.counter 
 type requestBudgetSource struct{ calls atomic.Int32 }
 
 func (*requestBudgetSource) Name() string { return "request-budget-source" }
-func (s *requestBudgetSource) Function(context.Context, int) (gaictx.Part, error) {
+func (s *requestBudgetSource) Function(context.Context, int) (modelinput.Part, error) {
 	s.calls.Add(1)
-	return gaictx.NewTextPart("selected context"), nil
+	return modelinput.NewTextPart("selected context"), nil
 }
 
 type requestAllocationSource struct{ budgets []int }
 
 func (*requestAllocationSource) Name() string { return "allocation-recorder" }
-func (s *requestAllocationSource) Function(_ context.Context, budget int) (gaictx.Part, error) {
+func (s *requestAllocationSource) Function(_ context.Context, budget int) (modelinput.Part, error) {
 	s.budgets = append(s.budgets, budget)
-	return gaictx.NewTextPart("selected context"), nil
+	return modelinput.NewTextPart("selected context"), nil
 }
 
 type requestPreflightModel struct {
@@ -119,15 +119,15 @@ func TestRequestBudgetRejectsCompleteInitialInputBeforeGeneration(t *testing.T) 
 	// Raw text fits comfortably; the finalized canonical envelopes do not.
 	for _, input := range []struct {
 		name       string
-		definition gaictx.Definition
+		definition modelinput.Definition
 	}{
-		{"system", gaictx.Definition{SystemInstructions: []gaictx.Part{gaictx.NewTextPart("required system")}, PromptInput: gaictx.PromptInput{User: ai.TextParts("question")}}},
-		{"user", gaictx.Definition{PromptInput: gaictx.PromptInput{User: ai.TextParts("required question")}}},
-		{"context", gaictx.Definition{PromptInput: gaictx.PromptInput{User: ai.TextParts("question"), Context: []gaictx.Part{gaictx.NewTextPart("required context")}}}},
+		{"system", modelinput.Definition{SystemInstructions: []modelinput.Part{modelinput.NewTextPart("required system")}, PromptInput: modelinput.PromptInput{User: ai.TextParts("question")}}},
+		{"user", modelinput.Definition{PromptInput: modelinput.PromptInput{User: ai.TextParts("required question")}}},
+		{"context", modelinput.Definition{PromptInput: modelinput.PromptInput{User: ai.TextParts("question"), Context: []modelinput.Part{modelinput.NewTextPart("required context")}}}},
 	} {
 		t.Run(input.name, func(t *testing.T) {
 			model := &scriptedStreamModel{sequences: [][]ai.Token{{requestFinalToken()}}}
-			builder := gaictx.New(input.definition)
+			builder := modelinput.New(input.definition)
 			l := loop.New(model, nil, builder, nil)
 			l.TokenCounter = requestUnitCounter{}
 			l.RequestBudget = &ai.RequestBudgetConfig{Limit: 3}
@@ -390,7 +390,7 @@ func TestRequestBudgetRetriesDoNotRebuildSourcesOrDuplicateUserInput(t *testing.
 		{requestToolToken("call-1"), requestReportedUsage(40)},
 		{requestFinalToken()},
 	}}
-	builder := gaictx.New(gaictx.Definition{ContextSources: []gaictx.ContextSource{source}, PromptInput: gaictx.PromptInput{User: ai.TextParts("unique user input")}})
+	builder := modelinput.New(modelinput.Definition{ContextSources: []modelinput.ContextSource{source}, PromptInput: modelinput.PromptInput{User: ai.TextParts("unique user input")}})
 	l := loop.New(model, []loop.Tool{loop.NewEchoTool()}, builder, nil)
 	l.TokenCounter = requestUnitCounter{}
 	l.RequestBudget = &ai.RequestBudgetConfig{Limit: 100}
@@ -466,7 +466,7 @@ func TestRequestBudgetAccurateRetriesCountEachFinalRequestWithoutSourceRebuild(t
 		{requestToolToken("call-1"), requestReportedUsage(40)},
 		{requestFinalToken(), requestReportedUsage(7)},
 	}}, count: 5}
-	builder := gaictx.New(gaictx.Definition{ContextSources: []gaictx.ContextSource{source}, PromptInput: gaictx.PromptInput{User: ai.TextParts("question")}})
+	builder := modelinput.New(modelinput.Definition{ContextSources: []modelinput.ContextSource{source}, PromptInput: modelinput.PromptInput{User: ai.TextParts("question")}})
 	l := loop.New(model, []loop.Tool{loop.NewEchoTool()}, builder, nil)
 	l.TokenCounter = requestUnitCounter{}
 	l.RequestBudget = &ai.RequestBudgetConfig{Limit: 5, Mode: ai.RequestCountAccurate}
@@ -602,10 +602,10 @@ func TestRequestBudgetSequentialRunsKeepConfiguredBuilderDefaults(t *testing.T) 
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			source := &requestAllocationSource{}
-			builder := gaictx.New(gaictx.Definition{
+			builder := modelinput.New(modelinput.Definition{
 				TokenBudget:    100,
-				ContextSources: []gaictx.ContextSource{source},
-				PromptInput:    gaictx.PromptInput{User: ai.TextParts("question")},
+				ContextSources: []modelinput.ContextSource{source},
+				PromptInput:    modelinput.PromptInput{User: ai.TextParts("question")},
 			})
 			configured := ai.RequestBudgetConfig{Limit: 100}
 			model := &scriptedStreamModel{sequences: [][]ai.Token{{requestFinalToken()}, {requestFinalToken()}}}
@@ -667,13 +667,13 @@ func TestRequestBudgetDirectLoopSelectsConfiguredCounterBeforeProviderFallback(t
 			definitionCounter := &requestSelectionCounter{id: "test/builder-definition-v1", count: 11}
 			setterCounter := &requestSelectionCounter{id: "test/builder-setter-v1", count: 13}
 			loopCounter := &requestSelectionCounter{id: "test/loop-override-v1", count: 17}
-			definition := gaictx.Definition{PromptInput: gaictx.PromptInput{User: ai.TextParts("question")}}
+			definition := modelinput.Definition{PromptInput: modelinput.PromptInput{User: ai.TextParts("question")}}
 			want := providerCounter
 			if selected != "provider" {
 				definition.TokenCounter = definitionCounter
 				want = definitionCounter
 			}
-			builder := gaictx.New(definition)
+			builder := modelinput.New(definition)
 			if selected == "builder setter" || selected == "loop override" {
 				builder.SetTokenCounter(setterCounter)
 				want = setterCounter
@@ -702,7 +702,7 @@ func TestRequestBudgetDirectLoopSelectsConfiguredCounterBeforeProviderFallback(t
 }
 
 func TestRequestBudgetSequentialDirectLoopsReselectModelCounter(t *testing.T) {
-	builder := gaictx.New(gaictx.Definition{PromptInput: gaictx.PromptInput{User: ai.TextParts("question")}})
+	builder := modelinput.New(modelinput.Definition{PromptInput: modelinput.PromptInput{User: ai.TextParts("question")}})
 	firstCounter := &requestSelectionCounter{id: "test/provider-v1", count: 7}
 	secondCounter := &requestSelectionCounter{id: "test/provider-v2", count: 19}
 	firstModel := &requestCounterModel{scriptedStreamModel: &scriptedStreamModel{sequences: [][]ai.Token{{requestFinalToken()}}}, counter: firstCounter}

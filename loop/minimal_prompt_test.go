@@ -5,24 +5,24 @@ import (
 	"testing"
 
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 // fixedPromptBuilder deliberately implements only the loop's three methods.
 type fixedPromptBuilder struct {
-	input        gaictx.PromptInput
+	input        modelinput.PromptInput
 	contextCalls int
 }
 
-var _ gaictx.PromptBuilder = (*fixedPromptBuilder)(nil)
+var _ modelinput.PromptBuilder = (*fixedPromptBuilder)(nil)
 
-func (b *fixedPromptBuilder) BuildContext(context.Context) ([]gaictx.Part, error) {
+func (b *fixedPromptBuilder) BuildContext(context.Context) ([]modelinput.Part, error) {
 	b.contextCalls++
 	return nil, nil
 }
 
-func (b *fixedPromptBuilder) Input() gaictx.PromptInput { return b.input.Clone() }
+func (b *fixedPromptBuilder) Input() modelinput.PromptInput { return b.input.Clone() }
 
 func TestLoopAcceptsMinimalPromptBuilderAndRecordsUserInput(t *testing.T) {
 	t.Parallel()
@@ -30,7 +30,7 @@ func TestLoopAcceptsMinimalPromptBuilderAndRecordsUserInput(t *testing.T) {
 	model := &scriptedStreamModel{sequences: [][]ai.Token{
 		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "answer"}}},
 	}}
-	builder := &fixedPromptBuilder{input: gaictx.PromptInput{User: ai.TextParts("question")}}
+	builder := &fixedPromptBuilder{input: modelinput.PromptInput{User: ai.TextParts("question")}}
 	l := loop.New(model, nil, builder, nil)
 	if err := loopError(collectLoopEvents(t, l, t.Context())); err != nil {
 		t.Fatalf("loop failed: %v", err)
@@ -51,6 +51,6 @@ func TestLoopAcceptsMinimalPromptBuilderAndRecordsUserInput(t *testing.T) {
 	}
 }
 
-func (b *fixedPromptBuilder) BuildRequest(ctx context.Context, conv gaictx.Conversation) (ai.AIRequest, error) {
+func (b *fixedPromptBuilder) BuildRequest(ctx context.Context, conv modelinput.Conversation) (ai.AIRequest, error) {
 	return ai.AIRequest{Messages: []ai.Message{{Role: ai.RoleUser, Parts: ai.CloneParts(b.input.User)}}}, nil
 }

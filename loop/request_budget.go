@@ -7,7 +7,7 @@ import (
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 // requestCheckpoint belongs only to a run. Its copied prefix is never part of
@@ -58,7 +58,7 @@ func (r *runExecution) prepareRequestBudget() error {
 	}
 	if setter, ok := r.owner.PromptBuilder.(budgetCounterSetter); ok {
 		setter.SetBudgetTokenCounter(r.counter)
-	} else if setter, ok := r.owner.PromptBuilder.(gaictx.TokenCounterSetter); ok {
+	} else if setter, ok := r.owner.PromptBuilder.(modelinput.TokenCounterSetter); ok {
 		setter.SetTokenCounter(r.counter)
 	}
 	setter, configurable := r.owner.PromptBuilder.(budgetAllocationSetter)
