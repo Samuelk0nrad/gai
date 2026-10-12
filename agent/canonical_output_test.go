@@ -7,15 +7,17 @@ import (
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 func TestWorkflowCanonicalJSONHasConsistentLiveAndAcceptedText(t *testing.T) {
 	const raw = `{"ok":true}`
 	model := &scriptedWorkflowModel{scripts: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(raw)}}}}}
 	assistant := agent.New(agent.Definition{
-		Model:  model,
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return &testPromptBuilder{}, nil },
+		Model: model,
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return &testPromptBuilder{}, nil
+		},
 	})
 	workflow, err := assistant.NewRun(t.Context(), textRunInput("question"))
 	if err != nil {
@@ -74,15 +76,17 @@ func TestAgentMiddlewareCanonicalJSONAppendAndReplace(t *testing.T) {
 			post := agent.New(agent.Definition{
 				Name:  "post",
 				Model: &scriptedWorkflowModel{scripts: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(postJSON)}}}}},
-				Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+				Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 					postInput = input
 					return &testPromptBuilder{}, nil
 				},
 			})
 			main := agent.New(agent.Definition{
-				Name:       "main",
-				Model:      &scriptedWorkflowModel{scripts: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(mainJSON)}}}}},
-				Prompt:     func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return &testPromptBuilder{}, nil },
+				Name:  "main",
+				Model: &scriptedWorkflowModel{scripts: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(mainJSON)}}}}},
+				Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+					return &testPromptBuilder{}, nil
+				},
 				Middleware: []agent.Middleware{agent.NewAgentMiddleware(post, agent.AgentMiddlewareConfig{Name: "post", Output: tt.policy})},
 			})
 			workflow, err := main.NewRun(t.Context(), textRunInput("question"))

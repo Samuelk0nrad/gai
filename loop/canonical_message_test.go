@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 func TestLoopCanonicalJSONPartPreservesPayloadWithoutCallingTools(t *testing.T) {
@@ -53,6 +53,7 @@ type canonicalParallelTool struct {
 func (*canonicalParallelTool) Name() string              { return "echo" }
 func (*canonicalParallelTool) Description() string       { return "Returns identified test results." }
 func (*canonicalParallelTool) Params() ai.ToolParameters { return loop.NewEchoTool().Params() }
+
 // Function forces the second call to fail before the first succeeds, making completion order
 // differ from model order.
 func (tool *canonicalParallelTool) Function(ctx context.Context, call ai.ToolCall) (string, error) {
@@ -153,7 +154,7 @@ func TestLoopCanonicalMixedPartsSurviveRetryParallelToolsAndEventMutation(t *tes
 		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "first", Name: "echo", Parts: ai.TextParts("first")}}}},
 		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "second", Name: "echo", IsError: true, Parts: ai.TextParts("second unavailable")}}}},
 	}
-	builder := gaictx.New(gaictx.Definition{Renderer: &gaictx.SimpleRenderer{}, PromptInput: gaictx.PromptInput{User: ai.TextParts("question")}})
+	builder := modelinput.New(modelinput.Definition{Renderer: &modelinput.SimpleRenderer{}, PromptInput: modelinput.PromptInput{User: ai.TextParts("question")}})
 	l := loop.New(model, []loop.Tool{tool}, builder, nil)
 	l.MaxLoopIterations = 2
 	l.RetryPolicy = &loop.RetryPolicy{MaxRetries: 1}
@@ -253,9 +254,9 @@ func TestLoopCanonicalMixedPartsSurviveRetryParallelToolsAndEventMutation(t *tes
 }
 
 func TestLoopCanonicalEmptyUserSliceDoesNotCreateInvalidStoredInput(t *testing.T) {
-	builder := gaictx.New(gaictx.Definition{
-		SystemInstructions: []gaictx.Part{gaictx.NewTextPart("context only")},
-		PromptInput:        gaictx.PromptInput{User: []ai.ContentPart{}},
+	builder := modelinput.New(modelinput.Definition{
+		SystemInstructions: []modelinput.Part{modelinput.NewTextPart("context only")},
+		PromptInput:        modelinput.PromptInput{User: []ai.ContentPart{}},
 	})
 	model := &scriptedStreamModel{sequences: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "answer"}}}}}
 	l := loop.New(model, nil, builder, nil)
@@ -267,7 +268,7 @@ func TestLoopCanonicalEmptyUserSliceDoesNotCreateInvalidStoredInput(t *testing.T
 	if len(messages) != 1 || messages[0].Role != ai.RoleAssistant {
 		t.Fatalf("conversation = %#v, want only assistant output", messages)
 	}
-	if _, err := json.Marshal(gaictx.StoredMessage{Message: messages[0]}); err != nil {
+	if _, err := json.Marshal(modelinput.StoredMessage{Message: messages[0]}); err != nil {
 		t.Fatalf("accepted output cannot be stored: %v", err)
 	}
 }

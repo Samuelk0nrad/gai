@@ -12,8 +12,8 @@ import (
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 	"github.com/lace-ai/gai/testutil/mocks"
 )
 
@@ -147,7 +147,7 @@ func TestAgentMiddlewareStreamsToolStartBeforeNestedStageCompletes(t *testing.T)
 			{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "saved"}}},
 		}},
 		Tools: []loop.Tool{gatedWorkflowTool{Tool: loop.NewEchoTool(), release: release}},
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 			return &testPromptBuilder{}, nil
 		},
 		Limits: agent.Limits{MaxLoopIterations: 2},
@@ -211,7 +211,7 @@ func TestAgentMiddlewareReplaceOutputRestoresOnlyAcceptedUpstreamAttempts(t *tes
 		Model:       model,
 		RetryPolicy: &loop.RetryPolicy{MaxRetries: 1},
 		Limits:      agent.Limits{MaxLoopIterations: 1},
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 			return &testPromptBuilder{}, nil
 		},
 		Middleware: []agent.Middleware{
@@ -313,7 +313,7 @@ func TestWorkflowAbandonedDeliveryRetainsCompletedTransformations(t *testing.T) 
 				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "PLACE"}},
 				{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "MENT"}},
 			}}},
-			Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+			Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 				return &testPromptBuilder{}, nil
 			},
 			Limits: agent.Limits{MaxLoopIterations: 1},
@@ -402,7 +402,7 @@ func TestWorkflowCanceledNestedFailurePersistsUnderDownstreamBackpressure(t *tes
 		}},
 		}}}},
 		Tools: []loop.Tool{gatedWorkflowTool{Tool: loop.NewEchoTool(), release: toolRelease}},
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 			return &testPromptBuilder{}, nil
 		},
 		Limits: agent.Limits{MaxLoopIterations: 2},
@@ -746,7 +746,7 @@ func TestMiddlewareCanEmitStructuredOutputWithUpstreamIdentity(t *testing.T) {
 		}()
 		return out
 	})
-	workflow, err := workflowAgent("main", "product-123", transform).NewRun(context.Background(), agent.RunInput{Prompt: gaictx.PromptInput{User: ai.TextParts("question")}})
+	workflow, err := workflowAgent("main", "product-123", transform).NewRun(context.Background(), agent.RunInput{Prompt: modelinput.PromptInput{User: ai.TextParts("question")}})
 	if err != nil {
 		t.Fatalf("NewRun failed: %v", err)
 	}
@@ -797,7 +797,7 @@ func TestStructuredOutputFromRetriedAttemptIsExcluded(t *testing.T) {
 		Model:       model,
 		RetryPolicy: &loop.RetryPolicy{MaxRetries: 1},
 		Limits:      agent.Limits{MaxLoopIterations: 1},
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 			return &testPromptBuilder{}, nil
 		},
 		Middleware: []agent.Middleware{transform},
@@ -819,15 +819,17 @@ func TestStructuredOutputFromRetriedAttemptIsExcluded(t *testing.T) {
 func TestPropagatedMiddlewareFailureSkipsFollowingDefaultStage(t *testing.T) {
 	stageErr := errors.New("stage failed")
 	failing := agent.New(agent.Definition{
-		Name:   "failing",
-		Model:  &mocks.MockModel{Responses: []mocks.MockModelResponse{{Err: stageErr}}},
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return &testPromptBuilder{}, nil },
+		Name:  "failing",
+		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Err: stageErr}}},
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return &testPromptBuilder{}, nil
+		},
 	})
 	secondCalled := false
 	second := agent.New(agent.Definition{
 		Name:  "second",
 		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "unexpected"}}}}}}},
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 			secondCalled = true
 			return &testPromptBuilder{}, nil
 		},
@@ -985,7 +987,7 @@ func TestStructuredOutputMarkerAcrossTokenBoundariesAndMalformedFallback(t *test
 			assistant := agent.New(agent.Definition{
 				Name:  "structured-marker",
 				Model: model,
-				Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+				Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 					return &testPromptBuilder{}, nil
 				},
 				Middleware: []agent.Middleware{productMarkerMiddleware()},

@@ -17,7 +17,7 @@ import (
 	"github.com/lace-ai/gai/ai/gemini"
 	"github.com/lace-ai/gai/ai/mistral"
 	"github.com/lace-ai/gai/ai/openai"
-	gaictx "github.com/lace-ai/gai/context"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 type budgetHTTPRecorder struct {
@@ -67,13 +67,13 @@ func TestAgentRequestBudgetUnsupportedProvidersDoNotUseHTTP(t *testing.T) {
 			}
 			a := agent.New(agent.Definition{
 				Model: model,
-				Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
-					return gaictx.New(gaictx.Definition{TokenBudget: 10000, SystemInstructions: []gaictx.Part{gaictx.NewTextPart("instructions")}}), nil
+				Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+					return modelinput.New(modelinput.Definition{TokenBudget: 10000, SystemInstructions: []modelinput.Part{modelinput.NewTextPart("instructions")}}), nil
 				},
 				RequestBudget: &ai.RequestBudgetConfig{Limit: 10000, Mode: ai.RequestCountAccurate},
 			})
 			input := textRunInput("question")
-			input.Prompt.Context = []gaictx.Part{gaictx.NewTextPart("context details")}
+			input.Prompt.Context = []modelinput.Part{modelinput.NewTextPart("context details")}
 			workflow, err := a.NewRun(t.Context(), input)
 			if err != nil {
 				t.Fatal(err)
@@ -158,12 +158,12 @@ data: {"type":"message_stop"}
 	a := agent.New(agent.Definition{
 		Model:  model,
 		Limits: agent.Limits{MaxTokens: 64},
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
-			return gaictx.New(gaictx.Definition{TokenBudget: 10000, SystemInstructions: []gaictx.Part{gaictx.NewTextPart("instructions")}}), nil
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{TokenBudget: 10000, SystemInstructions: []modelinput.Part{modelinput.NewTextPart("instructions")}}), nil
 		},
 	})
 	input := textRunInput("question")
-	input.Prompt.Context = []gaictx.Part{gaictx.NewTextPart("context details")}
+	input.Prompt.Context = []modelinput.Part{modelinput.NewTextPart("context details")}
 	workflow, err := a.NewRun(t.Context(), input)
 	if err != nil {
 		t.Fatal(err)

@@ -10,9 +10,9 @@ import (
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
-	"github.com/lace-ai/gai/context/history"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
+	"github.com/lace-ai/gai/modelinput/history"
 )
 
 type autoHistoryStore struct {
@@ -51,7 +51,7 @@ func (s *autoHistoryStore) CompareAndSwapHistory(ctx context.Context, id string,
 
 func autoHistory(text string) *autoHistoryStore {
 	return &autoHistoryStore{snapshot: history.HistorySnapshot{Revision: "1", State: &history.HistoryState{
-		Turns: []gaictx.Turn{{ID: "t1", Count: 1, UserMessage: &gaictx.StoredMessage{Message: ai.TextMessage(ai.RoleUser, text)}}},
+		Turns: []modelinput.Turn{{ID: "t1", Count: 1, UserMessage: &modelinput.StoredMessage{Message: ai.TextMessage(ai.RoleUser, text)}}},
 	}}}
 }
 
@@ -61,8 +61,8 @@ func autoText(text string) []ai.Token {
 
 func autoHistoryDefinition(model ai.Model, store history.HistoryReader) agent.Definition {
 	return agent.Definition{Model: model, AutoCompactHistory: true, TokenCounter: ai.TextTokenEstimator{},
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
-			return gaictx.New(gaictx.Definition{TokenBudget: 256, ContextSources: []gaictx.ContextSource{history.NewHistory("s", store)}}), nil
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{TokenBudget: 256, ContextSources: []modelinput.ContextSource{history.NewHistory("s", store)}}), nil
 		},
 	}
 }
@@ -188,7 +188,7 @@ func TestAutoCompactHistoryRejectsUnsupportedBuilderAndReader(t *testing.T) {
 	if _, err = workflow.Run(t.Context()); !errors.Is(err, history.ErrHistoryStoreRequired) {
 		t.Fatal(err)
 	}
-	def.Prompt = func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+	def.Prompt = func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 		return &inputOnlyPromptBuilder{}, nil
 	}
 	def.TokenCounter = nil
@@ -202,7 +202,7 @@ func TestAutoCompactHistoryRejectsUnsupportedBuilderAndReader(t *testing.T) {
 
 func TestAutomaticCompactionDoesNotChangeOrdinaryBuilds(t *testing.T) {
 	store := autoHistory(strings.Repeat("history ", 500))
-	builder := gaictx.New(gaictx.Definition{TokenBudget: 30, ContextSources: []gaictx.ContextSource{history.NewHistory("s", store)}})
+	builder := modelinput.New(modelinput.Definition{TokenBudget: 30, ContextSources: []modelinput.ContextSource{history.NewHistory("s", store)}})
 	for range 2 {
 		if _, err := builder.BuildContext(t.Context()); err != nil {
 			t.Fatal(err)
@@ -220,7 +220,7 @@ type compactionProbe struct {
 }
 
 func (*compactionProbe) Name() string { return "history" }
-func (p *compactionProbe) Function(_ context.Context, budget int) (gaictx.Part, error) {
+func (p *compactionProbe) Function(_ context.Context, budget int) (modelinput.Part, error) {
 	p.selected = append(p.selected, budget)
 	return nil, nil
 }
@@ -233,9 +233,9 @@ func (p *compactionProbe) CompactHistory(_ context.Context, budget int, model ai
 type compactionPrefix struct{ calls int }
 
 func (*compactionPrefix) Name() string { return "retrieval" }
-func (p *compactionPrefix) Function(context.Context, int) (gaictx.Part, error) {
+func (p *compactionPrefix) Function(context.Context, int) (modelinput.Part, error) {
 	p.calls++
-	return gaictx.NewTextPart("retrieved context"), nil
+	return modelinput.NewTextPart("retrieved context"), nil
 }
 
 type scaledCompactionCounter struct{ ai.TextTokenEstimator }
@@ -248,7 +248,7 @@ func (scaledCompactionCounter) CountTokens(ctx context.Context, text string) (in
 
 func TestAutoCompactHistoryUsesEffectiveRenderedAllocation(t *testing.T) {
 	for _, native := range []bool{false, true} {
-		for _, renderer := range []gaictx.Renderer{&gaictx.XMLRenderer{}, &gaictx.SimpleRenderer{}} {
+		for _, renderer := range []modelinput.Renderer{&modelinput.XMLRenderer{}, &modelinput.SimpleRenderer{}} {
 			t.Run(fmt.Sprintf("native=%v/%T", native, renderer), func(t *testing.T) {
 				probe, prefix := &compactionProbe{}, &compactionPrefix{}
 				recorder := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}
@@ -257,15 +257,15 @@ func TestAutoCompactHistoryUsesEffectiveRenderedAllocation(t *testing.T) {
 					model = nativeToolWorkflowModel{recorder}
 				}
 				counter := scaledCompactionCounter{}
-				def := agent.Definition{Model: &scriptedWorkflowModel{}, Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
-					return gaictx.New(gaictx.Definition{TokenBudget: 10, Renderer: renderer,
-						SystemInstructions: []gaictx.Part{gaictx.NewTextPart("system instructions")},
-						ContextSources:     []gaictx.ContextSource{prefix, probe}}), nil
+				def := agent.Definition{Model: &scriptedWorkflowModel{}, Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+					return modelinput.New(modelinput.Definition{TokenBudget: 10, Renderer: renderer,
+						SystemInstructions: []modelinput.Part{modelinput.NewTextPart("system instructions")},
+						ContextSources:     []modelinput.ContextSource{prefix, probe}}), nil
 				}}
 				enabled, output := true, 40
 				budget := &ai.RequestBudgetConfig{Limit: 9000, InputLimit: 8000, OutputReserve: 20, SafetyMargin: 7}
 				input := textRunInput("question")
-				input.Prompt.Context = []gaictx.Part{gaictx.NewTextPart("fixed context")}
+				input.Prompt.Context = []modelinput.Part{modelinput.NewTextPart("fixed context")}
 				input.Execution = &agent.ExecutionOverrides{AutoCompactHistory: &enabled, Model: model, Tools: []loop.Tool{loop.NewEchoTool()},
 					Limits:         agent.LimitsOverrides{MaxTokens: &output},
 					TokenCounter:   agent.Optional[ai.TokenCounter]{Set: true, Value: counter},
@@ -301,8 +301,8 @@ func TestAutoCompactHistoryZeroAllocationAndUnfixableInput(t *testing.T) {
 			probe := &compactionProbe{}
 			model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}
 			a := agent.New(agent.Definition{Model: model, AutoCompactHistory: true, TokenCounter: ai.TextTokenEstimator{},
-				Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
-					return gaictx.New(gaictx.Definition{TokenBudget: window, ContextSources: []gaictx.ContextSource{probe}}), nil
+				Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+					return modelinput.New(modelinput.Definition{TokenBudget: window, ContextSources: []modelinput.ContextSource{probe}}), nil
 				}})
 			workflow, err := a.NewRun(t.Context(), textRunInput("q"))
 			if err != nil {
@@ -323,9 +323,9 @@ func TestAutoCompactHistoryZeroAllocationAndUnfixableInput(t *testing.T) {
 func TestAutoCompactHistoryStopsAfterOversizedPrecedingSource(t *testing.T) {
 	store := autoHistory(strings.Repeat("history ", 500))
 	model, prefix := &scriptedWorkflowModel{}, &compactionPrefix{}
-	builder := gaictx.New(gaictx.Definition{TokenBudget: 8, ContextSources: []gaictx.ContextSource{prefix, history.NewHistory("s", store)}})
+	builder := modelinput.New(modelinput.Definition{TokenBudget: 8, ContextSources: []modelinput.ContextSource{prefix, history.NewHistory("s", store)}})
 	def := autoHistoryDefinition(model, store)
-	def.Prompt = func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return builder, nil }
+	def.Prompt = func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) { return builder, nil }
 	workflow, err := agent.New(def).NewRun(t.Context(), textRunInput("q"))
 	if err != nil {
 		t.Fatal(err)

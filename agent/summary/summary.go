@@ -8,8 +8,8 @@ import (
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 //go:embed system.md
@@ -89,10 +89,10 @@ func Definition(model ai.Model, opts ...Option) agent.Definition {
 		Name:  "summary",
 		Model: model,
 		Tools: config.Tools,
-		Prompt: func(ctx context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
-			return gaictx.New(gaictx.Definition{
-				Renderer:           &gaictx.XMLRenderer{},
-				SystemInstructions: []gaictx.Part{gaictx.NewTextPart(systemPrompt)},
+		Prompt: func(ctx context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{
+				Renderer:           &modelinput.XMLRenderer{},
+				SystemInstructions: []modelinput.Part{modelinput.NewTextPart(systemPrompt)},
 				TokenBudget:        -1,
 				TokenCounter:       config.TokenCounter,
 			}), nil
@@ -120,7 +120,7 @@ type activeKey struct{}
 
 func (s Summarizer) Summarize(ctx context.Context, req Request) (string, error) {
 	if ctx.Value(activeKey{}) == true {
-		return "", fmt.Errorf("%w: recursive summary agent call", gaictx.ErrPromptSource)
+		return "", fmt.Errorf("%w: recursive summary agent call", modelinput.ErrPromptSource)
 	}
 	def := s.Definition
 	if def.Limits.MaxLoopIterations == 0 {
@@ -128,7 +128,7 @@ func (s Summarizer) Summarize(ctx context.Context, req Request) (string, error) 
 	}
 	input := agent.RunInput{
 		ID:     req.ID,
-		Prompt: gaictx.PromptInput{User: ai.TextParts(req.Text)},
+		Prompt: modelinput.PromptInput{User: ai.TextParts(req.Text)},
 		Meta:   req.Meta,
 	}
 	// Request.MaxTokens retains its existing non-positive-means-inherit API.
@@ -148,7 +148,7 @@ func (s Summarizer) Summarize(ctx context.Context, req Request) (string, error) 
 		return "", err
 	}
 	if result.Text == "" {
-		return "", fmt.Errorf("%w: summary agent produced no text", gaictx.ErrPromptSource)
+		return "", fmt.Errorf("%w: summary agent produced no text", modelinput.ErrPromptSource)
 	}
 	return result.Text, nil
 }

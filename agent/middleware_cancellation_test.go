@@ -8,7 +8,7 @@ import (
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
+	"github.com/lace-ai/gai/modelinput"
 	"github.com/lace-ai/gai/testutil/mocks"
 )
 
@@ -30,8 +30,8 @@ func TestAgentMiddlewareRunStagePreservesCanonicalOutputAfterCanceledForwarding(
 				Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{
 					Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "SAFE REPLACEMENT"}}}},
 				}}},
-				Prompt: func(context.Context, RunInput) (gaictx.PromptBuilder, error) {
-					return gaictx.New(gaictx.Definition{Renderer: &gaictx.SimpleRenderer{}}), nil
+				Prompt: func(context.Context, RunInput) (modelinput.PromptBuilder, error) {
+					return modelinput.New(modelinput.Definition{Renderer: &modelinput.SimpleRenderer{}}), nil
 				},
 				Limits: Limits{MaxLoopIterations: 1},
 				ObservationSink: gai.ObservationSinkFunc(func(_ context.Context, observation gai.Observation) {
@@ -60,7 +60,7 @@ func TestAgentMiddlewareRunStagePreservesCanonicalOutputAfterCanceledForwarding(
 			}
 			outcomeCh := make(chan outcome, 1)
 			go func() {
-				result, output, err := middleware.runStage(ctx, RunInput{ID: "nested-test", Prompt: gaictx.PromptInput{User: ai.TextParts("")}}, EventSource{Kind: SourceMiddleware, Index: 1, Name: "nested"}, func(event Event) {
+				result, output, err := middleware.runStage(ctx, RunInput{ID: "nested-test", Prompt: modelinput.PromptInput{User: ai.TextParts("")}}, EventSource{Kind: SourceMiddleware, Index: 1, Name: "nested"}, func(event Event) {
 					if event.Type == EventAttemptStart {
 						close(forwardBlocked)
 						<-releaseForward

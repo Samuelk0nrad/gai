@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 	"github.com/lace-ai/gai/testutil/mocks"
 )
 
@@ -25,11 +25,11 @@ type failingContextPromptBuilder struct {
 	err error
 }
 
-func (b *failingContextPromptBuilder) BuildContext(context.Context) ([]gaictx.Part, error) {
+func (b *failingContextPromptBuilder) BuildContext(context.Context) ([]modelinput.Part, error) {
 	return nil, b.err
 }
 
-func (b *failingAttemptPromptBuilder) BuildRequest(context.Context, gaictx.Conversation) (ai.AIRequest, error) {
+func (b *failingAttemptPromptBuilder) BuildRequest(context.Context, modelinput.Conversation) (ai.AIRequest, error) {
 	return ai.AIRequest{}, b.err
 }
 

@@ -86,7 +86,7 @@ import (
   "github.com/lace-ai/gai/agent"
   "github.com/lace-ai/gai/ai"
   "github.com/lace-ai/gai/ai/openai"
-  gaictx "github.com/lace-ai/gai/context"
+  "github.com/lace-ai/gai/modelinput"
 )
 
 func main() {
@@ -113,17 +113,17 @@ func run(ctx context.Context) error {
   assistant := agent.New(agent.Definition{
     Name:  "assistant",
     Model: model,
-    Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
-      return gaictx.New(gaictx.Definition{
-        SystemInstructions: []gaictx.Part{
-          gaictx.NewTextPart("You are a concise, helpful assistant."),
+    Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+      return modelinput.New(modelinput.Definition{
+        SystemInstructions: []modelinput.Part{
+          modelinput.NewTextPart("You are a concise, helpful assistant."),
         },
       }), nil
     },
   })
 
   workflow, err := assistant.NewRun(ctx, agent.RunInput{
-    Prompt: gaictx.PromptInput{
+    Prompt: modelinput.PromptInput{
       User: ai.TextParts("What is the capital of France?"),
     },
   })
@@ -186,7 +186,7 @@ Validation and model discovery are optional capabilities: `ProviderValidator`, `
 
 `agent` is the high-level API: it owns reusable definitions, per-run configuration, workflow lifecycle, middleware, and aggregate results. `loop` is the canonical low-level execution API and owns tools, tool responses and helpers, selection and transport, ordered events, and iterations. `ai` owns provider-neutral request, definition, and call types. Use `agent` for application workflows; use `loop` directly only when an application deliberately needs mutable execution control.
 
-`loop.Loop.Run` exposes low-level `loop.Event` values. `Workflow.RunEvents` exposes higher-level `agent.Event` values covering visible output, primary and middleware stages, and one final workflow outcome. Workflow results contain copied `loop.Iteration` snapshots. Prompt-only tool rendering accepts `context.ToolSignature`, so context packages do not require executable tools.
+`loop.Loop.Run` exposes low-level `loop.Event` values. `Workflow.RunEvents` exposes higher-level `agent.Event` values covering visible output, primary and middleware stages, and one final workflow outcome. Workflow results contain copied `loop.Iteration` snapshots. Prompt-only tool rendering accepts `modelinput.ToolSignature`, so context packages do not require executable tools.
 
 A tool has a typed schema and a Go function:
 
@@ -322,7 +322,7 @@ support := agent.New(agent.Definition{
 
 ## Prompt and context construction
 
-The `context` package builds prompts from separate, typed inputs:
+The `modelinput` package builds prompts from separate, typed inputs:
 
 - system instructions;
 - dynamic context sources;
@@ -334,19 +334,24 @@ The `context` package builds prompts from separate, typed inputs:
 `Prompt` must return a fresh, run-owned builder for every invocation. The agent
 applies the run input and execution configuration directly to that builder.
 
-Import it with an alias to avoid colliding with the standard library package:
+Import it directly alongside Go's standard library `context` package:
 
 ```go
-import gaictx "github.com/lace-ai/gai/context"
+import "github.com/lace-ai/gai/modelinput"
 ```
 
+The former `context`, `context/history`, and `context/tooldefinitions` import
+paths remain available as deprecated compatibility packages. Their type aliases
+and forwarding functions let existing consumers migrate gradually. See the
+[package migration guide](docs/modelinput-migration.md).
+
 ```go
-builder := gaictx.New(gaictx.Definition{
-  Renderer: &gaictx.XMLRenderer{},
-  SystemInstructions: []gaictx.Part{
-    gaictx.NewTextPart("Follow the application policy."),
+builder := modelinput.New(modelinput.Definition{
+  Renderer: &modelinput.XMLRenderer{},
+  SystemInstructions: []modelinput.Part{
+    modelinput.NewTextPart("Follow the application policy."),
   },
-  ContextSources: []gaictx.ContextSource{
+  ContextSources: []modelinput.ContextSource{
     history.NewHistory(sessionID, historyStore),
   },
   TokenBudget:        128000,
@@ -370,7 +375,7 @@ Ordinary context builds never invoke a summarizer or write history. Token counts
 and are not persisted.
 
 To compact automatically before an agent answers, set `AutoCompactHistory: true`
-on `agent.Definition`. Return a standard `*context.Builder` containing
+on `agent.Definition`. Return a standard `*modelinput.Builder` containing
 `history.NewHistory(sessionID, store)`, with a writable `history.HistoryStore` and
 an enabled request budget. The agent uses its effective model and counter to
 compact only when history exceeds its remaining allocation. Compaction runs once
@@ -397,7 +402,7 @@ still be preserved in storage and replayed by a compatible native adapter.
 and stored history. Its `Role` and ordered `Parts` preserve text, reasoning, tool
 call IDs and results, structured JSON, media, and namespaced provider extensions.
 `ai.Token` remains a streaming event; `loop.Iteration` retains execution diagnostics
-and canonical snapshots. `context.StoredMessage` adds storage IDs and a schema version.
+and canonical snapshots. `modelinput.StoredMessage` adds storage IDs and a schema version.
 
 ```go
 request := ai.AIRequest{Messages: []ai.Message{
@@ -410,14 +415,14 @@ This is a breaking pre-v1 API migration:
 
 - Replace `ai.RequestMessage` with `ai.Message` and ordered `ai.ContentPart` values.
   Reuse `ai.ToolCall`; results use `ai.ToolResult` with matching `ToolCallID`.
-- Replace `context.PromptInput.User` content objects with `ai.TextParts(text)` or
+- Replace `modelinput.PromptInput.User` content objects with `ai.TextParts(text)` or
   structured parts. `Conversation.Messages` and `AgentResult.Messages` return
   `[]ai.Message`. Custom builders implement `BuildRequest` and return canonical messages.
-- Construct message context with `context.NewMessagePart(ai.Message{...})`.
+- Construct message context with `modelinput.NewMessagePart(ai.Message{...})`.
   `history.Part.Messages` replaces `Contents`; `history.Summary.Content` is now a
   text `ai.ContentPart`. `NativeConversation` and `NativeMessageBuilder` are removed;
   use the canonical `Conversation` and `PromptBuilder` contracts.
-- Replace persisted `context.Message` with `context.StoredMessage{Message: ...}`.
+- Replace persisted former `context.Message` values with `modelinput.StoredMessage{Message: ...}`.
   Stored history requires an explicit schema version and canonical parts; older
   unversioned or text-content records are rejected.
 - Requests require `AIRequest.Messages`. Stream events carry one canonical `Part`,
@@ -610,8 +615,10 @@ text. Redactor errors and panics fail closed.
 ```text
 agent/                   Reusable agent definitions, workflows, middleware, and summary agents
 ai/                      Provider-neutral requests, responses, tools, capabilities, and providers
-context/                 Prompt construction, rendering, structured input, and messages
-context/history/         Persisted history selection and optional summarization
+modelinput/              Prompt construction, rendering, structured input, and messages
+modelinput/history/      Persisted history selection and optional summarization
+modelinput/tooldefinitions/  Prompt-only tool definitions
+context/                 Deprecated compatibility packages for the former paths
 loop/                    Ordered model/tool execution and tool helpers
 observability/langfuse/  Optional Langfuse OpenTelemetry exporter setup
 testutil/                Mocks and helpers used by tests
@@ -630,7 +637,7 @@ Useful focused commands:
 ```bash
 go test ./ai/...
 go test ./agent/...
-go test ./context/...
+go test ./modelinput/...
 go test ./loop/...
 go test ./examples/order-support
 ```

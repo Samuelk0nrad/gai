@@ -9,15 +9,15 @@ import (
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
-	"github.com/lace-ai/gai/context/tooldefinitions"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
+	"github.com/lace-ai/gai/modelinput/tooldefinitions"
 )
 
 var readRunID = rand.Read
 
 // ErrPromptInputNotConfigurable means a prompt builder cannot receive the
-// current run's input through SetInput(context.PromptInput).
+// current run's input through SetInput(modelinput.PromptInput).
 var ErrPromptInputNotConfigurable = errors.New("prompt builder does not implement SetInput(context.PromptInput)")
 
 // RunInput contains the application input for one agent run.
@@ -27,7 +27,7 @@ type RunInput struct {
 	// inherits a trace context already present in ctx; non-nil replaces it.
 	TraceContext *gai.TraceContext
 	// Prompt separates genuine user content from structured machine context.
-	Prompt gaictx.PromptInput
+	Prompt modelinput.PromptInput
 	// Execution overrides definition-level execution settings for this run.
 	// Nil and an empty block both inherit all defaults.
 	Execution *ExecutionOverrides
@@ -38,13 +38,13 @@ type RunInput struct {
 // Prompt creates and returns a run-owned prompt builder used by one workflow.
 // Callers must return a fresh builder for every invocation; Agent mutates the
 // returned builder while applying that run's input and execution configuration.
-// The builder must implement SetInput(context.PromptInput); otherwise NewRun
+// The builder must implement SetInput(modelinput.PromptInput); otherwise NewRun
 // returns ErrPromptInputNotConfigurable. For text-based tools it must also
-// implement PrependContextSource(context.Context, context.ContextSource) error
+// implement PrependContextSource(context.Context, modelinput.ContextSource) error
 // unless HasContextSource already reports a tool_definitions source. Run
 // overrides that change an existing tool source additionally require
-// ReplaceContextSource and RemoveContextSource, as provided by context.Builder.
-type Prompt func(ctx context.Context, input RunInput) (gaictx.PromptBuilder, error)
+// ReplaceContextSource and RemoveContextSource, as provided by modelinput.Builder.
+type Prompt func(ctx context.Context, input RunInput) (modelinput.PromptBuilder, error)
 
 // Limits controls loop iterations and model output size.
 type Limits struct {
@@ -102,7 +102,7 @@ type Definition struct {
 	// Nil inherits standard Builder settings; explicit zero limits disable checks.
 	RequestBudget *ai.RequestBudgetConfig
 	// AutoCompactHistory opts into persistent history compaction at workflow
-	// start, before history selection. Requires a *context.Builder and history
+	// start, before history selection. Requires a *modelinput.Builder and history
 	// sources backed by a writable HistoryStore. Uses the effective run model,
 	// counter, and remaining source budget. Disabled budgets skip compaction.
 	// Conflicts, summary errors, or remaining pressure stop the run; no retry is
@@ -277,13 +277,13 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 			}
 		}
 	}
-	if setter, ok := promptBuilder.(gaictx.TokenCounterSetter); ok {
+	if setter, ok := promptBuilder.(modelinput.TokenCounterSetter); ok {
 		setter.SetTokenCounter(execution.counter)
 	} else if execution.requireTokenCounterSetter {
 		return nil, ErrTokenCounterNotConfigurable
 	}
 	if execution.autoCompactHistory {
-		builder, ok := promptBuilder.(*gaictx.Builder)
+		builder, ok := promptBuilder.(*modelinput.Builder)
 		if !ok {
 			return nil, ErrHistoryCompactionNotConfigurable
 		}
@@ -346,8 +346,8 @@ func (t *toolOptionsSnapshot) ToolOptions() loop.ToolOptions {
 	return options
 }
 
-func toolSignatures(tools []loop.Tool) []gaictx.ToolSignature {
-	signatures := make([]gaictx.ToolSignature, len(tools))
+func toolSignatures(tools []loop.Tool) []modelinput.ToolSignature {
+	signatures := make([]modelinput.ToolSignature, len(tools))
 	for index, tool := range tools {
 		signatures[index] = tool
 	}
@@ -370,12 +370,12 @@ func usesNativeTools(model ai.Model) bool {
 // promptInputSetter is required by Agent to inject each run's input, but is not
 // needed by loops whose prompt builders already own their input.
 type promptInputSetter interface {
-	SetInput(input gaictx.PromptInput)
+	SetInput(input modelinput.PromptInput)
 }
 
 // contextSourcePrepender is needed only when Agent injects text tool definitions.
 type contextSourcePrepender interface {
-	PrependContextSource(ctx context.Context, source gaictx.ContextSource) error
+	PrependContextSource(ctx context.Context, source modelinput.ContextSource) error
 }
 
 // contextSourceLookup is the optional agent-internal prompt-builder capability
@@ -388,6 +388,6 @@ type contextSourceLookup interface {
 // for mutating named context sources. It is required only when a run changes an
 // existing source.
 type contextSourceManager interface {
-	ReplaceContextSource(ctx context.Context, name string, source gaictx.ContextSource) error
+	ReplaceContextSource(ctx context.Context, name string, source modelinput.ContextSource) error
 	RemoveContextSource(ctx context.Context, name string) error
 }

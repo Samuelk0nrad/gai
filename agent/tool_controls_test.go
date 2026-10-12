@@ -11,8 +11,8 @@ import (
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 func toolControlModel(names ...string) ai.Model {
@@ -210,7 +210,7 @@ func TestAgentValidatesToolControlsAfterOverridesBeforePrompt(t *testing.T) {
 		{ToolApprovalResolver: agent.Optional[loop.ToolApprovalResolver]{Set: true, Value: nilResolver}},
 	} {
 		called := false
-		a := agent.New(agent.Definition{Model: toolControlModel(), Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+		a := agent.New(agent.Definition{Model: toolControlModel(), Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 			called = true
 			return &testPromptBuilder{}, nil
 		}})

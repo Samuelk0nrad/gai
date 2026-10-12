@@ -8,21 +8,23 @@ import (
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
-	"github.com/lace-ai/gai/context/tooldefinitions"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
+	"github.com/lace-ai/gai/modelinput/tooldefinitions"
 )
 
 // readOnlyPromptBuilder provides only the loop's construction contract.
-type readOnlyPromptBuilder struct{ input gaictx.PromptInput }
+type readOnlyPromptBuilder struct{ input modelinput.PromptInput }
 
-func (*readOnlyPromptBuilder) BuildContext(context.Context) ([]gaictx.Part, error) { return nil, nil }
-func (b *readOnlyPromptBuilder) Input() gaictx.PromptInput                         { return b.input.Clone() }
+func (*readOnlyPromptBuilder) BuildContext(context.Context) ([]modelinput.Part, error) {
+	return nil, nil
+}
+func (b *readOnlyPromptBuilder) Input() modelinput.PromptInput { return b.input.Clone() }
 
 // inputOnlyPromptBuilder adds run input configuration without source mutation.
 type inputOnlyPromptBuilder struct{ readOnlyPromptBuilder }
 
-func (b *inputOnlyPromptBuilder) SetInput(input gaictx.PromptInput) { b.input = input.Clone() }
+func (b *inputOnlyPromptBuilder) SetInput(input modelinput.PromptInput) { b.input = input.Clone() }
 
 type sourceLookupPromptBuilder struct{ inputOnlyPromptBuilder }
 
@@ -35,7 +37,7 @@ func TestAgentRejectsPromptBuilderWithoutInputSetter(t *testing.T) {
 	model := &scriptedWorkflowModel{}
 	assistant := agent.New(agent.Definition{
 		Model: model,
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 			return &readOnlyPromptBuilder{}, nil
 		},
 	})
@@ -56,7 +58,7 @@ func TestAgentAcceptsInputOnlyPromptBuilder(t *testing.T) {
 			builder := &inputOnlyPromptBuilder{}
 			definition := agent.Definition{
 				Model:  model,
-				Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return builder, nil },
+				Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) { return builder, nil },
 			}
 			if native {
 				definition.Model = nativeToolWorkflowModel{model}
@@ -88,7 +90,7 @@ func TestAgentRequiresSourcePrependingOnlyForNewTextToolDefinitions(t *testing.T
 			assistant := agent.New(agent.Definition{
 				Model: model,
 				Tools: []loop.Tool{loop.NewEchoTool()},
-				Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+				Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 					if existing {
 						return &sourceLookupPromptBuilder{}, nil
 					}
@@ -113,16 +115,16 @@ func TestAgentRequiresSourcePrependingOnlyForNewTextToolDefinitions(t *testing.T
 func TestAgentModelOverrideToNativeRemovesStaleTextToolDefinitions(t *testing.T) {
 	t.Parallel()
 	tool := loop.NewEchoTool()
-	source, err := tooldefinitions.New(nil, []gaictx.ToolSignature{tool}, nil)
+	source, err := tooldefinitions.New(nil, []modelinput.ToolSignature{tool}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	builder := gaictx.New(gaictx.Definition{ContextSources: []gaictx.ContextSource{source}})
+	builder := modelinput.New(modelinput.Definition{ContextSources: []modelinput.ContextSource{source}})
 	model := &scriptedWorkflowModel{scripts: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "answer"}}}}}
 	assistant := agent.New(agent.Definition{
 		Model:  &scriptedWorkflowModel{},
 		Tools:  []loop.Tool{tool},
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return builder, nil },
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) { return builder, nil },
 	})
 	input := textRunInput("question")
 	input.Execution = &agent.ExecutionOverrides{Model: nativeToolWorkflowModel{model}}
@@ -142,6 +144,6 @@ func TestAgentModelOverrideToNativeRemovesStaleTextToolDefinitions(t *testing.T)
 	}
 }
 
-func (b *readOnlyPromptBuilder) BuildRequest(ctx context.Context, conv gaictx.Conversation) (ai.AIRequest, error) {
+func (b *readOnlyPromptBuilder) BuildRequest(ctx context.Context, conv modelinput.Conversation) (ai.AIRequest, error) {
 	return ai.AIRequest{Messages: []ai.Message{{Role: ai.RoleUser, Parts: ai.CloneParts(b.input.User)}}}, nil
 }

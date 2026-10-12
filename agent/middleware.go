@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	gaictx "github.com/lace-ai/gai/context"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 var (
@@ -244,14 +244,14 @@ func (m *AgentMiddleware) input(ctx context.Context, result WorkflowResult) (Run
 	if m.config.MapInput != nil {
 		return m.config.MapInput(ctx, result)
 	}
-	upstream, err := gaictx.NewNamedPart("upstream_output", result.Text)
+	upstream, err := modelinput.NewNamedPart("upstream_output", result.Text)
 	if err != nil {
 		return RunInput{}, err
 	}
 	return RunInput{
 		ID: result.Input.ID,
-		Prompt: gaictx.PromptInput{
-			Context: []gaictx.Part{upstream},
+		Prompt: modelinput.PromptInput{
+			Context: []modelinput.Part{upstream},
 		},
 		Meta: cloneRunInput(result.Input).Meta,
 	}, nil

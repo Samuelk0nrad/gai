@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/lace-ai/gai/agent"
-	gaictx "github.com/lace-ai/gai/context"
+	"github.com/lace-ai/gai/modelinput"
 	"github.com/lace-ai/gai/testutil/mocks"
 )
 
@@ -61,7 +61,7 @@ func TestWorkflowPreservesIndependentStageFailures(t *testing.T) {
 					Name:       "main",
 					Model:      &mocks.MockModel{Responses: []mocks.MockModelResponse{{Err: tt.primaryErr}}},
 					Middleware: middleware,
-					Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+					Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 						return &testPromptBuilder{}, nil
 					},
 				})

@@ -8,8 +8,8 @@ import (
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 func TestAgentPolicyInheritanceReplacementAndClear(t *testing.T) {
@@ -61,7 +61,7 @@ func TestAgentValidatesPolicyBeforePromptAfterOverrides(t *testing.T) {
 	var nilPolicy loop.ToolPolicyFunc
 	for _, clear := range []bool{false, true} {
 		called := false
-		a := agent.New(agent.Definition{Model: &scriptedWorkflowModel{}, ToolPolicy: nilPolicy, Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
+		a := agent.New(agent.Definition{Model: &scriptedWorkflowModel{}, ToolPolicy: nilPolicy, Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 			called = true
 			return &testPromptBuilder{}, nil
 		}})

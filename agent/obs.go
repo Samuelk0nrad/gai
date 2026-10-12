@@ -7,8 +7,8 @@ import (
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/internal/observe"
+	"github.com/lace-ai/gai/modelinput"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -148,7 +148,7 @@ func (o *runCreationObserver) fields(ctx context.Context) map[string]any {
 	return fields
 }
 
-func promptUserChars(input gaictx.PromptInput) int {
+func promptUserChars(input modelinput.PromptInput) int {
 	if input.User == nil {
 		return 0
 	}
