@@ -58,8 +58,10 @@ requires a future breaking release; this change sets no removal date. Consumers
 such as ETIVERA, Still, and `lace-ai/agent-backend` can update imports in their
 own release window without coordinating an immediate upgrade. GAI's internal
 consumers migrate in separate, ordered PRs after the compatibility layer lands.
-Machine-readable `Deprecated:` package comments land after those internal
-migrations, so each intermediate PR passes the existing deprecation lint checks.
+Machine-readable `Deprecated:` package comments identify the old paths to Go
+tooling. These markers land after the internal migrations, so each intermediate
+PR passes the existing deprecation lint checks. Compatibility tests intentionally
+exercise the old paths and suppress only those deprecation warnings.
 
 Type identity belongs to the new declaring package. Reflection's `PkgPath`,
 formatted type names, and implicit `encoding/gob` type names can therefore change

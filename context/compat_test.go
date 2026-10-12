@@ -1,3 +1,5 @@
+//lint:file-ignore SA1019 Compatibility tests intentionally exercise former import paths.
+
 package context_test
 
 import (

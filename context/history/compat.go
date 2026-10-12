@@ -1,6 +1,6 @@
 // Package history preserves the former model-input history import path.
 //
-// This is a deprecated compatibility package; use github.com/lace-ai/gai/modelinput/history.
+// Deprecated: Use github.com/lace-ai/gai/modelinput/history.
 // It remains available until its removal in a future breaking release.
 package history
 
