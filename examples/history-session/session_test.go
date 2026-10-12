@@ -11,7 +11,7 @@ import (
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/context/history"
+	"github.com/lace-ai/gai/modelinput/history"
 )
 
 func testService(model ai.Model) *chatService {

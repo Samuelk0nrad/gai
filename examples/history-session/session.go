@@ -8,8 +8,8 @@ import (
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
-	"github.com/lace-ai/gai/context/history"
+	"github.com/lace-ai/gai/modelinput"
+	"github.com/lace-ai/gai/modelinput/history"
 )
 
 // sessionLocks serializes complete runs, while allowing unrelated sessions to
@@ -133,16 +133,16 @@ func (s *chatService) Run(ctx context.Context, sessionID, text string) (agent.Wo
 		Model:        s.model,
 		TokenCounter: counter,
 		Limits:       agent.Limits{MaxTokens: outputReserve},
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
-			return gaictx.New(gaictx.Definition{
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{
 				TokenBudget:        s.requestWindow,
 				OutputTokenReserve: outputReserve,
 				TokenCounter:       counter,
-				ContextSources:     []gaictx.ContextSource{history.NewHistory(sessionID, fixedHistory{snapshot})},
+				ContextSources:     []modelinput.ContextSource{history.NewHistory(sessionID, fixedHistory{snapshot})},
 			}), nil
 		},
 	})
-	workflow, err := a.NewRun(ctx, agent.RunInput{Prompt: gaictx.PromptInput{User: ai.TextParts(text)}})
+	workflow, err := a.NewRun(ctx, agent.RunInput{Prompt: modelinput.PromptInput{User: ai.TextParts(text)}})
 	if err != nil {
 		return result, err
 	}
@@ -178,13 +178,13 @@ func (s *chatService) Run(ctx context.Context, sessionID, text string) (agent.Wo
 	return result, nil
 }
 
-func completedTurn(sessionID string, count int, messages []ai.Message) gaictx.Turn {
-	turn := gaictx.Turn{ID: fmt.Sprintf("%s/turn-%d", sessionID, count), Count: count}
+func completedTurn(sessionID string, count int, messages []ai.Message) modelinput.Turn {
+	turn := modelinput.Turn{ID: fmt.Sprintf("%s/turn-%d", sessionID, count), Count: count}
 	// Primary.Messages already includes the accepted user message. Do not add
 	// input text separately or persist AttemptedTokens/AttemptedText.
 	for i, message := range messages {
-		stored := gaictx.StoredMessage{
-			SchemaVersion: gaictx.MessageSchemaVersion,
+		stored := modelinput.StoredMessage{
+			SchemaVersion: modelinput.MessageSchemaVersion,
 			ID:            fmt.Sprintf("%s/message-%d", turn.ID, i),
 			SessionID:     sessionID, TurnID: turn.ID, Message: message.Clone(),
 		}
