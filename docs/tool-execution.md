@@ -2,7 +2,7 @@
 
 `loop` owns the execution contract. `agent` exposes it through reusable
 `Definition` defaults and `RunInput.Execution` overrides. Provider-neutral tool
-schemas and calls remain in `ai`; prompt rendering uses `context.ToolSignature`.
+schemas and calls remain in `ai`; prompt rendering uses `modelinput.ToolSignature`.
 
 ## Register a handler
 

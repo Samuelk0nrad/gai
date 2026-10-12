@@ -98,7 +98,7 @@ including their framing. It also debits each returned source's emitted cost
 before allocating the next source. Canonical history includes framing once and
 hands off its build-local count without recounting the selected snapshot.
 
-Optional sources can implement `context.ContextSourceWithBudgetProjection` to
+Optional sources can implement `modelinput.ContextSourceWithBudgetProjection` to
 select content that fits the rendered allowance. `FunctionWithBudget` receives a
 build-local `project(ctx, part)` callback and returns the selected part, its
 projected count, and an error. The callback includes escaping, renderer markup,
@@ -107,10 +107,10 @@ For example, a source can try its own candidates in preference order:
 
 ```go
 func (s *Source) FunctionWithBudget(ctx context.Context, budget int,
-    project func(context.Context, gaictx.Part) (int, error),
-) (gaictx.Part, int, error) {
+    project func(context.Context, modelinput.Part) (int, error),
+) (modelinput.Part, int, error) {
     for _, text := range s.candidates {
-        part := gaictx.NewTextPart(text)
+        part := modelinput.NewTextPart(text)
         tokens, err := project(ctx, part)
         if err != nil { return nil, 0, err }
         if tokens <= budget { return part, tokens, nil }
@@ -130,7 +130,7 @@ retains its existing raw-part counting behavior.
 
 Built-in renderers use quiet budget previews and publish render
 callbacks and observations only during final request rendering. Custom renderers
-with notifications should implement the optional `context.PreviewRenderer`:
+with notifications should implement the optional `modelinput.PreviewRenderer`:
 `RenderPreview` must produce the same text and errors as `Render` without the
 renderer's notifications. Render-only implementations remain supported through
 `Render`, including wrappers that override an embedded renderer's output.
