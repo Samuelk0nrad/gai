@@ -217,7 +217,7 @@ This is a pre-v1 breaking migration:
   `IsTokenCounterUnavailable`/`ai.ErrTokenCounterUnsupported`.
 - Replace explicit Anthropic text-tokenizer calls with `CountInputTokens` on the
   canonical request. Gemini/Mistral legacy text-tokenizer APIs are removed.
-- Migrate agent/context/history counter fields and setters to `TokenCounter` and
+- Migrate agent/modelinput/history counter fields and setters to `TokenCounter` and
   `SetTokenCounter`; clear a per-run counter with `Optional[ai.TokenCounter]{Set: true}`.
 - Remove calculated token maps and `TurnTokenStore`/`UpdateTurnTokens` use. History
   stores semantic conversation/summaries; execution owns temporary checkpoints.

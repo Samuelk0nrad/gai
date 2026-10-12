@@ -422,7 +422,7 @@ This is a breaking pre-v1 API migration:
   `history.Part.Messages` replaces `Contents`; `history.Summary.Content` is now a
   text `ai.ContentPart`. `NativeConversation` and `NativeMessageBuilder` are removed;
   use the canonical `Conversation` and `PromptBuilder` contracts.
-- Replace persisted `modelinput.Message` with `modelinput.StoredMessage{Message: ...}`.
+- Replace persisted former `context.Message` values with `modelinput.StoredMessage{Message: ...}`.
   Stored history requires an explicit schema version and canonical parts; older
   unversioned or text-content records are rejected.
 - Requests require `AIRequest.Messages`. Stream events carry one canonical `Part`,
