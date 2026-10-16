@@ -26,6 +26,7 @@ func newAgentRunObserver(ctx context.Context, workflow *Workflow) (context.Conte
 		input = workflow.result.Input
 	}
 	attrs := []attribute.KeyValue{
+		attribute.String("langfuse.observation.type", "agent"),
 		attribute.String("agent.name", name),
 		attribute.Int("agent.meta_key_count", len(input.Meta)),
 	}
@@ -179,6 +180,7 @@ func newWorkflowObserver(ctx context.Context, workflow *Workflow) (context.Conte
 		debug = workflow.debug
 	}
 	ctx, operation := observe.Start(ctx, debug, agentTracerName, "agent.workflow", "agent.operation", "run", "agent:Workflow.Run",
+		attribute.String("langfuse.observation.type", "chain"),
 		attribute.String("agent.name", name),
 		attribute.Int("agent.middleware_count", middlewareCount),
 	)

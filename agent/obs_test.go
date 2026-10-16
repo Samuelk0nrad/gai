@@ -89,17 +89,26 @@ func TestAgentWorkflowEmitsLifecycleEventsAndSpans(t *testing.T) {
 	}
 
 	spanNames := map[string]bool{}
+	observationTypes := map[string]string{
+		"agent.run":          "agent",
+		"agent.workflow.run": "chain",
+	}
 	for _, span := range recorder.Ended() {
 		spanNames[span.Name()] = true
+		if want, ok := observationTypes[span.Name()]; ok {
+			if got := spanAttributeMap(span)["langfuse.observation.type"]; got != want {
+				t.Errorf("span %q observation type = %v, want %q", span.Name(), got, want)
+			}
+		}
 	}
-	for _, name := range []string{"agent.run.create", "agent.workflow.run", "agent.middleware.run"} {
+	for _, name := range []string{"agent.run.create", "agent.run", "agent.workflow.run", "agent.middleware.run"} {
 		if !spanNames[name] {
 			t.Errorf("missing span %q; got %v", name, spanNames)
 		}
 	}
 }
 
-func TestAgentRunSpanIsParentOfWorkflow(t *testing.T) {
+func TestAgentModelOnlyRunEmitsTypedSpanHierarchy(t *testing.T) {
 	previousProvider := otel.GetTracerProvider()
 	recorder := tracetest.NewSpanRecorder()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
@@ -139,6 +148,12 @@ func TestAgentRunSpanIsParentOfWorkflow(t *testing.T) {
 	}
 	if workflowSpan.Parent().SpanID() != run.SpanContext().SpanID() {
 		t.Fatalf("workflow span parent = %s, want run span %s", workflowSpan.Parent().SpanID(), run.SpanContext().SpanID())
+	}
+	if got := spanAttributeMap(run)["langfuse.observation.type"]; got != "agent" {
+		t.Errorf("agent run observation type = %v, want agent", got)
+	}
+	if got := spanAttributeMap(workflowSpan)["langfuse.observation.type"]; got != "chain" {
+		t.Errorf("workflow observation type = %v, want chain", got)
 	}
 	attributes := map[string]any{}
 	for _, attribute := range run.Attributes() {
