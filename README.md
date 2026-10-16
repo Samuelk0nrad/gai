@@ -489,6 +489,13 @@ Middleware is post-processing, not a supervisor or handoff runtime. Tool authori
 
 GAI creates OpenTelemetry spans across agent runs, workflows, model attempts, and tools. Safe metadata is recorded by default; prompts, completions, reasoning, tool arguments, tool results, and metadata values are not exported unless the application deliberately enables them.
 
+Execution spans set `langfuse.observation.type` to `agent` for `agent.run`
+and `chain` for its `agent.workflow.run` child, including nested agent runs.
+With Langfuse export configured, these types enable the
+[agent graph](https://langfuse.com/docs/observability/features/agent-graphs)
+even when a run does not call any tools. Run creation and middleware wrapper
+spans remain generic spans.
+
 Set `Definition.ObservationSink` for structured lifecycle observations. Observation events and attributes use the `observation.*` OpenTelemetry namespace. Install any OpenTelemetry-compatible exporter before creating agents.
 
 The optional `observability/langfuse` package provides a batched OTLP tracer provider for Langfuse:
