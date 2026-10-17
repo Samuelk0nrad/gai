@@ -60,10 +60,13 @@ type middlewareValidator interface {
 
 // Workflow is the single-use execution handle returned by Agent.NewRun.
 type Workflow struct {
-	loop       *loop.Loop
-	middleware []Middleware
-	name       string
-	debug      gai.ObservationSink
+	durability   *checkpointCoordinator
+	stageID      string
+	durableChild bool
+	loop         *loop.Loop
+	middleware   []Middleware
+	name         string
+	debug        gai.ObservationSink
 
 	mu                 sync.RWMutex
 	middlewareDone     sync.WaitGroup
@@ -85,7 +88,7 @@ func newWorkflow(input RunInput, l *loop.Loop, name string, debug gai.Observatio
 		debug:       debug,
 		done:        make(chan struct{}),
 		primaryDone: make(chan struct{}),
-		result:      WorkflowResult{Input: cloneRunInput(input)},
+		result:      WorkflowResult{Input: cloneRunInput(input), Status: StatusRunning},
 	}
 }
 
@@ -167,7 +170,11 @@ func (w *Workflow) Result() WorkflowResult {
 	}
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	return cloneWorkflowResult(w.result)
+	result := cloneWorkflowResult(w.result)
+	if w.durability != nil {
+		result.Checkpoint = w.durability.snapshot()
+	}
+	return result
 }
 
 func (w *Workflow) start(ctx context.Context) (<-chan Event, error) {
@@ -179,7 +186,16 @@ func (w *Workflow) start(ctx context.Context) (<-chan Event, error) {
 	ctx, obs := newWorkflowObserver(ctx, w)
 	obs.Started(ctx)
 
-	stream := w.mapPrimary(ctx, w.loop.Run(ctx), obs)
+	var primary <-chan loop.Event
+	if w.durability != nil && w.durability.stage(w.stageID).Complete {
+		completed := make(chan loop.Event, 1)
+		completed <- loop.DoneEvent()
+		close(completed)
+		primary = completed
+	} else {
+		primary = w.loop.Run(ctx)
+	}
+	stream := w.mapPrimary(ctx, primary, obs)
 	for index, middleware := range w.middleware {
 		source := EventSource{Kind: SourceMiddleware, Index: index + 1, Name: middlewareName(middleware, index)}
 		run := &MiddlewareContext{workflow: w, source: source}
