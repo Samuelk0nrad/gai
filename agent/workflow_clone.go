@@ -7,6 +7,10 @@ import (
 
 func cloneRunInput(input RunInput) RunInput {
 	cloned := input
+	if input.Durability != nil {
+		d := *input.Durability
+		cloned.Durability = &d
+	}
 	if input.TraceContext != nil {
 		traceContext := *input.TraceContext
 		traceContext.Tags = append([]string(nil), input.TraceContext.Tags...)
@@ -99,6 +103,10 @@ func cloneStageResult(stage StageResult) StageResult {
 }
 
 func cloneWorkflowResult(result WorkflowResult) WorkflowResult {
+	if result.Checkpoint != nil {
+		c := result.Checkpoint.Clone()
+		result.Checkpoint = &c
+	}
 	result.Input = cloneRunInput(result.Input)
 	result.Output = cloneOutputParts(result.Output)
 	result.Primary = cloneAgentResult(result.Primary)

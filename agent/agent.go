@@ -22,7 +22,9 @@ var ErrPromptInputNotConfigurable = errors.New("prompt builder does not implemen
 
 // RunInput contains the application input for one agent run.
 type RunInput struct {
-	ID string
+	// Durability enables acknowledged checkpoints; nil retains ordinary execution.
+	Durability *Durability
+	ID         string
 	// TraceContext explicitly selects approved trace-wide dimensions. Nil
 	// inherits a trace context already present in ctx; non-nil replaces it.
 	TraceContext *gai.TraceContext
@@ -134,7 +136,17 @@ func New(def Definition) *Agent {
 // Prompt construction happens before NewRun returns. Model execution and
 // middleware processing begin when Workflow.Run or Workflow.RunEvents is called.
 func (a *Agent) NewRun(ctx context.Context, input RunInput) (*Workflow, error) {
+	if err := validateDurability(a, input); err != nil {
+		return nil, err
+	}
 	input = cloneRunInput(input)
+	if input.Durability != nil {
+		var err error
+		input.Meta, err = normalizeDurableMeta(input.Meta)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if input.ID == "" {
 		var err error
 		input.ID, err = newRunID()
@@ -171,6 +183,10 @@ func (a *Agent) NewRun(ctx context.Context, input RunInput) (*Workflow, error) {
 		return nil, err
 	}
 	workflow := newWorkflow(input, l, a.name(), a.debugSink(), a.middleware())
+	if err := workflow.configureDurability(a, input); err != nil {
+		obs.Finish(err)
+		return nil, err
+	}
 	obs.LoopConfigured(l.MaxLoopIterations)
 	obs.Created(ctx)
 	obs.Finish(nil)

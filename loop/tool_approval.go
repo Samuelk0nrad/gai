@@ -7,7 +7,8 @@ import (
 )
 
 // ToolApprovalRequest is a snapshot of one pending authorization request. ID is
-// a fresh correlation token, not a durable invocation or recovery identity.
+// a correlation token retained while a durable approval is pending. It remains
+// separate from the invocation identity used for recovery and idempotency.
 type ToolApprovalRequest struct {
 	ID       string
 	Input    ToolPolicyInput
@@ -75,7 +76,7 @@ func (l *Loop) preflightToolApprovals(ctx context.Context, tasks []scheduledTool
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if task.execution.Decision.Action != ToolRequireApproval {
+		if task.restored || task.execution.Decision.Action != ToolRequireApproval {
 			continue
 		}
 		request := ToolApprovalRequest{ID: rand.Text(), Input: ToolPolicyInput{Call: task.pending.call.Clone(), Traits: task.options.Traits}, Decision: task.execution.Decision}

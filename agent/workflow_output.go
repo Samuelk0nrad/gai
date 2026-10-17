@@ -41,7 +41,7 @@ func eventAffectsOutputReduction(event Event) bool {
 	case EventOutput, EventRetry, EventDiscard:
 		return true
 	case EventStageFinish:
-		return event.AttemptID != 0 && (event.StageOutcome == StageFailed || event.StageOutcome == StageCanceled)
+		return event.AttemptID != 0 && (event.StageOutcome == StageFailed || event.StageOutcome == StageCanceled || event.StageOutcome == StagePaused)
 	default:
 		return false
 	}
@@ -114,7 +114,7 @@ func (a *workflowOutputAccumulator) add(event Event) {
 	case EventRetry, EventDiscard:
 		a.invalidate(eventAttemptKey(event))
 	case EventStageFinish:
-		if event.StageOutcome != StageFailed && event.StageOutcome != StageCanceled {
+		if event.StageOutcome != StageFailed && event.StageOutcome != StageCanceled && event.StageOutcome != StagePaused {
 			return
 		}
 		if event.AttemptID != 0 {
@@ -183,12 +183,38 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 	go func() {
 		var accumulator workflowOutputAccumulator
 		deliver := true
+		var sequence uint64
+		stamp := func(event Event) Event {
+			if w.durability != nil {
+				cp := w.durability.current()
+				sequence++
+				event.RunID = cp.RunID
+				event.ExecutionID = cp.ExecutionID
+				event.Sequence = sequence
+				if event.Checkpoint != nil {
+					event.CheckpointRevision = event.Checkpoint.Revision
+				}
+				if event.StageID == "" {
+					event.StageID = w.stageID
+				}
+				if event.Source.Kind == SourceMiddleware {
+					event.StageID = cp.Stages[event.Source.Index].ID
+				}
+			}
+			return event
+		}
+		if w.durability != nil && w.durability.resumed && !w.durableChild {
+			checkpoint := w.durability.resumeCheckpoint.Clone()
+			deliver = sendWorkflowEvent(ctx, out, stamp(Event{Type: EventResumed, Source: EventSource{Kind: SourceWorkflow}, Checkpoint: &checkpoint}), deliver)
+		}
 		for event := range upstream {
 			if event.Type == EventDone || event.Type == EventError || event.Type == EventCanceled {
 				continue
 			}
 			accumulator.add(event)
-			deliver = sendWorkflowEvent(ctx, out, cloneEvent(event), deliver)
+			if !event.Replayed {
+				deliver = sendWorkflowEvent(ctx, out, stamp(cloneEvent(event)), deliver)
+			}
 		}
 		w.middlewareDone.Wait()
 		<-w.primaryDone
@@ -201,23 +227,48 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 		}
 		w.recordStageErrorsLocked(stageErrs)
 		terminal := Event{Type: EventDone, Source: EventSource{Kind: SourceWorkflow}}
+		w.result.Status = StatusSucceeded
+		if w.durability != nil && w.durability.current().Status == StatusPaused {
+			w.result.Status = StatusPaused
+		}
 		switch {
 		case w.result.Canceled:
+			w.result.Status = StatusCanceled
 			terminal.Type = EventCanceled
 			terminal.Err = w.result.CancellationErr
 			w.terminalErr = w.result.CancellationErr
 		case len(w.result.Errors) > 0:
+			w.result.Status = StatusFailed
 			terminal.Type = EventError
 			terminal.Err = errors.Join(w.result.Errors...)
 			w.terminalErr = terminal.Err
+		case w.result.Status == StatusPaused:
+			terminal.Type = EventPaused
 		}
 		result := cloneWorkflowResult(w.result)
 		result.Complete = true
 		w.mu.Unlock()
 
+		if w.durability != nil {
+			if !w.durableChild && result.Status != StatusPaused {
+				if err := w.durability.commit(ctx, func(cp *Checkpoint) { cp.Status = result.Status }); err != nil {
+					terminal.Type = EventError
+					terminal.Err = err
+					w.mu.Lock()
+					w.terminalErr = err
+					w.result.Errors = append(w.result.Errors, err)
+					w.result.Status = StatusFailed
+					result = cloneWorkflowResult(w.result)
+					result.Complete = true
+					w.mu.Unlock()
+				}
+			}
+			terminal.Checkpoint = w.durability.snapshot()
+			result.Checkpoint = terminal.Checkpoint
+		}
 		obs.Finished(ctx, result)
 		runObs.Finished(result)
-		sendTerminalWorkflowEvent(ctx, out, terminal, deliver)
+		sendTerminalWorkflowEvent(ctx, out, stamp(terminal), deliver)
 		w.mu.Lock()
 		w.result.Complete = true
 		close(out)
