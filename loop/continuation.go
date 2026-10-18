@@ -13,8 +13,10 @@ import (
 	"github.com/lace-ai/gai/modelinput"
 )
 
+// ContinuationVersion identifies the loop's semantic snapshot schema.
 const ContinuationVersion = 1
 
+// ContinuationPhase identifies the next operation after restoring loop state.
 type ContinuationPhase string
 
 const (
@@ -43,11 +45,13 @@ type Invocation struct {
 }
 type invocationKey struct{}
 
+// InvocationFromContext returns durable invocation metadata for an executing handler.
 func InvocationFromContext(ctx context.Context) (Invocation, bool) {
 	v, ok := ctx.Value(invocationKey{}).(Invocation)
 	return v, ok
 }
 
+// InvocationDisposition describes acknowledged admission and result progress.
 type InvocationDisposition string
 
 const (
@@ -81,6 +85,8 @@ type Generation struct {
 	UsageReported bool               `json:"usage_reported"`
 	Invocations   []InvocationRecord `json:"invocations,omitempty"`
 }
+
+// GenerationUsage records provider-reported costs independently of acceptance.
 type GenerationUsage struct {
 	ID       string   `json:"id"`
 	Usage    ai.Usage `json:"usage"`
@@ -106,6 +112,7 @@ type Continuation struct {
 	Steering              []ai.Message         `json:"steering,omitempty"`
 }
 
+// Clone detaches validated continuation state without retaining runtime objects.
 func (c Continuation) Clone() Continuation {
 	// All continuation fields are JSON values; no error interfaces or callbacks.
 	data, _ := json.Marshal(c)
@@ -114,6 +121,7 @@ func (c Continuation) Clone() Continuation {
 	return copy
 }
 
+// Validate checks schema, canonical messages, identities and invocation consistency.
 func (c Continuation) Validate() error {
 	if _, err := json.Marshal(c); err != nil {
 		return ErrContinuation
@@ -196,6 +204,8 @@ func (c Continuation) Validate() error {
 	}
 	return nil
 }
+
+// sameJSON compares materialized payloads without relying on Go pointer identity.
 func sameJSON(a, b any) bool {
 	x, e := json.Marshal(a)
 	y, f := json.Marshal(b)
@@ -206,6 +216,8 @@ func sameJSON(a, b any) bool {
 // acknowledge the exact snapshot before returning nil. Applications normally use
 // agent.Durability, which adds revision ownership and workflow aggregation.
 // The loop invokes Commit serially and supplies detached values.
+// Settlement writes retain context values but detach execution cancellation;
+// Commit must enforce its own storage timeout. Admission writes remain cancelable.
 type ContinuationControl struct {
 	Revision                    func() uint64
 	RunID, ExecutionID, StageID string
@@ -216,13 +228,19 @@ type ContinuationControl struct {
 	DeferredApprovals           bool
 }
 
+// RecoveryRequiredError identifies effects or processed output requiring an
+// explicit application resolution before the workflow can continue.
 type RecoveryRequiredError struct{ Invocations []InvocationRecord }
 
+// Error reports the number of unresolved invocations without exposing their payloads.
 func (e *RecoveryRequiredError) Error() string {
 	return fmt.Sprintf("%v: %d unresolved invocation(s)", ErrRecoveryRequired, len(e.Invocations))
 }
+
+// Unwrap allows errors.Is to identify a recovery-required outcome.
 func (e *RecoveryRequiredError) Unwrap() error { return ErrRecoveryRequired }
 
+// ToolRecoveryAction selects the application's assertion about an uncertain call.
 type ToolRecoveryAction string
 
 const (
@@ -304,6 +322,7 @@ func (c *Continuation) ResolveRecovery(resolutions []ToolRecoveryResolution) err
 	return nil
 }
 
+// ApplyApprovals binds decisions to saved requests and rejects conflicting decisions.
 func (c *Continuation) ApplyApprovals(decisions []ToolApprovalDecision) error {
 	seen := map[string]bool{}
 	for _, decision := range decisions {
@@ -352,6 +371,7 @@ func (c *Continuation) CancelUnstarted() error {
 	return nil
 }
 
+// Iterations reconstructs accepted semantic history without pending invocations.
 func (c Continuation) Iterations() []Iteration {
 	result := make([]Iteration, len(c.Generations))
 	for i, g := range c.Generations {
@@ -359,6 +379,8 @@ func (c Continuation) Iterations() []Iteration {
 	}
 	return result
 }
+
+// iteration restores canonical messages and processed tool diagnostics.
 func (g Generation) iteration() Iteration {
 	it := Iteration{Count: g.Iteration, Conversation: ai.CloneMessages(g.Messages), inputMessages: g.InputMessages, Usage: g.Usage, UsageReported: g.UsageReported}
 	for _, inv := range g.Invocations {
@@ -367,6 +389,8 @@ func (g Generation) iteration() Iteration {
 	}
 	return it
 }
+
+// restoredResult adapts canonical processed output to live execution diagnostics.
 func restoredResult(r *ai.ToolResult) *ToolResult {
 	if r == nil {
 		return nil
@@ -377,6 +401,8 @@ func restoredResult(r *ai.ToolResult) *ToolResult {
 	}
 	return v
 }
+
+// generationFromIteration snapshots accepted semantic state without runtime diagnostics.
 func generationFromIteration(id string, attempt int, it Iteration) Generation {
 	return Generation{ID: id, Iteration: it.Count, Attempt: attempt, Messages: ai.CloneMessages(it.Conversation), InputMessages: it.inputMessages, Usage: it.Usage, UsageReported: it.UsageReported}
 }
@@ -389,14 +415,26 @@ type durableLoop struct {
 	events       chan<- Event
 }
 
+// commit acknowledges progress using the live execution context before new work.
 func (d *durableLoop) commit(ctx context.Context) error {
+	return d.commitWithContexts(ctx, ctx)
+}
+
+// commitSettled saves known outcomes after cancellation without detaching event
+// delivery. The application still owns storage timeouts and ownership fencing.
+func (d *durableLoop) commitSettled(ctx context.Context) error {
+	return d.commitWithContexts(context.WithoutCancel(ctx), ctx)
+}
+
+// commitWithContexts keeps storage acknowledgement distinct from live delivery.
+func (d *durableLoop) commitWithContexts(storageCtx, eventCtx context.Context) error {
 	if d.failed != nil {
 		return d.failed
 	}
 	if err := d.state.Validate(); err != nil {
 		return err
 	}
-	if err := d.control.Commit(ctx, d.state.Clone()); err != nil {
+	if err := d.control.Commit(storageCtx, d.state.Clone()); err != nil {
 		d.failed = fmt.Errorf("%w: %w", ErrCheckpointCommit, err)
 		return d.failed
 	}
@@ -405,14 +443,25 @@ func (d *durableLoop) commit(ctx context.Context) error {
 		if d.control.Revision != nil {
 			event.CheckpointRevision = d.control.Revision()
 		}
-		return sendEvent(ctx, d.events, event)
+		err := sendEvent(eventCtx, d.events, event)
+		if eventCtx.Err() != nil && errors.Is(err, eventCtx.Err()) && storageCtx.Err() == nil {
+			// Storage acknowledged settlement; a canceled consumer does not undo it.
+			return nil
+		}
+		return err
 	}
 	return nil
 }
+
+// pausing checks the cooperative pause request without acknowledging suspension.
 func (d *durableLoop) pausing() bool {
 	return d != nil && d.control.PauseRequested != nil && d.control.PauseRequested()
 }
+
+// identity separates physical execution identity from the logical run and generation.
 func (d *durableLoop) identity() Invocation {
 	return Invocation{RunID: d.control.RunID, ExecutionID: d.control.ExecutionID, StageID: d.control.StageID, GenerationID: d.generationID}
 }
+
+// newIdentity allocates an identity that is persisted before it can authorize work.
 func newIdentity() string { return rand.Text() }

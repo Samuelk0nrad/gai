@@ -35,6 +35,8 @@ If acknowledgement is ambiguous, the callback must reload and compare both the p
 
 `Resume` claims ownership by committing a fresh execution identity against the loaded revision before model or tool work starts. CAS alone cannot revoke effects already started by another worker. Use leases/fencing and external idempotency where required. Commit callbacks may call `Result` or `RequestPause`, but must not synchronously wait for the workflow to finish or consume its event stream.
 
+Persistence of settled tool results, terminal provider usage, and stage/workflow termination retains context values but detaches execution cancellation. The callback must enforce its own storage timeout. This lets a cooperative cancellation save known outcomes and `StatusCanceled` without keeping event consumers alive. Admission writes still use the live execution context. A genuine storage failure remains a checkpoint error, including during cancellation; GAI does not claim cancellation was durably recorded when that write failed.
+
 Checkpoints contain selected prompts, user content, tool arguments and processed results. Apply the application's access, encryption and retention rules. Raw output rejected by the tool result processor is not checkpointed. Error text in saved stage failures is deliberately reduced to safe classifications.
 
 ## Pause and resume
@@ -51,6 +53,14 @@ result, err := resumed.Run(ctx)
 ```
 
 The logical run ID stays the same; each handle gets a new execution ID. A checkpoint whose status is `StatusSucceeded` or `StatusCanceled` cannot be resumed. A failed execution can recover from its last acknowledged continuation, subject to limits and tool reconciliation. Total timeout uses an absolute logical deadline; pause and recovery do not grant additional time. Interrupted model attempts consume retry budget and get new generation identities. Accepted tool plans are never regenerated.
+
+| Transition | Preserved state and behavior |
+| --- | --- |
+| Provider retry | Starts a new physical model attempt under the existing retry policy and consumed retry budget. |
+| Generation discard | Rejects that response from accepted conversation while retaining its billed usage and consumed iteration. |
+| Workflow recovery | Restores committed prompt, conversation, pending plan, tool ledger, approvals, stage/output decisions, commands, counters, usage, and deadline. It reconciles uncertain effects before continuing. |
+
+`Resume` validates saved loop settings and reattached dependencies before claiming the checkpoint. A failed restore leaves stored status, execution identity and revision untouched. Propagated middleware setup failures remain unfinished so a later resume can retry mapping or child construction; `RecordError` deliberately completes and retains an accepted failure.
 
 Persist explicit user cancellation in the application's control inbox so a queue cannot revive an older checkpoint. A canceled context alone cannot guarantee durable cancellation. For worker shutdown, request pause; for ownership loss, fence writes and cancel the context.
 

@@ -16,9 +16,13 @@ import (
 	"github.com/lace-ai/gai/modelinput"
 )
 
+// CheckpointVersion identifies the workflow snapshot schema accepted by Resume.
 const CheckpointVersion = 1
+
+// PrimaryStageID is the stable identity of the workflow's primary agent.
 const PrimaryStageID = "primary"
 
+// WorkflowStatus distinguishes a finished execution from the logical run outcome.
 type WorkflowStatus string
 
 const (
@@ -46,6 +50,8 @@ var (
 // stops admission; GAI does not retry the callback or a side-effecting tool.
 // Storage, worker leases/fencing, cancellation intent and external idempotency
 // remain application-owned. Commit may call Result or RequestPause.
+// Settled outcomes and terminal status use a context that retains values but
+// detaches execution cancellation. Commit must enforce its own storage timeout.
 type Durability struct {
 	DefinitionRevision string
 	Commit             func(context.Context, uint64, Checkpoint) error
@@ -54,6 +60,7 @@ type Durability struct {
 	DeferredApprovals bool
 }
 
+// PendingToolAction selects how steering handles undispatched accepted calls.
 type PendingToolAction string
 
 const (
@@ -136,6 +143,7 @@ func (c *Checkpoint) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// normalizeDurableMeta makes initial and restored inputs share lossless JSON types.
 func normalizeDurableMeta(meta map[string]any) (map[string]any, error) {
 	data, err := json.Marshal(meta)
 	if err != nil {
@@ -150,6 +158,7 @@ func normalizeDurableMeta(meta map[string]any) (map[string]any, error) {
 	return normalized, nil
 }
 
+// Clone detaches a validated checkpoint for callback or caller ownership.
 func (c Checkpoint) Clone() Checkpoint {
 	data, _ := json.Marshal(c)
 	var copy Checkpoint
@@ -218,6 +227,7 @@ type checkpointCoordinator struct {
 	resumeCheckpoint *Checkpoint
 }
 
+// snapshot returns only acknowledged state, or nil before the first commit.
 func (d *checkpointCoordinator) snapshot() *Checkpoint {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -227,11 +237,32 @@ func (d *checkpointCoordinator) snapshot() *Checkpoint {
 	c := d.latest.Clone()
 	return &c
 }
+
+// current detaches coordinator state before proposing the next revision.
 func (d *checkpointCoordinator) current() Checkpoint {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.state.Clone()
 }
+
+// eventIdentity reads immutable stream identifiers without copying payloads.
+func (d *checkpointCoordinator) eventIdentity(stageIndex int) (runID, executionID, stageID string) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if stageIndex >= 0 && stageIndex < len(d.state.Stages) {
+		stageID = d.state.Stages[stageIndex].ID
+	}
+	return d.state.RunID, d.state.ExecutionID, stageID
+}
+
+// revision reads the last acknowledged revision without copying its contents.
+func (d *checkpointCoordinator) revision() uint64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.state.Revision
+}
+
+// commit serializes CAS transitions and latches storage failures to fence admission.
 func (d *checkpointCoordinator) commit(ctx context.Context, change func(*Checkpoint)) error {
 	d.commitMu.Lock()
 	defer d.commitMu.Unlock()
@@ -260,6 +291,8 @@ func (d *checkpointCoordinator) commit(ctx context.Context, change func(*Checkpo
 	d.mu.Unlock()
 	return nil
 }
+
+// stage returns an isolated stage record without exposing coordinator-owned data.
 func (d *checkpointCoordinator) stage(id string) StageCheckpoint {
 	for _, s := range d.current().Stages {
 		if s.ID == id {
@@ -268,6 +301,8 @@ func (d *checkpointCoordinator) stage(id string) StageCheckpoint {
 	}
 	return StageCheckpoint{}
 }
+
+// changeStage applies a transition to the registered durable stage identity.
 func changeStage(c *Checkpoint, id string, change func(*StageCheckpoint)) {
 	for i := range c.Stages {
 		if c.Stages[i].ID == id {
@@ -276,22 +311,21 @@ func changeStage(c *Checkpoint, id string, change func(*StageCheckpoint)) {
 		}
 	}
 }
+
+// control connects one loop to the aggregate checkpoint coordinator.
 func (d *checkpointCoordinator) control(stageID string) *loop.ContinuationControl {
 	stage := d.stage(stageID)
 	state := d.current()
-	return &loop.ContinuationControl{RunID: state.RunID, ExecutionID: state.ExecutionID, StageID: stageID, Initial: stage.Continuation, Revision: func() uint64 {
-		c := d.snapshot()
-		if c == nil {
-			return 0
-		}
-		return c.Revision
-	}, DeferredApprovals: d.durability.DeferredApprovals, PauseRequested: d.pause.Load, PauseSignal: d.pauseSignal, Commit: func(ctx context.Context, c loop.Continuation) error {
+	return &loop.ContinuationControl{RunID: state.RunID, ExecutionID: state.ExecutionID, StageID: stageID, Initial: stage.Continuation, Revision: d.revision, DeferredApprovals: d.durability.DeferredApprovals, PauseRequested: d.pause.Load, PauseSignal: d.pauseSignal, Commit: func(ctx context.Context, c loop.Continuation) error {
 		return d.commit(ctx, func(cp *Checkpoint) {
 			cp.ActiveStageID = stageID
 			changeStage(cp, stageID, func(s *StageCheckpoint) { s.Continuation = &c })
 		})
 	}}
 }
+
+// RequestPause cooperatively stops new work at an execution boundary.
+// It returns immediately; Wait or EventPaused acknowledges the committed pause.
 func (w *Workflow) RequestPause() error {
 	if w == nil || w.durability == nil {
 		return ErrDurability
@@ -307,6 +341,8 @@ func (w *Workflow) RequestPause() error {
 	d.pauseOnce.Do(func() { close(d.pauseSignal) })
 	return nil
 }
+
+// validateDurability rejects unsupported definitions before durable execution begins.
 func validateDurability(a *Agent, input RunInput) error {
 	if input.Durability == nil {
 		return nil
@@ -338,12 +374,16 @@ func validateDurability(a *Agent, input RunInput) error {
 	}
 	return nil
 }
+
+// validateDurableOverrides keeps live dependencies in the compatible Definition.
 func validateDurableOverrides(o *ExecutionOverrides) error {
 	if o != nil && (o.Model != nil || o.Tools != nil || o.ToolPolicy.Set || o.ToolApprovalResolver.Set || o.TokenCounter.Set || o.ToolResultProcessor.Set || o.RetryPolicy.Set) {
 		return fmt.Errorf("%w: durable dependencies and retry policy must be registered in Definition", ErrDurability)
 	}
 	return nil
 }
+
+// configureDurability registers stable stages without starting execution or persistence.
 func (w *Workflow) configureDurability(a *Agent, input RunInput) error {
 	if input.Durability == nil {
 		return nil
@@ -460,6 +500,20 @@ func (a *Agent) Resume(ctx context.Context, checkpoint Checkpoint, input ResumeI
 	if err := checkpoint.Validate(); err != nil {
 		return nil, err
 	}
+	// Validate restored dependencies before changing checkpoint ownership.
+	primary := checkpoint.Stages[0]
+	l, err := a.restoreCheckpointLoop(primary)
+	if err != nil {
+		return nil, err
+	}
+	for i, item := range a.def.Middleware {
+		stage := checkpoint.Stages[i+1]
+		if stage.Continuation != nil && !stage.Complete {
+			if _, err := item.(*AgentMiddleware).agent.restoreCheckpointLoop(stage); err != nil {
+				return nil, err
+			}
+		}
+	}
 	checkpoint.ExecutionID = rand.Text()
 	checkpoint.Status = StatusRunning
 	d := &checkpointCoordinator{state: checkpoint, durability: durability, pauseSignal: make(chan struct{}), resumed: true}
@@ -467,11 +521,6 @@ func (a *Agent) Resume(ctx context.Context, checkpoint Checkpoint, input ResumeI
 		return nil, err
 	}
 	d.resumeCheckpoint = d.snapshot()
-	primary := d.stage(PrimaryStageID)
-	l, err := a.restoreCheckpointLoop(primary)
-	if err != nil {
-		return nil, err
-	}
 	runInput := RunInput{ID: checkpoint.RunID, Meta: primary.Input.Meta, TraceContext: primary.Input.TraceContext, Durability: &durability, Execution: restoreOverrides(primary.Input.ScalarExecution)}
 	if primary.Continuation != nil && primary.Continuation.Prompt != nil {
 		runInput.Prompt = primary.Continuation.Prompt.Input()

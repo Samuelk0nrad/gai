@@ -10,6 +10,7 @@ import (
 	"github.com/lace-ai/gai/modelinput"
 )
 
+// prepareContinuation restores consumed limits and the original logical deadline.
 func (r *runExecution) prepareContinuation() error {
 	control := r.owner.Continuation
 	if control == nil {
@@ -63,6 +64,7 @@ func (r *runExecution) prepareContinuation() error {
 	return nil
 }
 
+// materializeContinuation freezes selected input before any model or tool work.
 func (r *runExecution) materializeContinuation() error {
 	d := r.owner.durable
 	if d == nil {
@@ -93,6 +95,8 @@ func (r *runExecution) materializeContinuation() error {
 	}
 	return d.commit(r.ctx)
 }
+
+// continuationBoundary acknowledges pause or appends steering after pending results.
 func (r *runExecution) continuationBoundary() bool {
 	d := r.owner.durable
 	if d == nil {
@@ -117,6 +121,8 @@ func (r *runExecution) continuationBoundary() bool {
 	}
 	return false
 }
+
+// pauseContinuation commits settled state before emitting the paused outcome.
 func (r *runExecution) pauseContinuation() {
 	d := r.owner.durable
 	if err := d.commit(r.ctx); err != nil {
@@ -132,6 +138,8 @@ func (r *runExecution) pauseContinuation() {
 	}
 	_ = sendEvent(r.ctx, r.events, event)
 }
+
+// resumePending continues the saved assistant plan without regenerating it.
 func (r *runExecution) resumePending() iterationOutcome {
 	d := r.owner.durable
 	g := d.state.Pending
@@ -147,8 +155,8 @@ func (r *runExecution) resumePending() iterationOutcome {
 	for _, m := range g.Messages {
 		if m.Role == ai.RoleAssistant {
 			for _, part := range m.Parts {
-				if part.Kind == ai.ContentText || part.Kind == ai.ContentReasoning {
-					token := ai.Token{Part: &part}
+				token := ai.Token{Part: &part}
+				if token.Type() == ai.TokenTypeText || token.Type() == ai.TokenTypeThought {
 					if err := sendEvent(r.ctx, r.events, TokenEvent(g.Iteration, g.Attempt, r.state.retryCount, token)); err != nil {
 						a.terminateSendFailure(err)
 						return iterationTerminal
@@ -159,6 +167,8 @@ func (r *runExecution) resumePending() iterationOutcome {
 	}
 	return r.postAttempt(a, false)
 }
+
+// commitModelStart reserves generation identity and attempt budget before the provider call.
 func (r *runExecution) commitModelStart(a *attemptExecution) error {
 	d := r.owner.durable
 	if d == nil {
@@ -173,6 +183,8 @@ func (r *runExecution) commitModelStart(a *attemptExecution) error {
 	d.state.RetryCount = r.state.retryCount
 	return d.commit(r.ctx)
 }
+
+// commitPlan acknowledges the exact accepted message and stable invocation identities.
 func (r *runExecution) commitPlan(a *attemptExecution) error {
 	d := r.owner.durable
 	if d == nil {
@@ -190,6 +202,8 @@ func (r *runExecution) commitPlan(a *attemptExecution) error {
 	d.account(g.ID, a.iteration)
 	return d.commit(r.ctx)
 }
+
+// account replaces usage by generation identity and retains missing-accounting status.
 func (d *durableLoop) account(id string, it Iteration) {
 	for index, v := range d.state.Usage {
 		if v.ID == id {
@@ -205,6 +219,8 @@ func (d *durableLoop) account(id string, it Iteration) {
 		d.state.UsageIncomplete = true
 	}
 }
+
+// commitDiscard preserves billed usage and consumed iterations for rejected generations.
 func (r *runExecution) commitDiscard(a *attemptExecution) error {
 	d := r.owner.durable
 	if d == nil {
@@ -217,6 +233,8 @@ func (r *runExecution) commitDiscard(a *attemptExecution) error {
 	d.state.RetryCount = 0
 	return d.commit(r.ctx)
 }
+
+// commitRetry preserves usage and retry budget before scheduling another attempt.
 func (r *runExecution) commitRetry(a *attemptExecution) error {
 	d := r.owner.durable
 	if d == nil {
@@ -227,6 +245,8 @@ func (r *runExecution) commitRetry(a *attemptExecution) error {
 	d.state.RetryCount = r.state.retryCount
 	return d.commit(r.ctx)
 }
+
+// commitIteration accepts a resolved generation before the next model request.
 func (r *runExecution) commitIteration(a *attemptExecution, final bool) error {
 	d := r.owner.durable
 	if d == nil {
@@ -247,6 +267,8 @@ func (r *runExecution) commitIteration(a *attemptExecution, final bool) error {
 	}
 	return d.commit(r.ctx)
 }
+
+// invocation builds handler metadata from the acknowledged invocation ledger.
 func (d *durableLoop) invocation(index int) Invocation {
 	v := d.identity()
 	inv := d.state.Pending.Invocations[index]
@@ -254,6 +276,8 @@ func (d *durableLoop) invocation(index int) Invocation {
 	v.Attempt = inv.Attempt
 	return v
 }
+
+// beforeDispatch fences handlers behind acknowledged intent and honors a concurrent pause.
 func (d *durableLoop) beforeDispatch(ctx context.Context, index int, execution ToolExecution, synthetic bool) error {
 	if d.pausing() {
 		return ErrPaused
@@ -271,6 +295,9 @@ func (d *durableLoop) beforeDispatch(ctx context.Context, index int, execution T
 	if d.pausing() {
 		inv.Disposition = InvocationPlanned
 		inv.Execution.State = ToolNotStarted
+		if !synthetic {
+			inv.Attempt--
+		}
 		if err := d.commit(ctx); err != nil {
 			return err
 		}
@@ -278,6 +305,8 @@ func (d *durableLoop) beforeDispatch(ctx context.Context, index int, execution T
 	}
 	return nil
 }
+
+// completed saves processed outcomes independently, including during cancellation.
 func (d *durableLoop) completed(ctx context.Context, done toolCompletion) error {
 	inv := &d.state.Pending.Invocations[done.index]
 	inv.Execution = done.execution
@@ -286,8 +315,10 @@ func (d *durableLoop) completed(ctx context.Context, done toolCompletion) error 
 	if done.result != nil {
 		inv.Result = &ai.ToolResult{ToolCallID: inv.Call.ID, Name: inv.Call.Name, Parts: ai.TextParts(done.result.String()), IsError: done.result.Err != nil}
 	}
-	return d.commit(ctx)
+	return d.commitSettled(ctx)
 }
+
+// prepareTasks restores completed results and rejects unresolved output failures.
 func (d *durableLoop) prepareTasks(tasks []scheduledTool) error {
 	if d.state.Pending == nil || len(tasks) != len(d.state.Pending.Invocations) {
 		return ErrContinuation
@@ -307,6 +338,8 @@ func (d *durableLoop) prepareTasks(tasks []scheduledTool) error {
 	}
 	return nil
 }
+
+// deferredApprovals persists requests or decisions before admission and rechecks policy.
 func (d *durableLoop) deferredApprovals(ctx context.Context, l *Loop, tasks []scheduledTool, events chan<- Event, iteration, attempt, retry int) error {
 	pending := false
 	for i := range tasks {
@@ -370,6 +403,7 @@ func (d *durableLoop) deferredApprovals(ctx context.Context, l *Loop, tasks []sc
 // Identity is attached at the loop event boundary by the single coordinator.
 type durableEventKey struct{}
 
+// stampLoopEvent attaches recovery identities at the coordinator-owned event boundary.
 func stampLoopEvent(ctx context.Context, event Event) Event {
 	d, _ := ctx.Value(durableEventKey{}).(*durableLoop)
 	if d == nil {
@@ -387,13 +421,21 @@ func stampLoopEvent(ctx context.Context, event Event) Event {
 	return event
 }
 
+// isPause distinguishes cooperative suspension from execution failure.
 func isPause(err error) bool { return errors.Is(err, ErrPaused) }
 
+// commitTerminalUsage preserves known costs without granting another model attempt.
 func (a *attemptExecution) commitTerminalUsage() error {
 	d := a.run.owner.durable
-	if d == nil || d.failed != nil || a.generationID == "" {
+	if d == nil {
+		return nil
+	}
+	if d.failed != nil {
+		return d.failed
+	}
+	if a.generationID == "" {
 		return nil
 	}
 	d.account(a.generationID, a.iteration)
-	return d.commit(a.run.ctx)
+	return d.commitSettled(a.run.ctx)
 }

@@ -76,6 +76,9 @@ var errStore = errors.New("storage unavailable")
 var errStale = errors.New("stale revision")
 
 func (s *checkpointStore) commit(ctx context.Context, revision uint64, next agent.Checkpoint) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if s.hook != nil {
 		if err := s.hook(next); err != nil {
 			return err

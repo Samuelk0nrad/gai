@@ -17,6 +17,7 @@ type Snapshot struct {
 	Budget   ai.RequestBudgetConfig `json:"budget"`
 }
 
+// Clone detaches canonical messages, user content and materialized context.
 func (s Snapshot) Clone() Snapshot {
 	s.Messages = ai.CloneMessages(s.Messages)
 	s.User = ai.CloneParts(s.User)
@@ -76,13 +77,18 @@ type PartSnapshot struct {
 }
 type frozenPart struct{ snapshot PartSnapshot }
 
+// Name preserves the semantic name of the original context part.
 func (p frozenPart) Name() string { return p.snapshot.PartName }
+
+// Render returns frozen content without invoking the original renderer.
 func (p frozenPart) Render(ctx context.Context) (RenderNode, error) {
 	data, _ := json.Marshal(p.snapshot.Node)
 	var node RenderNode
 	_ = json.Unmarshal(data, &node)
 	return node, ctx.Err()
 }
+
+// Tokens counts frozen content locally without refreshing its source.
 func (p frozenPart) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
 	data, err := json.Marshal(p.snapshot.Node)
 	if err != nil {
@@ -93,6 +99,7 @@ func (p frozenPart) Tokens(ctx context.Context, counter ai.TokenCounter) (int, e
 
 type frozenConversationPart struct{ frozenPart }
 
+// ConversationMessages returns a detached canonical context transcript.
 func (p frozenConversationPart) ConversationMessages() []ai.Message {
 	return ai.CloneMessages(p.snapshot.Messages)
 }
@@ -111,6 +118,8 @@ func (s Snapshot) Input() PromptInput {
 	}
 	return input
 }
+
+// snapshotParts materializes interface-valued context for later workflow input mapping.
 func snapshotParts(ctx context.Context, parts []Part) ([]PartSnapshot, error) {
 	var result []PartSnapshot
 	for _, part := range parts {

@@ -593,6 +593,14 @@ func (a *attemptExecution) terminateError(err error) attemptOutcome {
 }
 
 func (a *attemptExecution) terminateCanceled(err error) attemptOutcome {
+	if commitErr := a.commitTerminalUsage(); commitErr != nil {
+		failure := errors.Join(err, commitErr)
+		a.run.state.fail(failure)
+		sendTerminalEvent(a.run.ctx, a.run.events, AttemptErrorEvent(a.iteration.Count, a.state.attemptID(), a.run.state.retryCount, &a.iteration, failure))
+		a.cancelAttempt()
+		a.finish(failure)
+		return attemptTerminal
+	}
 	sendAttemptCanceled(a.run.ctx, a.run.events, a.run.state, a.iteration.Count, a.state.attemptID(), a.run.state.retryCount, &a.iteration, err)
 	a.cancelAttempt()
 	a.state.markCanceled(err)

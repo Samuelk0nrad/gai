@@ -20,9 +20,12 @@ type checkpointSettings struct {
 	RequestBudget  *ai.RequestBudgetConfig  `json:"request_budget,omitempty"`
 }
 
+// settingsForLoop captures serializable settings, excluding runtime dependencies.
 func settingsForLoop(l *loop.Loop) *checkpointSettings {
 	return &checkpointSettings{MaxIterations: l.MaxLoopIterations, MaxTokens: l.MaxTokens, ToolExecution: l.ToolExecution, ToolChoice: cloneToolChoice(l.ToolChoice), ToolTransport: l.ToolTransport, ResponseFormat: cloneResponseFormat(l.ResponseFormat), Reasoning: l.Reasoning, RequestBudget: clonePointer(l.RequestBudget)}
 }
+
+// restoreCheckpointLoop validates a loop rebuilt from frozen input and live dependencies.
 func (a *Agent) restoreCheckpointLoop(stage StageCheckpoint) (*loop.Loop, error) {
 	if stage.Settings == nil || stage.Continuation == nil || stage.Continuation.Prompt == nil {
 		return nil, ErrCheckpoint
@@ -51,8 +54,10 @@ func (a *Agent) restoreCheckpointLoop(stage StageCheckpoint) (*loop.Loop, error)
 	}
 	return l, nil
 }
+
+// finishStage saves stage termination even when the execution context has ended.
 func (d *checkpointCoordinator) finishStage(ctx context.Context, id string, result AgentResult, paused bool) error {
-	return d.commit(ctx, func(cp *Checkpoint) {
+	return d.commit(context.WithoutCancel(ctx), func(cp *Checkpoint) {
 		if paused {
 			cp.Status = StatusPaused
 		}
@@ -66,6 +71,8 @@ func (d *checkpointCoordinator) finishStage(ctx context.Context, id string, resu
 		})
 	})
 }
+
+// checkpointAgentResult reconstructs accepted conversation and known billed usage.
 func checkpointAgentResult(stage StageCheckpoint) AgentResult {
 	var result AgentResult
 	if stage.Continuation != nil {
@@ -92,6 +99,8 @@ func checkpointAgentResult(stage StageCheckpoint) AgentResult {
 	}
 	return result
 }
+
+// replayResultOutput projects saved assistant parts through the live output conversion.
 func replayResultOutput(result AgentResult, source EventSource, continuation *loop.Continuation) []Event {
 	var events []Event
 	for index, it := range result.Iterations {
@@ -101,15 +110,11 @@ func replayResultOutput(result AgentResult, source EventSource, continuation *lo
 				continue
 			}
 			for _, p := range m.Parts {
-				var part *OutputPart
-				switch p.Kind {
-				case ai.ContentText:
-					part = &OutputPart{Kind: OutputText, Text: p.Text}
-				case ai.ContentReasoning:
-					part = &OutputPart{Kind: OutputReasoning, Text: p.Text}
-				}
-				if part != nil {
-					events = append(events, Event{Type: EventOutput, Source: source, IterationCount: it.Count, AttemptID: generation.Attempt, GenerationID: generation.ID, Output: part, Replayed: true})
+				event, emit := mapLoopEvent(loop.TokenEvent(it.Count, generation.Attempt, 0, ai.Token{Part: &p}), source)
+				if emit {
+					event.GenerationID = generation.ID
+					event.Replayed = true
+					events = append(events, event)
 				}
 			}
 		}
@@ -117,6 +122,7 @@ func replayResultOutput(result AgentResult, source EventSource, continuation *lo
 	return events
 }
 
+// finishDurablePrimary preserves completed stages instead of writing them again.
 func (w *Workflow) finishDurablePrimary(ctx context.Context, result AgentResult, paused bool) error {
 	if w.durability.stage(w.stageID).Complete {
 		return nil
@@ -124,6 +130,7 @@ func (w *Workflow) finishDurablePrimary(ctx context.Context, result AgentResult,
 	return w.durability.finishStage(ctx, w.stageID, result, paused)
 }
 
+// checkpointError keeps raw processor failures out of persistent snapshots.
 func checkpointError(err error) string {
 	switch {
 	case errors.Is(err, loop.ErrToolResultProcess):
@@ -149,6 +156,7 @@ type checkpointOverrides struct {
 	AutoCompactHistory *bool                             `json:"auto_compact_history,omitempty"`
 }
 
+// snapshotOverrides retains scalar overrides for restored middleware input.
 func snapshotOverrides(o *ExecutionOverrides) *checkpointOverrides {
 	if o == nil {
 		return nil
@@ -156,6 +164,8 @@ func snapshotOverrides(o *ExecutionOverrides) *checkpointOverrides {
 	o = cloneExecution(o)
 	return &checkpointOverrides{Limits: o.Limits, ToolExecution: o.ToolExecution, ToolChoice: o.ToolChoice, ResponseFormat: o.ResponseFormat, Reasoning: o.Reasoning, RequestBudget: o.RequestBudget, AutoCompactHistory: o.AutoCompactHistory}
 }
+
+// restoreOverrides rehydrates scalar execution overrides without runtime objects.
 func restoreOverrides(o *checkpointOverrides) *ExecutionOverrides {
 	if o == nil {
 		return nil

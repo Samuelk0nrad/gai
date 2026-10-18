@@ -24,12 +24,12 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StageFailed, Err: err})
 	}
 	stageFailure := func(err error) {
-		if commitErr := d.commit(ctx, func(cp *Checkpoint) {
+		if commitErr := d.commit(context.WithoutCancel(ctx), func(cp *Checkpoint) {
 			cp.ActiveStageID = m.config.ID
 			changeStage(cp, m.config.ID, func(s *StageCheckpoint) {
 				s.DecisionMade = true
 				s.ShouldRun = true
-				s.Complete = true
+				s.Complete = m.config.ErrorPolicy == RecordError
 				s.Errors = []string{checkpointError(err)}
 			})
 		}); commitErr != nil {
@@ -204,7 +204,7 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 		complete = true
 	}
 	// Persist the final stage/output decision before downstream stages begin.
-	if err := d.commit(ctx, func(cp *Checkpoint) { changeStage(cp, m.config.ID, func(s *StageCheckpoint) { s.Complete = complete }) }); err != nil {
+	if err := d.commit(context.WithoutCancel(ctx), func(cp *Checkpoint) { changeStage(cp, m.config.ID, func(s *StageCheckpoint) { s.Complete = complete }) }); err != nil {
 		fail(err)
 		return
 	}

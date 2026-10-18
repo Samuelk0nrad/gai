@@ -186,10 +186,10 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 		var sequence uint64
 		stamp := func(event Event) Event {
 			if w.durability != nil {
-				cp := w.durability.current()
+				runID, executionID, middlewareStageID := w.durability.eventIdentity(event.Source.Index)
 				sequence++
-				event.RunID = cp.RunID
-				event.ExecutionID = cp.ExecutionID
+				event.RunID = runID
+				event.ExecutionID = executionID
 				event.Sequence = sequence
 				if event.Checkpoint != nil {
 					event.CheckpointRevision = event.Checkpoint.Revision
@@ -198,7 +198,7 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 					event.StageID = w.stageID
 				}
 				if event.Source.Kind == SourceMiddleware {
-					event.StageID = cp.Stages[event.Source.Index].ID
+					event.StageID = middlewareStageID
 				}
 			}
 			return event
@@ -251,7 +251,7 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 
 		if w.durability != nil {
 			if !w.durableChild && result.Status != StatusPaused {
-				if err := w.durability.commit(ctx, func(cp *Checkpoint) { cp.Status = result.Status }); err != nil {
+				if err := w.durability.commit(context.WithoutCancel(ctx), func(cp *Checkpoint) { cp.Status = result.Status }); err != nil {
 					terminal.Type = EventError
 					terminal.Err = err
 					w.mu.Lock()

@@ -26,6 +26,7 @@ type jsonStore struct {
 	data     []byte
 }
 
+// commit demonstrates atomic revision checks for a process-local serialized snapshot.
 func (s *jsonStore) commit(_ context.Context, expected uint64, next agent.Checkpoint) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -40,6 +41,7 @@ func (s *jsonStore) commit(_ context.Context, expected uint64, next agent.Checkp
 	return nil
 }
 
+// load reconstructs runtime-independent state from saved JSON.
 func (s *jsonStore) load() (agent.Checkpoint, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -51,10 +53,12 @@ func (s *jsonStore) load() (agent.Checkpoint, error) {
 // scriptedModel uses the canonical transcript, so a fresh instance can continue.
 type scriptedModel struct{}
 
+// Descriptor enables native tool calls for the credential-free scripted model.
 func (scriptedModel) Descriptor() ai.ModelDescriptor {
 	return ai.ModelDescriptor{NativeTools: ai.FeatureSupportSupported}
 }
 
+// GenerateStream advances the example from the canonical transcript alone.
 func (scriptedModel) GenerateStream(ctx context.Context, request ai.AIRequest) <-chan ai.Token {
 	part := ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{Type: "function", ID: "provider-call", Name: "save", Args: json.RawMessage(`{}`)}}
 	for _, message := range request.Messages {
@@ -68,6 +72,7 @@ func (scriptedModel) GenerateStream(ctx context.Context, request ai.AIRequest) <
 	return out
 }
 
+// definition registers the same live dependencies for initial and resumed handles.
 func definition(effect func(string)) (agent.Definition, error) {
 	tool, err := loop.NewTool("save", "Save the approved operation", ai.ToolParameters{}, func(ctx context.Context, _ ai.ToolCall) (string, error) {
 		invocation, ok := loop.InvocationFromContext(ctx)
@@ -92,6 +97,7 @@ func definition(effect func(string)) (agent.Definition, error) {
 	}, nil
 }
 
+// run demonstrates approval before effects and reconstruction with a fresh agent.
 func run(ctx context.Context, out io.Writer) error {
 	store := &jsonStore{}
 	durability := agent.Durability{DefinitionRevision: "example-v1", DeferredApprovals: true, Commit: store.commit}
@@ -138,6 +144,7 @@ func run(ctx context.Context, out io.Writer) error {
 	return nil
 }
 
+// main runs the example and reports integration failures.
 func main() {
 	if err := run(context.Background(), os.Stdout); err != nil {
 		log.Fatal(err)
