@@ -49,6 +49,8 @@ const (
 
 // AgentMiddlewareConfig configures an agent as ordered event middleware.
 type AgentMiddlewareConfig struct {
+	// ID is a stable registration identity required for durable execution.
+	ID string
 	// Name identifies the stage. The agent name is used when empty.
 	Name string
 	// Output controls how the stage changes visible workflow output.
@@ -56,11 +58,13 @@ type AgentMiddlewareConfig struct {
 	// MapInput maps the accumulated workflow snapshot to the nested run. When nil, the
 	// current visible text is forwarded as named upstream_output context along
 	// with the original run ID and metadata. Execution overrides are not
-	// forwarded; the nested agent uses its own definition defaults.
+	// forwarded; the nested agent uses its own definition defaults. In durable
+	// mode this callback must be pure and deterministic; committed input is reused.
 	MapInput func(context.Context, WorkflowResult) (RunInput, error)
 	// ErrorPolicy controls whether stage failures fail the workflow.
 	ErrorPolicy ErrorPolicy
-	// ShouldRun overrides the default success-only policy.
+	// ShouldRun overrides the default success-only policy. In durable mode it
+	// must be pure and deterministic; committed decisions are reused.
 	ShouldRun func(WorkflowResult) bool
 }
 
@@ -127,6 +131,10 @@ func (m *AgentMiddleware) Process(ctx context.Context, run *MiddlewareContext, u
 		upstreamOutput = restorable
 
 		result := run.Result()
+		if run.workflow.durability != nil {
+			m.processDurable(ctx, run, out, upstreamOutput, result, deliver)
+			return
+		}
 		stageCtx, obs := newMiddlewareObserver(ctx, run, m, result)
 		obs.Started(stageCtx)
 		deliver = run.workflow.sendEvent(ctx, out, Event{Type: EventStageStart, Source: run.Source()}, deliver)
