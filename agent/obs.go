@@ -7,8 +7,8 @@ import (
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/internal/observe"
+	"github.com/lace-ai/gai/modelinput"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -26,6 +26,7 @@ func newAgentRunObserver(ctx context.Context, workflow *Workflow) (context.Conte
 		input = workflow.result.Input
 	}
 	attrs := []attribute.KeyValue{
+		attribute.String("langfuse.observation.type", "agent"),
 		attribute.String("agent.name", name),
 		attribute.Int("agent.meta_key_count", len(input.Meta)),
 	}
@@ -148,7 +149,7 @@ func (o *runCreationObserver) fields(ctx context.Context) map[string]any {
 	return fields
 }
 
-func promptUserChars(input gaictx.PromptInput) int {
+func promptUserChars(input modelinput.PromptInput) int {
 	if input.User == nil {
 		return 0
 	}
@@ -179,6 +180,7 @@ func newWorkflowObserver(ctx context.Context, workflow *Workflow) (context.Conte
 		debug = workflow.debug
 	}
 	ctx, operation := observe.Start(ctx, debug, agentTracerName, "agent.workflow", "agent.operation", "run", "agent:Workflow.Run",
+		attribute.String("langfuse.observation.type", "chain"),
 		attribute.String("agent.name", name),
 		attribute.Int("agent.middleware_count", middlewareCount),
 	)

@@ -8,8 +8,8 @@ import (
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 	"github.com/lace-ai/gai/testutil/mocks"
 )
 
@@ -17,7 +17,7 @@ func workflowAgent(name, response string, middleware ...agent.Middleware) *agent
 	return agent.New(agent.Definition{
 		Name:  name,
 		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: response}}}}}}},
-		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 			return &testPromptBuilder{}, nil
 		},
 		Middleware: middleware,
@@ -122,7 +122,7 @@ func TestAgentMiddlewareOutputPolicies(t *testing.T) {
 			post := agent.New(agent.Definition{
 				Name:  "post",
 				Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "post"}}}}}}},
-				Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+				Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 					postInput = input
 					return &testPromptBuilder{}, nil
 				},
@@ -134,7 +134,7 @@ func TestAgentMiddlewareOutputPolicies(t *testing.T) {
 
 			workflow, err := main.NewRun(context.Background(), agent.RunInput{
 				ID:     "run-1",
-				Prompt: gaictx.PromptInput{User: ai.TextParts("question")},
+				Prompt: modelinput.PromptInput{User: ai.TextParts("question")},
 				Meta:   map[string]any{"session_id": "session-1"},
 			})
 			if err != nil {
@@ -171,7 +171,7 @@ func TestAgentMiddlewareMapsWorkflowResult(t *testing.T) {
 	post := agent.New(agent.Definition{
 		Name:  "post",
 		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "post"}}}}}}},
-		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 			postInput = input
 			return &testPromptBuilder{}, nil
 		},
@@ -180,7 +180,7 @@ func TestAgentMiddlewareMapsWorkflowResult(t *testing.T) {
 		Output: agent.PreserveOutput,
 		MapInput: func(_ context.Context, result agent.WorkflowResult) (agent.RunInput, error) {
 			mappedResult = result
-			return agent.RunInput{ID: "mapped", Prompt: gaictx.PromptInput{User: ai.TextParts("observation")}}, nil
+			return agent.RunInput{ID: "mapped", Prompt: modelinput.PromptInput{User: ai.TextParts("observation")}}, nil
 		},
 	}))
 	workflow, err := main.NewRun(context.Background(), textRunInput("question"))
@@ -202,7 +202,7 @@ func TestWorkflowResultSeparatesReasoningFromVisibleText(t *testing.T) {
 		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{
 			Res: ai.AIResponse{ReasoningTokens: 4, Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentReasoning, Text: "thinking"}, {Kind: ai.ContentText, Text: "answer"}}}},
 		}}},
-		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 			return &testPromptBuilder{}, nil
 		},
 	})
@@ -236,7 +236,7 @@ func TestAgentMiddlewareReceivesReasoningInMappedResult(t *testing.T) {
 	post := agent.New(agent.Definition{
 		Name:  "post",
 		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "post"}}}}}}},
-		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 			return &testPromptBuilder{}, nil
 		},
 	})
@@ -245,7 +245,7 @@ func TestAgentMiddlewareReceivesReasoningInMappedResult(t *testing.T) {
 		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{
 			Res: ai.AIResponse{ReasoningTokens: 4, Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentReasoning, Text: "thinking"}, {Kind: ai.ContentText, Text: "answer"}}}},
 		}}},
-		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 			return &testPromptBuilder{}, nil
 		},
 		Middleware: []agent.Middleware{
@@ -280,7 +280,7 @@ func TestAgentMiddlewareRunsInOrderWithPriorStageResults(t *testing.T) {
 	first := agent.New(agent.Definition{
 		Name:  "first",
 		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "memory"}}}}}}},
-		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 			order = append(order, "first")
 			return &testPromptBuilder{}, nil
 		},
@@ -288,7 +288,7 @@ func TestAgentMiddlewareRunsInOrderWithPriorStageResults(t *testing.T) {
 	second := agent.New(agent.Definition{
 		Name:  "second",
 		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "audit"}}}}}}},
-		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 			order = append(order, "second")
 			return &testPromptBuilder{}, nil
 		},
@@ -341,7 +341,7 @@ func TestAgentMiddlewareErrorPolicy(t *testing.T) {
 				{Err: stageErr},
 				{Err: stageErr},
 			}},
-			Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+			Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 				return &testPromptBuilder{}, nil
 			},
 		})
@@ -390,7 +390,7 @@ func TestAgentMiddlewareRecordsInputMappingFailure(t *testing.T) {
 	post := agent.New(agent.Definition{
 		Name:  "post",
 		Model: &mocks.MockModel{},
-		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 			postCalled = true
 			return &testPromptBuilder{}, nil
 		},
@@ -426,7 +426,7 @@ func TestAgentMiddlewareRunPolicy(t *testing.T) {
 				{Err: modelErr},
 				{Err: modelErr},
 			}},
-			Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+			Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 				return &testPromptBuilder{}, nil
 			},
 			Middleware: []agent.Middleware{middleware},
@@ -437,7 +437,7 @@ func TestAgentMiddlewareRunPolicy(t *testing.T) {
 	post := agent.New(agent.Definition{
 		Name:  "failure-audit",
 		Model: &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "audited"}}}}}}},
-		Prompt: func(_ context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+		Prompt: func(_ context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 			postCalled = true
 			return &testPromptBuilder{}, nil
 		},
@@ -481,8 +481,10 @@ func TestWorkflowRejectsRepeatedRun(t *testing.T) {
 
 func TestAgentValidatesMiddleware(t *testing.T) {
 	_, err := agent.New(agent.Definition{
-		Model:      &mocks.MockModel{},
-		Prompt:     func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return &testPromptBuilder{}, nil },
+		Model: &mocks.MockModel{},
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return &testPromptBuilder{}, nil
+		},
 		Middleware: []agent.Middleware{nil},
 	}).NewRun(context.Background(), agent.RunInput{})
 	if !errors.Is(err, agent.ErrMiddlewareNotConfigured) {
@@ -491,8 +493,10 @@ func TestAgentValidatesMiddleware(t *testing.T) {
 
 	post := workflowAgent("post", "post")
 	_, err = agent.New(agent.Definition{
-		Model:  &mocks.MockModel{},
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return &testPromptBuilder{}, nil },
+		Model: &mocks.MockModel{},
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return &testPromptBuilder{}, nil
+		},
 		Middleware: []agent.Middleware{agent.NewAgentMiddleware(post, agent.AgentMiddlewareConfig{
 			ErrorPolicy: agent.ErrorPolicy(255),
 		})},
@@ -504,8 +508,10 @@ func TestAgentValidatesMiddleware(t *testing.T) {
 	nested := workflowAgent("nested", "nested")
 	postWithMiddleware := workflowAgent("post", "post", agent.NewAgentMiddleware(nested, agent.AgentMiddlewareConfig{}))
 	_, err = agent.New(agent.Definition{
-		Model:      &mocks.MockModel{},
-		Prompt:     func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return &testPromptBuilder{}, nil },
+		Model: &mocks.MockModel{},
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return &testPromptBuilder{}, nil
+		},
 		Middleware: []agent.Middleware{agent.NewAgentMiddleware(postWithMiddleware, agent.AgentMiddlewareConfig{})},
 	}).NewRun(context.Background(), agent.RunInput{})
 	if !errors.Is(err, agent.ErrMiddlewareAgentNested) {
@@ -517,8 +523,10 @@ func TestAgentRejectsTypedNilMiddleware(t *testing.T) {
 	var middleware *nilMiddleware
 
 	_, err := agent.New(agent.Definition{
-		Model:      &mocks.MockModel{},
-		Prompt:     func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) { return &testPromptBuilder{}, nil },
+		Model: &mocks.MockModel{},
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return &testPromptBuilder{}, nil
+		},
 		Middleware: []agent.Middleware{middleware},
 	}).NewRun(context.Background(), agent.RunInput{})
 	if !errors.Is(err, agent.ErrMiddlewareNotConfigured) {

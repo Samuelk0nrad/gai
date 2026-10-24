@@ -11,8 +11,8 @@ import (
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
 	"github.com/lace-ai/gai/ai/ollama"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	gaictx "github.com/lace-ai/gai/modelinput"
 )
 
 func TestLiveToolCalling(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 const (
@@ -89,7 +89,7 @@ type Loop struct {
 	// RetryPolicy enables classified retries. Nil disables retries.
 	RetryPolicy *RetryPolicy
 	// PromptBuilder constructs the prompt for each iteration.
-	PromptBuilder gaictx.PromptBuilder
+	PromptBuilder modelinput.PromptBuilder
 	// ToolResultProcessor optionally processes tool responses before they are recorded, emitted, or captured by loop telemetry.
 	ToolResultProcessor ToolResultProcessor
 }
@@ -181,7 +181,7 @@ func EffectiveTools(tools []Tool, choice ai.ToolChoice, transport ToolTransportM
 }
 
 // New constructs a Loop with the default iteration limit.
-func New(model ai.Model, tools []Tool, promptBuilder gaictx.PromptBuilder, toolResultProcessor ToolResultProcessor) *Loop {
+func New(model ai.Model, tools []Tool, promptBuilder modelinput.PromptBuilder, toolResultProcessor ToolResultProcessor) *Loop {
 	l := &Loop{
 		Model:               model,
 		Tools:               tools,
@@ -254,7 +254,7 @@ func (l *Loop) buildAttemptRequest(ctx context.Context, toolDefinitions []ai.Too
 	return request, nil
 }
 
-func userMessageForIteration(promptBuilder gaictx.PromptBuilder, index int) *ai.Message {
+func userMessageForIteration(promptBuilder modelinput.PromptBuilder, index int) *ai.Message {
 	if index != 0 || promptBuilder == nil {
 		return nil
 	}

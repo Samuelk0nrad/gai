@@ -8,8 +8,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 type requestProjectionCounter struct{}
@@ -22,7 +22,7 @@ func (requestProjectionCounter) CountTokens(_ context.Context, text string) (int
 
 type requestProjectionSource struct {
 	name            string
-	candidate       gaictx.Part
+	candidate       modelinput.Part
 	legacyCalls     int
 	projectionCalls int
 	budget          int
@@ -30,12 +30,12 @@ type requestProjectionSource struct {
 }
 
 func (s *requestProjectionSource) Name() string { return s.name }
-func (s *requestProjectionSource) Function(_ context.Context, budget int) (gaictx.Part, error) {
+func (s *requestProjectionSource) Function(_ context.Context, budget int) (modelinput.Part, error) {
 	s.legacyCalls++
 	s.budget = budget
 	return s.candidate, nil
 }
-func (s *requestProjectionSource) FunctionWithBudget(ctx context.Context, budget int, project func(context.Context, gaictx.Part) (int, error)) (gaictx.Part, int, error) {
+func (s *requestProjectionSource) FunctionWithBudget(ctx context.Context, budget int, project func(context.Context, modelinput.Part) (int, error)) (modelinput.Part, int, error) {
 	s.projectionCalls++
 	s.budget = budget
 	count, err := project(ctx, s.candidate)
@@ -49,16 +49,16 @@ func (s *requestProjectionSource) FunctionWithBudget(ctx context.Context, budget
 	return s.candidate, count, nil
 }
 
-func projectionNamedPart(t *testing.T, name, value string) gaictx.Part {
+func projectionNamedPart(t *testing.T, name, value string) modelinput.Part {
 	t.Helper()
-	part, err := gaictx.NewNamedPart(name, value)
+	part, err := modelinput.NewNamedPart(name, value)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return part
 }
 
-func projectionRenderedMessage(t *testing.T, renderer gaictx.Renderer, role ai.Role, parts ...gaictx.Part) ai.Message {
+func projectionRenderedMessage(t *testing.T, renderer modelinput.Renderer, role ai.Role, parts ...modelinput.Part) ai.Message {
 	t.Helper()
 	text, err := renderer.Render(t.Context(), parts)
 	if err != nil {
@@ -70,22 +70,22 @@ func projectionRenderedMessage(t *testing.T, renderer gaictx.Renderer, role ai.R
 func TestRequestBudgetProjectsRenderedCandidatesAfterRequiredInput(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		renderer gaictx.Renderer
+		renderer modelinput.Renderer
 	}{
-		{"XML escaping", &gaictx.XMLRenderer{}},
-		{"simple labels", &gaictx.SimpleRenderer{}},
+		{"XML escaping", &modelinput.XMLRenderer{}},
+		{"simple labels", &modelinput.SimpleRenderer{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			counter := requestProjectionCounter{}
 			candidate := projectionNamedPart(t, "chosen_payload", `<tag a="value"> & '雪'`)
 			source := &requestProjectionSource{name: "unrelated_source_identity_much_longer_than_part_name", candidate: candidate}
 			probe := &requestProjectionSource{name: "next_source", candidate: projectionNamedPart(t, "e", "x")}
-			systemParts := []gaictx.Part{projectionNamedPart(t, "policy", "required <& policy"), gaictx.NewTextPart("second instruction")}
+			systemParts := []modelinput.Part{projectionNamedPart(t, "policy", "required <& policy"), modelinput.NewTextPart("second instruction")}
 			requiredContext := projectionNamedPart(t, "required_context", "required <& context")
 			canonicalContext := ai.TextMessage(ai.RoleAssistant, "canonical selected context")
 			user := ai.Message{Role: ai.RoleUser, Parts: append(ai.TextParts("current "), ai.TextParts("<& question")...)}
 			expected := ai.AIRequest{MaxTokens: 8, Messages: []ai.Message{
-				projectionRenderedMessage(t, tc.renderer, ai.RoleSystem, gaictx.NewSystemPart(systemParts)),
+				projectionRenderedMessage(t, tc.renderer, ai.RoleSystem, modelinput.NewSystemPart(systemParts)),
 				projectionRenderedMessage(t, tc.renderer, ai.RoleUser, candidate),
 				projectionRenderedMessage(t, tc.renderer, ai.RoleUser, requiredContext),
 				canonicalContext,
@@ -103,11 +103,11 @@ func TestRequestBudgetProjectsRenderedCandidatesAfterRequiredInput(t *testing.T)
 				t.Fatal(err)
 			}
 			window := estimate.InputTokens + 8 + 5
-			builder := gaictx.New(gaictx.Definition{
+			builder := modelinput.New(modelinput.Definition{
 				Renderer:           tc.renderer,
 				SystemInstructions: systemParts,
-				ContextSources:     []gaictx.ContextSource{source, probe},
-				PromptInput:        gaictx.PromptInput{User: user.Parts, Context: []gaictx.Part{requiredContext, gaictx.NewMessagePart(canonicalContext)}},
+				ContextSources:     []modelinput.ContextSource{source, probe},
+				PromptInput:        modelinput.PromptInput{User: user.Parts, Context: []modelinput.Part{requiredContext, modelinput.NewMessagePart(canonicalContext)}},
 			})
 			model := &scriptedStreamModel{sequences: [][]ai.Token{{requestFinalToken()}}}
 			l := loop.New(model, nil, builder, nil)
@@ -138,7 +138,7 @@ func TestRequestBudgetProjectsRenderedCandidatesAfterRequiredInput(t *testing.T)
 
 func TestRequestBudgetProjectsCanonicalCandidateWithoutRenderingIt(t *testing.T) {
 	message := ai.Message{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentJSON, JSON: []byte(`{"selected":"<&雪"}`)}}}
-	source := &requestProjectionSource{name: "structured_source", candidate: gaictx.NewMessagePart(message)}
+	source := &requestProjectionSource{name: "structured_source", candidate: modelinput.NewMessagePart(message)}
 	counter := requestProjectionCounter{}
 	expected := ai.AIRequest{Messages: []ai.Message{message, ai.TextMessage(ai.RoleUser, "question")}}
 	estimate, err := ai.EstimateRequestTokens(t.Context(), expected, counter)
@@ -149,7 +149,7 @@ func TestRequestBudgetProjectsCanonicalCandidateWithoutRenderingIt(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	builder := gaictx.New(gaictx.Definition{ContextSources: []gaictx.ContextSource{source}, PromptInput: gaictx.PromptInput{User: ai.TextParts("question")}})
+	builder := modelinput.New(modelinput.Definition{ContextSources: []modelinput.ContextSource{source}, PromptInput: modelinput.PromptInput{User: ai.TextParts("question")}})
 	model := &scriptedStreamModel{sequences: [][]ai.Token{{requestFinalToken()}}}
 	l := loop.New(model, nil, builder, nil)
 	l.TokenCounter = counter
@@ -168,7 +168,7 @@ func TestRequestBudgetProjectsCanonicalCandidateWithoutRenderingIt(t *testing.T)
 
 func TestRequestBudgetProjectionIsDisabledWithExplicitZeroPolicy(t *testing.T) {
 	source := &requestProjectionSource{name: "projection_source", candidate: projectionNamedPart(t, "payload", "selected text")}
-	builder := gaictx.New(gaictx.Definition{TokenBudget: 1, ContextSources: []gaictx.ContextSource{source}, PromptInput: gaictx.PromptInput{User: ai.TextParts("question")}})
+	builder := modelinput.New(modelinput.Definition{TokenBudget: 1, ContextSources: []modelinput.ContextSource{source}, PromptInput: modelinput.PromptInput{User: ai.TextParts("question")}})
 	model := &scriptedStreamModel{sequences: [][]ai.Token{{requestFinalToken()}}}
 	l := loop.New(model, nil, builder, nil)
 	l.TokenCounter = requestProjectionCounter{}

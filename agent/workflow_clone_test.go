@@ -4,8 +4,8 @@ import (
 	"testing"
 
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/loop"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 // TestCloneWorkflowResultOwnsMutableExecutionData mutates a cloned workflow result to detect
@@ -13,7 +13,7 @@ import (
 func TestCloneWorkflowResultOwnsMutableExecutionData(t *testing.T) {
 	call := &ai.ToolCall{Name: "lookup", Args: []byte(`{"query":"original"}`)}
 	result := WorkflowResult{
-		Input: RunInput{Prompt: gaictx.PromptInput{Context: []gaictx.Part{gaictx.NewTextPart("original")}}},
+		Input: RunInput{Prompt: modelinput.PromptInput{Context: []modelinput.Part{modelinput.NewTextPart("original")}}},
 		Primary: AgentResult{
 			Tokens: []ai.Token{{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: call}}},
 			Messages: []ai.Message{{
@@ -31,7 +31,7 @@ func TestCloneWorkflowResultOwnsMutableExecutionData(t *testing.T) {
 	}
 
 	cloned := cloneWorkflowResult(result)
-	cloned.Input.Prompt.Context[0] = gaictx.NewTextPart("changed")
+	cloned.Input.Prompt.Context[0] = modelinput.NewTextPart("changed")
 	cloned.Primary.Tokens[0].Part.ToolCall.Args[0] = 'X'
 	cloned.Primary.Messages[0].Parts[0].Text = "changed"
 	cloned.Primary.Iterations[0].Parts[0].Response.Message.Parts[0].Text = "changed"

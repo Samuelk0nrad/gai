@@ -47,9 +47,9 @@ assistant := agent.New(agent.Definition{
     Model: model,
     AutoCompactHistory: true,
     RequestBudget: &ai.RequestBudgetConfig{Limit: 128000, OutputReserve: 4096},
-    Prompt: func(ctx context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
-        return gaictx.New(gaictx.Definition{
-            ContextSources: []gaictx.ContextSource{history.NewHistory(sessionID, store)},
+    Prompt: func(ctx context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
+        return modelinput.New(modelinput.Definition{
+            ContextSources: []modelinput.ContextSource{history.NewHistory(sessionID, store)},
         }), nil
     },
 })
@@ -60,7 +60,8 @@ if err != nil {
 result, err := workflow.Run(ctx) // compacts if needed, then generates the answer
 ```
 
-Here `gaictx` is `github.com/lace-ai/gai/context`, and `store` implements
+Here `modelinput` is `github.com/lace-ai/gai/modelinput`, `history` is
+`github.com/lace-ai/gai/modelinput/history`, and `store` implements
 `history.HistoryStore`. Return a fresh builder and history source for each run.
 Read-only readers are insufficient for this opt-in. Custom builders currently
 return `agent.ErrHistoryCompactionNotConfigurable`; they can orchestrate explicit

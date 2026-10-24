@@ -14,8 +14,8 @@ import (
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/internal/obstest"
+	"github.com/lace-ai/gai/modelinput"
 )
 
 func TestModelGenerateMapsCapabilitiesAndResponse(t *testing.T) {
@@ -487,11 +487,11 @@ func TestResponsesIncompleteFailsWorkflowWithoutAcceptingPartialOutput(t *testin
 	}
 	a := agent.New(agent.Definition{
 		Model: m,
-		Prompt: func(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
-			return gaictx.New(gaictx.Definition{Renderer: &gaictx.SimpleRenderer{}}), nil
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{Renderer: &modelinput.SimpleRenderer{}}), nil
 		},
 	})
-	workflow, err := a.NewRun(t.Context(), agent.RunInput{Prompt: gaictx.PromptInput{User: ai.TextParts("hello")}})
+	workflow, err := a.NewRun(t.Context(), agent.RunInput{Prompt: modelinput.PromptInput{User: ai.TextParts("hello")}})
 	if err != nil {
 		t.Fatal(err)
 	}

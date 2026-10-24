@@ -8,7 +8,7 @@ import (
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
-	gaictx "github.com/lace-ai/gai/context"
+	"github.com/lace-ai/gai/modelinput"
 	"github.com/lace-ai/gai/testutil/mocks"
 )
 
@@ -16,8 +16,8 @@ import (
 // by the request's 3-token response prefix. No system or optional context exists.
 const agentRequestInputTokens = 8
 
-func agentRequestBudgetPrompt(context.Context, agent.RunInput) (gaictx.PromptBuilder, error) {
-	return gaictx.New(gaictx.Definition{TokenBudget: 50, OutputTokenReserve: 6}), nil
+func agentRequestBudgetPrompt(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+	return modelinput.New(modelinput.Definition{TokenBudget: 50, OutputTokenReserve: 6}), nil
 }
 
 func agentRequestBudgetModel() *scriptedWorkflowModel {
@@ -116,7 +116,7 @@ func TestAgentRequestBudgetRejectsInvalidConfigurationBeforePrompt(t *testing.T)
 			t.Run(tc.name+"/"+origin, func(t *testing.T) {
 				model := agentRequestBudgetModel()
 				promptCalls := 0
-				definition := agent.Definition{Model: model, Prompt: func(ctx context.Context, input agent.RunInput) (gaictx.PromptBuilder, error) {
+				definition := agent.Definition{Model: model, Prompt: func(ctx context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
 					promptCalls++
 					return agentRequestBudgetPrompt(ctx, input)
 				}}
