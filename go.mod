@@ -3,7 +3,7 @@ module github.com/lace-ai/gai
 go 1.26.9
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.82.0
+	github.com/anthropics/anthropic-sdk-go v1.84.0
 	github.com/openai/openai-go v1.12.0
 	github.com/tiktoken-go/tokenizer v0.8.1
 	go.opentelemetry.io/otel v1.47.0
