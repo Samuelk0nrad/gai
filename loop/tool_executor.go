@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"time"
@@ -12,6 +13,7 @@ import (
 )
 
 type scheduledTool struct {
+	restored  bool
 	execution ToolExecution
 	pending   pendingToolCall
 	tool      Tool
@@ -104,8 +106,8 @@ func terminalBatchError(iteration Iteration, calls []pendingToolCall) error {
 	return nil
 }
 
-// reflect.Select accepts at most 65,536 cases; reserve two for completion/context.
-const maxToolGuardWaits = 65534
+// reflect.Select accepts at most 65,536 cases; reserve three for completion/context/pause.
+const maxToolGuardWaits = 65533
 
 // validateToolGuardCount rejects batches beyond the runtime select-case limit before dispatch.
 func validateToolGuardCount(tasks []scheduledTool) error {
@@ -168,9 +170,18 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 	if err != nil {
 		return err
 	}
+	if l.durable != nil {
+		if err := l.durable.prepareTasks(tasks); err != nil {
+			return err
+		}
+	}
 	preflightErr := l.preflightToolPolicies(ctx, tasks, events, iterationCount, attemptID, retryCount)
 	if preflightErr == nil {
-		preflightErr = l.preflightToolApprovals(ctx, tasks, events, iterationCount, attemptID, retryCount)
+		if l.durable != nil && l.durable.control.DeferredApprovals {
+			preflightErr = l.durable.deferredApprovals(ctx, l, tasks, events, iterationCount, attemptID, retryCount)
+		} else {
+			preflightErr = l.preflightToolApprovals(ctx, tasks, events, iterationCount, attemptID, retryCount)
+		}
 	}
 	for _, task := range tasks {
 		iteration.Parts[task.pending.partIndex].ToolExecution = cloneToolExecution(&task.execution)
@@ -198,11 +209,18 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 	fail := func(err error) {
 		if firstErr == nil {
 			firstErr = err
-			cancel()
+			if !errors.Is(err, ErrCheckpointCommit) {
+				cancel()
+			}
 		}
 	}
 	publish := func(done toolCompletion) {
 		task := tasks[done.index]
+		if l.durable != nil && !task.restored {
+			if err := l.durable.completed(ctx, done); err != nil {
+				fail(err)
+			}
+		}
 		iteration.Parts[task.pending.partIndex].ToolResp = done.result
 		iteration.Parts[task.pending.partIndex].ToolExecution = cloneToolExecution(&done.execution)
 		if task.result != nil {
@@ -246,8 +264,11 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 		var guards []<-chan struct{}
 		waitingGuards := map[*ToolGuard]bool{}
 		blockedNames := map[string]bool{}
-		if firstErr == nil {
+		if firstErr == nil && (l.durable == nil || !l.durable.pausing()) {
 			for position := 0; position < len(pending) && active < limit; {
+				if l.durable != nil && l.durable.pausing() {
+					break
+				}
 				index := pending[position]
 				task := tasks[index]
 				name := task.pending.call.Name
@@ -278,6 +299,15 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 					fail(err)
 					break
 				}
+				if l.durable != nil && !task.restored {
+					if err := l.durable.beforeDispatch(ctx, index, task.execution, task.result != nil); err != nil {
+						release()
+						if !isPause(err) {
+							fail(err)
+						}
+						break
+					}
+				}
 				if events != nil && task.result == nil {
 					if err := sendEvent(ctx, events, ToolStartEvent(iterationCount, attemptID, retryCount, task.pending.call)); err != nil {
 						release()
@@ -295,7 +325,11 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 				if task.options.Serial {
 					busy[name] = true
 				}
-				go func(index int, task scheduledTool, release func()) {
+				invocationCtx := workerCtx
+				if l.durable != nil {
+					invocationCtx = context.WithValue(workerCtx, invocationKey{}, l.durable.invocation(index))
+				}
+				go func(index int, task scheduledTool, release func(), invocationCtx context.Context) {
 					done := toolCompletion{index: index, execution: task.execution}
 					defer func() {
 						if recover() != nil {
@@ -309,8 +343,12 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 						release()
 						completions <- done
 					}()
+					if task.restored {
+						done.result = task.result
+						return
+					}
 					if task.result != nil {
-						done.result, done.err = l.processUninvoked(workerCtx, task)
+						done.result, done.err = l.processUninvoked(invocationCtx, task)
 						done.execution.Output = outputState(*task.result, done.result)
 						return
 					}
@@ -318,12 +356,15 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 					if task.options.Timeout != nil {
 						timeout = *task.options.Timeout
 					}
-					done.result, done.duration, done.err = processObservedToolExecution(workerCtx, ToolPolicyInput{Call: task.pending.call, Traits: task.options.Traits}, []Tool{task.tool}, l.ToolResultProcessor, timeout, &done.execution, l.ObservationSink)
-				}(index, task, release)
+					done.result, done.duration, done.err = processObservedToolExecution(invocationCtx, ToolPolicyInput{Call: task.pending.call, Traits: task.options.Traits}, []Tool{task.tool}, l.ToolResultProcessor, timeout, &done.execution, l.ObservationSink)
+				}(index, task, release, invocationCtx)
 			}
 		}
 		if firstErr != nil {
 			pending = nil
+		}
+		if active == 0 && l.durable != nil && l.durable.pausing() && firstErr == nil {
+			return ErrPaused
 		}
 		if active == 0 && len(pending) == 0 {
 			break
@@ -331,6 +372,9 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 		cases := []reflect.SelectCase{{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(completions)}}
 		if firstErr == nil {
 			cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ctx.Done())})
+			if l.durable != nil && !l.durable.pausing() && l.durable.control.PauseSignal != nil {
+				cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(l.durable.control.PauseSignal)})
+			}
 			for _, guard := range guards {
 				cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(guard)})
 			}
@@ -349,12 +393,18 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 	if firstErr != nil {
 		return firstErr
 	}
-	for _, task := range tasks {
+	for index, task := range tasks {
 		result := iteration.Parts[task.pending.partIndex].ToolResp
 		if result == nil {
 			continue
 		}
 		output := ai.ToolResult{ToolCallID: task.pending.call.ID, Name: task.pending.call.Name, Parts: ai.TextParts(result.String()), IsError: result.Err != nil}
+		if l.durable != nil {
+			if saved := l.durable.state.Pending.Invocations[index].Result; saved != nil {
+				output = *saved
+				output.Parts = ai.CloneParts(saved.Parts)
+			}
+		}
 		iteration.Conversation = append(iteration.Conversation, ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &output}}})
 	}
 	return nil
@@ -386,7 +436,7 @@ func (l *Loop) preflightToolPolicies(ctx context.Context, tasks []scheduledTool,
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if task.result != nil {
+		if task.result != nil || task.restored {
 			continue
 		}
 		decision := ToolDecision{Action: ToolAllow}

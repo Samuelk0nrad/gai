@@ -36,9 +36,12 @@ const (
 	EventStageStart  EventType = "stage_start"
 	EventStageFinish EventType = "stage_finish"
 
-	EventDone     EventType = "done"
-	EventError    EventType = "error"
-	EventCanceled EventType = "canceled"
+	EventResumed             EventType = "resumed"
+	EventCheckpointCommitted EventType = "checkpoint_committed"
+	EventPaused              EventType = "paused"
+	EventDone                EventType = "done"
+	EventError               EventType = "error"
+	EventCanceled            EventType = "canceled"
 )
 
 // EventSourceKind identifies the logical kind of event producer.
@@ -86,6 +89,7 @@ type StructuredOutput struct {
 type StageOutcome string
 
 const (
+	StagePaused    StageOutcome = "paused"
 	StageSucceeded StageOutcome = "succeeded"
 	StageFailed    StageOutcome = "failed"
 	StageCanceled  StageOutcome = "canceled"
@@ -95,6 +99,17 @@ const (
 // Event is one immutable snapshot from the ordered, middleware-aware workflow
 // stream. Fields are meaningful according to Type.
 type Event struct {
+	RunID              string
+	ExecutionID        string
+	StageID            string
+	GenerationID       string
+	InvocationID       string
+	Sequence           uint64
+	CheckpointRevision uint64
+	// Checkpoint on Resumed/Paused is the authoritative canonical recovery snapshot.
+	Checkpoint *Checkpoint
+	// Replayed is used internally to rebuild output without redelivering old output.
+	Replayed      bool
 	ToolExecution *loop.ToolExecution
 	ToolApproval  *loop.ToolApprovalRequest
 	Type          EventType
@@ -145,6 +160,10 @@ func cloneOutputParts(parts []OutputPart) []OutputPart {
 // cloneEvent isolates mutable event payloads while sharing immutable errors.
 func cloneEvent(event Event) Event {
 	cloned := event
+	if event.Checkpoint != nil {
+		c := event.Checkpoint.Clone()
+		cloned.Checkpoint = &c
+	}
 	if event.ToolApproval != nil {
 		request := event.ToolApproval.Clone()
 		cloned.ToolApproval = &request
