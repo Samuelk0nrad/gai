@@ -39,7 +39,8 @@ type Usage struct {
 	CachedTokens int
 	// CacheCreationTokens is the subset of InputTokens written to a provider cache.
 	CacheCreationTokens int
-	// ToolUseTokens counts provider-reported tool-use prompt tokens.
+	// ToolUseTokens is the subset of InputTokens that a provider reports for
+	// tool-use prompts, such as Gemini grounding or code execution results.
 	ToolUseTokens int
 }
 

@@ -201,7 +201,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			if resp.UsageMetadata != nil {
 				completion.UsageReported = true
 				completion.Usage = ai.Usage{
-					InputTokens:     int(resp.UsageMetadata.PromptTokenCount),
+					InputTokens:     geminiInputTokens(resp.UsageMetadata),
 					OutputTokens:    geminiOutputTokens(resp.UsageMetadata),
 					ReasoningTokens: int(resp.UsageMetadata.ThoughtsTokenCount),
 					CachedTokens:    int(resp.UsageMetadata.CachedContentTokenCount),
@@ -406,7 +406,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	inputTokens := 0
 	outputTokens := 0
 	if result.UsageMetadata != nil {
-		inputTokens = int(result.UsageMetadata.PromptTokenCount)
+		inputTokens = geminiInputTokens(result.UsageMetadata)
 		outputTokens = geminiOutputTokens(result.UsageMetadata)
 	}
 	reasoningTokens := 0
@@ -460,6 +460,19 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	}
 	response.SetMessage(semantic)
 	return response, nil
+}
+
+// geminiInputTokens normalizes Gemini input usage to include tool-use prompt
+// tokens. Gemini reports toolUsePromptTokenCount (for example, grounding or
+// code execution results fed back to the model) separately from
+// promptTokenCount, while ai.Usage.InputTokens and the OpenTelemetry GenAI
+// conventions count every input token; ToolUseTokens remains the tool-use
+// subset.
+func geminiInputTokens(usage *genai.GenerateContentResponseUsageMetadata) int {
+	if usage == nil {
+		return 0
+	}
+	return int(usage.PromptTokenCount) + int(usage.ToolUsePromptTokenCount)
 }
 
 // geminiOutputTokens normalizes Gemini output usage to include thinking

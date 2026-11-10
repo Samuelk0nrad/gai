@@ -27,7 +27,7 @@ func TestGenerateIgnoresEmptyPartsAndPreservesCompletion(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if response.Text() != "hello world" || response.Message.Text() != "hello world" || len(response.Message.Parts) != 2 || response.FinishReason != "STOP" || response.InputTokens != 11 || response.OutputTokens != 10 || response.ReasoningTokens != 3 {
+				if response.Text() != "hello world" || response.Message.Text() != "hello world" || len(response.Message.Parts) != 2 || response.FinishReason != "STOP" || response.InputTokens != 15 || response.OutputTokens != 10 || response.ReasoningTokens != 3 {
 					t.Fatalf("response = %#v", response)
 				}
 				var raw struct {
@@ -73,7 +73,7 @@ func TestGenerateStreamIgnoresEmptyPartsAndPreservesCompletion(t *testing.T) {
 				if text.String() != "hello world" || textTokens != 2 || completions != 1 || completion == nil {
 					t.Fatalf("text = %q, text tokens = %d, completions = %d, completion = %#v", text.String(), textTokens, completions, completion)
 				}
-				if completion.RequestID != "empty-part-response" || completion.Model != "gemini-test" || completion.FinishReason != "STOP" || !completion.UsageReported || completion.Usage.InputTokens != 11 || completion.Usage.OutputTokens != 10 || completion.Usage.ReasoningTokens != 3 || completion.Usage.CachedTokens != 2 || !json.Valid(completion.Raw) {
+				if completion.RequestID != "empty-part-response" || completion.Model != "gemini-test" || completion.FinishReason != "STOP" || !completion.UsageReported || completion.Usage.InputTokens != 15 || completion.Usage.OutputTokens != 10 || completion.Usage.ReasoningTokens != 3 || completion.Usage.CachedTokens != 2 || completion.Usage.ToolUseTokens != 4 || !json.Valid(completion.Raw) {
 					t.Fatalf("completion = %#v", completion)
 				}
 			})
@@ -192,7 +192,7 @@ func emptyPartResponse(t *testing.T, parts []json.RawMessage, completion bool) [
 		candidate["finishReason"] = "STOP"
 		response["responseId"] = "empty-part-response"
 		response["modelVersion"] = "gemini-test"
-		response["usageMetadata"] = map[string]int{"promptTokenCount": 11, "candidatesTokenCount": 7, "thoughtsTokenCount": 3, "cachedContentTokenCount": 2}
+		response["usageMetadata"] = map[string]int{"promptTokenCount": 11, "candidatesTokenCount": 7, "thoughtsTokenCount": 3, "cachedContentTokenCount": 2, "toolUsePromptTokenCount": 4}
 	}
 	raw, err := json.Marshal(response)
 	if err != nil {

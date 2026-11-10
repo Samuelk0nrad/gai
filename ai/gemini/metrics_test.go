@@ -10,10 +10,11 @@ import (
 	"github.com/Samuelk0nrad/gai/internal/obstest"
 )
 
-// TestGenerationMetricsIncludeThinkingInOutputTokens verifies provider wiring
-// end to end: one inference duration per call and normalized usage counters
-// where Gemini thinking tokens are part of output tokens.
-func TestGenerationMetricsIncludeThinkingInOutputTokens(t *testing.T) {
+// TestGenerationMetricsNormalizeUsage verifies provider wiring end to end: one
+// inference duration per call and normalized usage counters where Gemini
+// tool-use prompt tokens are part of input and thinking tokens are part of
+// output.
+func TestGenerationMetricsNormalizeUsage(t *testing.T) {
 	parts := []json.RawMessage{json.RawMessage(`{"text":"hello "}`), json.RawMessage(`{"text":"world"}`)}
 	for _, streaming := range []bool{false, true} {
 		t.Run(fmt.Sprintf("streaming=%t", streaming), func(t *testing.T) {
@@ -48,9 +49,10 @@ func TestGenerationMetricsIncludeThinkingInOutputTokens(t *testing.T) {
 			if got := obstest.AttributeStrings(durations[0].Attributes)["gen_ai.provider.name"]; got != "gcp.gemini" {
 				t.Fatalf("provider = %q, want gcp.gemini", got)
 			}
-			// Fixture: promptTokenCount=11, candidatesTokenCount=7, thoughtsTokenCount=3.
+			// Fixture: promptTokenCount=11, toolUsePromptTokenCount=4,
+			// candidatesTokenCount=7, thoughtsTokenCount=3.
 			for name, want := range map[string]int64{
-				"gen_ai.client.inference.usage.input_tokens":  11,
+				"gen_ai.client.inference.usage.input_tokens":  15,
 				"gen_ai.client.inference.usage.output_tokens": 10,
 			} {
 				points := obstest.SumPoints[int64](t, metrics, name)
