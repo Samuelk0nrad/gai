@@ -214,3 +214,91 @@ func TestCheckpointValidateRejectsInvalidStructure(t *testing.T) {
 		})
 	}
 }
+
+func TestDurableSteeringBeforeFirstGenerationKeepsConversationOrder(t *testing.T) {
+	model := &durableModel{responses: [][]ai.Token{response("done")}}
+	def := durableDefinition(model)
+	store := &checkpointStore{}
+	w := newDurableRun(t, agent.New(def), store)
+	if err := w.RequestPause(); err != nil {
+		t.Fatal(err)
+	}
+	runDurable(t, w)
+	resumed, err := agent.New(def).Resume(t.Context(), store.load(), agent.ResumeInput{CommandID: "steer", Prompt: modelinput.PromptInput{User: ai.TextParts("followup")}}, store.durability())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := runDurable(t, resumed)
+	var conversation, request []string
+	for _, m := range result.Primary.Messages {
+		conversation = append(conversation, string(m.Role)+":"+m.Text())
+	}
+	for _, m := range model.requests[0].Messages {
+		if m.Role == ai.RoleUser {
+			request = append(request, m.Text())
+		}
+	}
+	if !reflect.DeepEqual(conversation, []string{"user:original", "user:followup", "assistant:done"}) {
+		t.Fatal("conversation order", conversation)
+	}
+	if !reflect.DeepEqual(request, []string{"original", "followup"}) {
+		t.Fatal("request order", request)
+	}
+}
+
+func TestDurableResumeCopiesVerifiedResult(t *testing.T) {
+	tool := durableTool(t, "write", func(context.Context, ai.ToolCall) (string, error) { return "real", nil })
+	def := durableDefinition(&durableModel{responses: [][]ai.Token{calls("write"), response("done")}}, tool)
+	store := &checkpointStore{}
+	store.hook = func(cp agent.Checkpoint) error {
+		if p := pending(cp); p != nil && p.Invocations[0].Disposition == loop.InvocationCompleted {
+			return errStore
+		}
+		return nil
+	}
+	if _, err := newDurableRun(t, agent.New(def), store).Run(t.Context()); !errors.Is(err, loop.ErrCheckpointCommit) {
+		t.Fatal(err)
+	}
+	store.hook = nil
+	cp := store.load()
+	inv := pending(cp).Invocations[0]
+	verified := &ai.ToolResult{ToolCallID: inv.Call.ID, Name: inv.Call.Name, Parts: ai.TextParts("verified")}
+	input := agent.ResumeInput{CommandID: "resolve", ToolResolutions: []loop.ToolRecoveryResolution{{InvocationID: inv.ID, Action: loop.UseVerifiedResult, Result: verified, Execution: loop.ToolExecution{State: loop.ToolSucceeded}}}}
+	w, err := agent.New(def).Resume(t.Context(), cp, input, store.durability())
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified.Parts[0].Text = "changed after Resume"
+	if got := pending(*w.Result().Checkpoint).Invocations[0].Result.Text(); got != "verified" {
+		t.Fatal("checkpoint aliases the caller's verified result", got)
+	}
+}
+
+func TestDurablePausedUpstreamReportsDownstreamStages(t *testing.T) {
+	child := agent.New(durableDefinition(&durableModel{responses: [][]ai.Token{response("child")}}))
+	def := durableDefinition(&durableModel{responses: [][]ai.Token{response("main")}})
+	def.Middleware = []agent.Middleware{agent.NewAgentMiddleware(child, agent.AgentMiddlewareConfig{ID: "post", Name: "post", Output: agent.AppendOutput})}
+	store := &checkpointStore{}
+	w := newDurableRun(t, agent.New(def), store)
+	if err := w.RequestPause(); err != nil {
+		t.Fatal(err)
+	}
+	events := collectAgentEvents(w.RunEvents(t.Context()))
+	if result, err := w.Wait(); err != nil || result.Status != agent.StatusPaused {
+		t.Fatal(err, result.Status)
+	}
+	var started, skipped bool
+	for _, event := range events {
+		if event.Source.Name != "post" {
+			continue
+		}
+		started = started || event.Type == agent.EventStageStart
+		skipped = skipped || (event.Type == agent.EventStageFinish && event.StageOutcome == agent.StageSkipped && event.StageReason == "upstream_unfinished")
+	}
+	if !started || !skipped {
+		t.Fatal("paused upstream hid the downstream stage", started, skipped)
+	}
+	if events[len(events)-1].Type != agent.EventPaused {
+		t.Fatal("terminal event", events[len(events)-1].Type)
+	}
+}

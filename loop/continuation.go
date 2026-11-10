@@ -397,7 +397,10 @@ func (c *Continuation) ResolveRecovery(resolutions []ToolRecoveryResolution) err
 			if err := (ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: resolution.Result}}}).Validate(); err != nil {
 				return fmt.Errorf("%w: %w", ErrContinuation, err)
 			}
-			inv.Result = resolution.Result
+			// The checkpoint owns its copy; the caller may reuse its value.
+			result := *resolution.Result
+			result.Parts = ai.CloneParts(result.Parts)
+			inv.Result = &result
 			inv.Execution = resolution.Execution
 			inv.ProcessingFailed = false
 			inv.Disposition = InvocationCompleted

@@ -63,18 +63,19 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 		}
 		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StageFailed, StageReason: reason, Err: err})
 	}
-	if result.Status == StatusPaused || d.status() == StatusPaused {
-		forward(upstream)
-		return
-	}
-	// An unfinished earlier stage owns the continuation boundary. This stage is
-	// decided only after that stage is resumed and completes, so ShouldRun is
-	// not called and no decision is saved.
+	// An unfinished earlier stage owns the continuation boundary. This covers a
+	// failed, canceled or paused earlier stage. This stage is decided only after
+	// that stage is resumed and completes, so ShouldRun is not called and no
+	// decision is saved.
 	if !d.earlierStagesComplete(m.config.ID) {
 		start()
 		forward(upstream)
 		obs.Skipped(stageCtx, stageReasonUpstreamUnfinished)
 		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StageSkipped, StageReason: stageReasonUpstreamUnfinished})
+		return
+	}
+	if result.Status == StatusPaused || d.status() == StatusPaused {
+		forward(upstream)
 		return
 	}
 	stage := d.stage(m.config.ID)

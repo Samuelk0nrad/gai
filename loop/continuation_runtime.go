@@ -114,7 +114,19 @@ func (r *runExecution) continuationBoundary() bool {
 		return true
 	}
 	if d.state.Pending == nil && len(d.state.Steering) > 0 {
-		g := Generation{ID: newIdentity(), Messages: ai.CloneMessages(d.state.Steering)}
+		// Steering before the first accepted generation follows the original
+		// input. That input is already in the frozen request prefix, so it is
+		// recorded as an input message and not sent to the model again.
+		var messages []ai.Message
+		inputMessages := 0
+		if d.state.InputPending && r.userMessage != nil {
+			messages = append(messages, r.userMessage.Clone())
+			inputMessages = 1
+			d.state.InputPending = false
+			r.userMessage = nil
+		}
+		messages = append(messages, ai.CloneMessages(d.state.Steering)...)
+		g := Generation{ID: newIdentity(), Messages: messages, InputMessages: inputMessages}
 		d.state.Generations = append(d.state.Generations, g)
 		d.state.Steering = nil
 		r.owner.Iterations = append(r.owner.Iterations, g.iteration())
