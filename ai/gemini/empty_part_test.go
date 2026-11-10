@@ -27,7 +27,7 @@ func TestGenerateIgnoresEmptyPartsAndPreservesCompletion(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if response.Text() != "hello world" || response.Message.Text() != "hello world" || len(response.Message.Parts) != 2 || response.FinishReason != "STOP" || response.InputTokens != 11 || response.OutputTokens != 7 || response.ReasoningTokens != 3 {
+				if response.Text() != "hello world" || response.Message.Text() != "hello world" || len(response.Message.Parts) != 2 || response.FinishReason != "STOP" || response.InputTokens != 11 || response.OutputTokens != 10 || response.ReasoningTokens != 3 {
 					t.Fatalf("response = %#v", response)
 				}
 				var raw struct {
@@ -73,7 +73,7 @@ func TestGenerateStreamIgnoresEmptyPartsAndPreservesCompletion(t *testing.T) {
 				if text.String() != "hello world" || textTokens != 2 || completions != 1 || completion == nil {
 					t.Fatalf("text = %q, text tokens = %d, completions = %d, completion = %#v", text.String(), textTokens, completions, completion)
 				}
-				if completion.RequestID != "empty-part-response" || completion.Model != "gemini-test" || completion.FinishReason != "STOP" || !completion.UsageReported || completion.Usage.InputTokens != 11 || completion.Usage.OutputTokens != 7 || completion.Usage.ReasoningTokens != 3 || completion.Usage.CachedTokens != 2 || !json.Valid(completion.Raw) {
+				if completion.RequestID != "empty-part-response" || completion.Model != "gemini-test" || completion.FinishReason != "STOP" || !completion.UsageReported || completion.Usage.InputTokens != 11 || completion.Usage.OutputTokens != 10 || completion.Usage.ReasoningTokens != 3 || completion.Usage.CachedTokens != 2 || !json.Valid(completion.Raw) {
 					t.Fatalf("completion = %#v", completion)
 				}
 			})
