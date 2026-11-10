@@ -64,7 +64,13 @@ type AgentMiddlewareConfig struct {
 	// ErrorPolicy controls whether stage failures fail the workflow.
 	ErrorPolicy ErrorPolicy
 	// ShouldRun overrides the default success-only policy. In durable mode it
-	// must be pure and deterministic; committed decisions are reused.
+	// must be pure and deterministic; committed decisions are reused. Durable
+	// mode also calls it only after every earlier stage has completed, either
+	// successfully or with an error kept by RecordError. A failed, canceled or
+	// paused earlier stage stops the workflow so it can be resumed; later stages
+	// then finish as StageSkipped with reason "upstream_unfinished" and are
+	// decided after recovery. A predicate written to react to an upstream
+	// failure therefore never sees that failure in durable mode.
 	ShouldRun func(WorkflowResult) bool
 }
 

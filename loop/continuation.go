@@ -31,6 +31,10 @@ var (
 	ErrCheckpointCommit = errors.New("checkpoint commit failed")
 	ErrPaused           = errors.New("loop paused")
 	ErrRecoveryRequired = errors.New("tool recovery required")
+	// ErrTimeoutExhausted reports that a durable loop has used its whole
+	// RetryPolicy.TotalTimeout budget of active execution time. It matches
+	// context.DeadlineExceeded.
+	ErrTimeoutExhausted = fmt.Errorf("%w: total timeout budget exhausted", context.DeadlineExceeded)
 )
 
 // Invocation identifies an accepted call independently of the provider call ID.
@@ -96,29 +100,97 @@ type GenerationUsage struct {
 // Continuation contains the next operation, consumed limits, exact materialized
 // prompt, accepted conversation and independently committed tool outcomes.
 type Continuation struct {
-	Version               int                  `json:"version"`
-	Phase                 ContinuationPhase    `json:"phase"`
-	Prompt                *modelinput.Snapshot `json:"prompt,omitempty"`
-	NextIteration         int                  `json:"next_iteration"`
-	NextAttempt           int                  `json:"next_attempt"`
-	RetryCount            int                  `json:"retry_count"`
-	Deadline              time.Time            `json:"deadline,omitempty"`
-	RequiredToolSatisfied bool                 `json:"required_tool_satisfied"`
-	InputPending          bool                 `json:"input_pending"`
-	Generations           []Generation         `json:"generations,omitempty"`
-	Pending               *Generation          `json:"pending,omitempty"`
-	Usage                 []GenerationUsage    `json:"usage,omitempty"`
-	UsageIncomplete       bool                 `json:"usage_incomplete,omitempty"`
-	Steering              []ai.Message         `json:"steering,omitempty"`
+	Version       int                  `json:"version"`
+	Phase         ContinuationPhase    `json:"phase"`
+	Prompt        *modelinput.Snapshot `json:"prompt,omitempty"`
+	NextIteration int                  `json:"next_iteration"`
+	NextAttempt   int                  `json:"next_attempt"`
+	RetryCount    int                  `json:"retry_count"`
+	// Elapsed is the active execution time consumed against
+	// RetryPolicy.TotalTimeout, measured up to the last acknowledged commit.
+	// Time spent paused or waiting for a resume does not count.
+	Elapsed               time.Duration     `json:"elapsed,omitempty"`
+	RequiredToolSatisfied bool              `json:"required_tool_satisfied"`
+	InputPending          bool              `json:"input_pending"`
+	Generations           []Generation      `json:"generations,omitempty"`
+	Pending               *Generation       `json:"pending,omitempty"`
+	Usage                 []GenerationUsage `json:"usage,omitempty"`
+	UsageIncomplete       bool              `json:"usage_incomplete,omitempty"`
+	Steering              []ai.Message      `json:"steering,omitempty"`
 }
 
-// Clone detaches validated continuation state without retaining runtime objects.
+// Clone returns a deep copy that shares no mutable memory with c. Strings are
+// immutable and stay shared.
 func (c Continuation) Clone() Continuation {
-	// All continuation fields are JSON values; no error interfaces or callbacks.
-	data, _ := json.Marshal(c)
-	var copy Continuation
-	_ = json.Unmarshal(data, &copy)
-	return copy
+	if c.Prompt != nil {
+		prompt := c.Prompt.Clone()
+		c.Prompt = &prompt
+	}
+	if c.Generations != nil {
+		generations := make([]Generation, len(c.Generations))
+		for i, g := range c.Generations {
+			generations[i] = g.clone()
+		}
+		c.Generations = generations
+	}
+	if c.Pending != nil {
+		pending := c.Pending.clone()
+		c.Pending = &pending
+	}
+	c.Usage = slices.Clone(c.Usage)
+	c.Steering = ai.CloneMessages(c.Steering)
+	return c
+}
+
+// detach copies the parts of the state that the loop still changes. The prompt
+// and accepted generations never change once committed, so the copy shares them.
+func (c Continuation) detach() Continuation {
+	out := c
+	out.Generations = slices.Clone(c.Generations)
+	if c.Pending != nil {
+		pending := c.Pending.clone()
+		out.Pending = &pending
+	}
+	out.Usage = slices.Clone(c.Usage)
+	out.Steering = ai.CloneMessages(c.Steering)
+	return out
+}
+
+// clone deep-copies one generation, including its invocation ledger.
+func (g Generation) clone() Generation {
+	g.Messages = ai.CloneMessages(g.Messages)
+	if g.Invocations != nil {
+		invocations := make([]InvocationRecord, len(g.Invocations))
+		for i, inv := range g.Invocations {
+			inv.Call = inv.Call.Clone()
+			if inv.Result != nil {
+				result := *inv.Result
+				result.Parts = ai.CloneParts(result.Parts)
+				inv.Result = &result
+			}
+			if inv.Approval != nil {
+				approval := inv.Approval.Clone()
+				inv.Approval = &approval
+			}
+			if inv.ApprovalDecision != nil {
+				decision := *inv.ApprovalDecision
+				inv.ApprovalDecision = &decision
+			}
+			invocations[i] = inv
+		}
+		g.Invocations = invocations
+	}
+	return g
+}
+
+// TimeoutExhausted reports whether continuing needs execution time that the
+// policy's TotalTimeout budget no longer has. A finished continuation without
+// steering needs no time.
+func (c Continuation) TimeoutExhausted(policy *RetryPolicy) bool {
+	if policy == nil || policy.TotalTimeout <= 0 || (c.Phase == PhaseDone && len(c.Steering) == 0) {
+		return false
+	}
+	return c.Elapsed >= policy.TotalTimeout
 }
 
 // Validate checks schema, canonical messages, identities and invocation consistency.
@@ -126,7 +198,14 @@ func (c Continuation) Validate() error {
 	if _, err := json.Marshal(c); err != nil {
 		return ErrContinuation
 	}
-	if c.Version != ContinuationVersion || c.NextIteration < 1 || c.NextAttempt < 1 || c.RetryCount < 0 {
+	return c.validate(0, true)
+}
+
+// validate checks the continuation. The first trusted generations were
+// validated earlier and never change, so only their identities are checked
+// again. checkPrompt is false once the frozen prompt has been validated.
+func (c Continuation) validate(trusted int, checkPrompt bool) error {
+	if c.Version != ContinuationVersion || c.NextIteration < 1 || c.NextAttempt < 1 || c.RetryCount < 0 || c.Elapsed < 0 {
 		return ErrContinuation
 	}
 	switch c.Phase {
@@ -140,66 +219,90 @@ func (c Continuation) Validate() error {
 	if c.Prompt == nil {
 		return ErrContinuation
 	}
-	if _, err := modelinput.Restore(*c.Prompt); err != nil {
-		return fmt.Errorf("%w: %v", ErrContinuation, err)
+	if checkPrompt {
+		if err := c.Prompt.Validate(); err != nil {
+			return fmt.Errorf("%w: %v", ErrContinuation, err)
+		}
+	}
+	for _, m := range c.Steering {
+		if err := m.Validate(); err != nil {
+			return fmt.Errorf("%w: %v", ErrContinuation, err)
+		}
 	}
 	ids := map[string]bool{}
-	all := append([]Generation(nil), c.Generations...)
-	if c.Pending != nil {
-		all = append(all, *c.Pending)
+	for i, g := range c.Generations {
+		if err := g.validate(ids, i >= trusted); err != nil {
+			return err
+		}
 	}
-	for _, g := range all {
-		if g.ID == "" || ids[g.ID] || g.Iteration < 0 || g.Attempt < 0 || g.InputMessages < 0 || g.InputMessages > len(g.Messages) {
-			return ErrContinuation
-		}
-		ids[g.ID] = true
-		for _, m := range g.Messages {
-			if err := m.Validate(); err != nil {
-				return fmt.Errorf("%w: %v", ErrContinuation, err)
-			}
-		}
-		var calls []ai.ToolCall
-		for _, m := range g.Messages {
-			calls = append(calls, m.ToolCalls()...)
-		}
-		if len(calls) != len(g.Invocations) {
-			return ErrContinuation
-		}
-		for i, inv := range g.Invocations {
-			if inv.ID == "" || ids[inv.ID] || inv.Attempt < 0 || !sameJSON(calls[i], inv.Call) {
+	if c.Pending != nil {
+		return c.Pending.validate(ids, true)
+	}
+	return nil
+}
+
+// validate checks one generation and records its identities in ids. Without
+// deep, only identity uniqueness is checked.
+func (g Generation) validate(ids map[string]bool, deep bool) error {
+	if g.ID == "" || ids[g.ID] || g.Iteration < 0 || g.Attempt < 0 || g.InputMessages < 0 || g.InputMessages > len(g.Messages) {
+		return ErrContinuation
+	}
+	ids[g.ID] = true
+	if !deep {
+		for _, inv := range g.Invocations {
+			if inv.ID == "" || ids[inv.ID] {
 				return ErrContinuation
 			}
 			ids[inv.ID] = true
-			switch inv.Disposition {
-			case InvocationPlanned:
-				if inv.Result != nil || inv.ProcessingFailed {
-					return ErrContinuation
-				}
-			case InvocationDispatched:
-				if inv.Attempt < 1 || inv.Result != nil {
-					return ErrContinuation
-				}
-			case InvocationCompleted:
-				if inv.Result == nil && !inv.ProcessingFailed {
-					return ErrContinuation
-				}
-			default:
+		}
+		return nil
+	}
+	for _, m := range g.Messages {
+		if err := m.Validate(); err != nil {
+			return fmt.Errorf("%w: %v", ErrContinuation, err)
+		}
+	}
+	var calls []ai.ToolCall
+	for _, m := range g.Messages {
+		calls = append(calls, m.ToolCalls()...)
+	}
+	if len(calls) != len(g.Invocations) {
+		return ErrContinuation
+	}
+	for i, inv := range g.Invocations {
+		if inv.ID == "" || ids[inv.ID] || inv.Attempt < 0 || !sameJSON(calls[i], inv.Call) {
+			return ErrContinuation
+		}
+		ids[inv.ID] = true
+		switch inv.Disposition {
+		case InvocationPlanned:
+			if inv.Result != nil || inv.ProcessingFailed {
 				return ErrContinuation
 			}
-			if inv.Result != nil {
-				if inv.Result.ToolCallID != inv.Call.ID || inv.Result.Name != inv.Call.Name {
-					return ErrContinuation
-				}
-				if err := (ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: inv.Result}}}).Validate(); err != nil {
-					return ErrContinuation
-				}
-			}
-			if inv.Approval != nil && (inv.Approval.ID == "" || !sameJSON(inv.Approval.Input.Call, inv.Call)) {
+		case InvocationDispatched:
+			if inv.Attempt < 1 || inv.Result != nil {
 				return ErrContinuation
 			}
-			if inv.ApprovalDecision != nil && (inv.Approval == nil || inv.ApprovalDecision.RequestID != inv.Approval.ID) {
+		case InvocationCompleted:
+			if inv.Result == nil && !inv.ProcessingFailed {
 				return ErrContinuation
 			}
+		default:
+			return ErrContinuation
+		}
+		if inv.Result != nil {
+			if inv.Result.ToolCallID != inv.Call.ID || inv.Result.Name != inv.Call.Name {
+				return ErrContinuation
+			}
+			if err := (ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: inv.Result}}}).Validate(); err != nil {
+				return ErrContinuation
+			}
+		}
+		if inv.Approval != nil && (inv.Approval.ID == "" || !sameJSON(inv.Approval.Input.Call, inv.Call)) {
+			return ErrContinuation
+		}
+		if inv.ApprovalDecision != nil && (inv.Approval == nil || inv.ApprovalDecision.RequestID != inv.Approval.ID) {
+			return ErrContinuation
 		}
 	}
 	return nil
@@ -215,7 +318,9 @@ func sameJSON(a, b any) bool {
 // ContinuationControl is the optional loop integration boundary. Commit must
 // acknowledge the exact snapshot before returning nil. Applications normally use
 // agent.Durability, which adds revision ownership and workflow aggregation.
-// The loop invokes Commit serially and supplies detached values.
+// The loop invokes Commit serially. The supplied value shares the frozen prompt
+// and accepted generations with the loop, so Commit must not modify it; use
+// Continuation.Clone for an independent copy.
 // Settlement writes retain context values but detach execution cancellation;
 // Commit must enforce its own storage timeout. Admission writes remain cancelable.
 type ContinuationControl struct {
@@ -413,6 +518,12 @@ type durableLoop struct {
 	generationID string
 	failed       error
 	events       chan<- Event
+	// started and baseElapsed measure active execution time for this handle.
+	started     time.Time
+	baseElapsed time.Duration
+	// validated counts accepted generations that were already validated.
+	validated       int
+	promptValidated bool
 }
 
 // commit acknowledges progress using the live execution context before new work.
@@ -431,13 +542,16 @@ func (d *durableLoop) commitWithContexts(storageCtx, eventCtx context.Context) e
 	if d.failed != nil {
 		return d.failed
 	}
-	if err := d.state.Validate(); err != nil {
+	d.state.Elapsed = d.baseElapsed + time.Since(d.started)
+	if err := d.state.validate(d.validated, !d.promptValidated); err != nil {
 		return err
 	}
-	if err := d.control.Commit(storageCtx, d.state.Clone()); err != nil {
+	if err := d.control.Commit(storageCtx, d.state.detach()); err != nil {
 		d.failed = fmt.Errorf("%w: %w", ErrCheckpointCommit, err)
 		return d.failed
 	}
+	d.validated = len(d.state.Generations)
+	d.promptValidated = true
 	if d.events != nil {
 		event := Event{Type: EventCheckpointCommitted}
 		if d.control.Revision != nil {

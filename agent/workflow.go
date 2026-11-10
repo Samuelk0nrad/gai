@@ -187,7 +187,7 @@ func (w *Workflow) start(ctx context.Context) (<-chan Event, error) {
 	obs.Started(ctx)
 
 	var primary <-chan loop.Event
-	if w.durability != nil && w.durability.stage(w.stageID).Complete {
+	if w.durability != nil && w.durability.stageComplete(w.stageID) {
 		completed := make(chan loop.Event, 1)
 		completed <- loop.DoneEvent()
 		close(completed)

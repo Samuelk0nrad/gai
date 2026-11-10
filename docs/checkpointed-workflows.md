@@ -35,6 +35,8 @@ If acknowledgement is ambiguous, the callback must reload and compare both the p
 
 `Resume` claims ownership by committing a fresh execution identity against the loaded revision before model or tool work starts. CAS alone cannot revoke effects already started by another worker. Use leases/fencing and external idempotency where required. Commit callbacks may call `Result` or `RequestPause`, but must not synchronously wait for the workflow to finish or consume its event stream.
 
+Each commit carries the complete checkpoint, including the accepted conversation and tool results, and the callback receives its own copy. Storage cost therefore grows with the transcript: a run with many large tool results writes its whole history at every boundary. Keep large tool output out of the conversation where possible, for example by returning a reference that the application stores separately.
+
 Persistence of settled tool results, terminal provider usage, and stage/workflow termination retains context values but detaches execution cancellation. The callback must enforce its own storage timeout. This lets a cooperative cancellation save known outcomes and `StatusCanceled` without keeping event consumers alive. Admission writes still use the live execution context. A genuine storage failure remains a checkpoint error, including during cancellation; GAI does not claim cancellation was durably recorded when that write failed.
 
 Checkpoints contain selected prompts, user content, tool arguments and processed results. Apply the application's access, encryption and retention rules. Raw output rejected by the tool result processor is not checkpointed. Error text in saved stage failures is deliberately reduced to safe classifications.
@@ -52,17 +54,19 @@ resumed, err := a.Resume(ctx, checkpoint, agent.ResumeInput{}, durability)
 result, err := resumed.Run(ctx)
 ```
 
-The logical run ID stays the same; each handle gets a new execution ID. A checkpoint whose status is `StatusSucceeded` or `StatusCanceled` cannot be resumed. A failed execution can recover from its last acknowledged continuation, subject to limits and tool reconciliation. Total timeout uses an absolute logical deadline; pause and recovery do not grant additional time. Interrupted model attempts consume retry budget and get new generation identities. Accepted tool plans are never regenerated.
+The logical run ID stays the same; each handle gets a new execution ID. Only a checkpoint whose status is `StatusSucceeded` is finished; `Resume` returns `agent.ErrWorkflowFinished` for it. `StatusFailed` and `StatusCanceled` describe the last execution handle, not the logical run: both resume from the last acknowledged continuation, subject to limits and tool reconciliation. Interrupted model attempts consume retry budget and get new generation identities. Accepted tool plans are never regenerated.
+
+`RetryPolicy.TotalTimeout` limits active execution time for each stage. Each continuation records the time used so far (`Continuation.Elapsed`), measured up to its last acknowledged commit. Time spent paused or waiting for a resume does not count, so an approval may wait longer than `TotalTimeout`. A worker lost between commits does not charge the time since its last commit. When a stage that still has work has used its whole budget, `Resume` returns `loop.ErrTimeoutExhausted` (which matches `context.DeadlineExceeded`) before claiming the checkpoint. A compatible definition with a larger `TotalTimeout` can continue it.
 
 | Transition | Preserved state and behavior |
 | --- | --- |
 | Provider retry | Starts a new physical model attempt under the existing retry policy and consumed retry budget. |
 | Generation discard | Rejects that response from accepted conversation while retaining its billed usage and consumed iteration. |
-| Workflow recovery | Restores committed prompt, conversation, pending plan, tool ledger, approvals, stage/output decisions, commands, counters, usage, and deadline. It reconciles uncertain effects before continuing. |
+| Workflow recovery | Restores committed prompt, conversation, pending plan, tool ledger, approvals, stage/output decisions, commands, counters, usage, and elapsed execution time. It reconciles uncertain effects before continuing. |
 
 `Resume` validates saved loop settings and reattached dependencies before claiming the checkpoint. A failed restore leaves stored status, execution identity and revision untouched. Propagated middleware setup failures remain unfinished so a later resume can retry mapping or child construction; `RecordError` deliberately completes and retains an accepted failure.
 
-Persist explicit user cancellation in the application's control inbox so a queue cannot revive an older checkpoint. A canceled context alone cannot guarantee durable cancellation. For worker shutdown, request pause; for ownership loss, fence writes and cancel the context.
+Canceling the execution context stops that handle. GAI saves known outcomes and `StatusCanceled`, and the run remains resumable; tools interrupted mid-call need recovery resolutions. To end a logical run for good, record that decision in the application's control inbox so a queue cannot revive the checkpoint. For worker shutdown, prefer `RequestPause`, which lets started tools finish; for ownership loss, fence writes and cancel the context.
 
 ## Tool identity and uncertain outcomes
 
@@ -78,7 +82,7 @@ Persist explicit user cancellation in the application's control inbox so a queue
 `Resume` returns `*loop.RecoveryRequiredError` (also matching `loop.ErrRecoveryRequired`) with unresolved invocation records. Supply a command with `ToolResolutions` using one of:
 
 - `UseVerifiedResult`: provide a canonical, already processed/redacted `ai.ToolResult` and `ToolExecution` obtained from authoritative records. Preserve the original tool call ID/name. Handler execution and output-processing status are separate.
-- `ReplayInvocation`: explicitly assert `SafeReplay: true`. GAI preserves invocation identity and increments its dispatch attempt. Current authorization is still checked. `ToolTraits.Idempotent` alone never authorizes replay.
+- `ReplayInvocation`: explicitly assert `SafeReplay: true`. GAI preserves invocation identity and increments its dispatch attempt. Current authorization is still checked. `ToolTraits.Idempotent` alone never authorizes replay. A replay cannot be combined with `CancelUnstartedTools` in the same command, because the steering would cancel the replay.
 - `ConfirmNotExecuted`: assert that the operation did not happen, allowing normal admission.
 
 Otherwise leave the run blocked. GAI cannot infer whether an external effect occurred, undo an effect whose output processor failed, or provide exactly-once behavior for an external service that ignores idempotency keys.
@@ -89,7 +93,7 @@ Pause, then resume with an application-assigned stable `CommandID` and optional 
 
 `ContinuePendingTools` is the default. GAI finishes the accepted plan before appending steering and generating again. `CancelUnstartedTools` preserves completed calls and resolves only undispatched calls with `Not executed: canceled by steering.` before appending the new input. Outcome-unknown calls must first be reconciled. Provider call/result pairing is preserved.
 
-The accepted command payload and ID are checkpointed atomically. Exact redelivery is a no-op, including after its stage has completed; conflicting reuse returns `agent.ErrCommandConflict`. New commands cannot reopen completed stages. Persist pause requests in the application's durable inbox if they must survive process loss before acknowledgement.
+The command is applied and recorded atomically: its effects go into the stage continuation, and `Checkpoint.Commands` keeps its ID with a SHA-256 digest of the materialized content. Exact redelivery is a no-op, including after its stage has completed; reusing an ID with different content returns `agent.ErrCommandConflict`. New commands cannot reopen completed stages. Persist pause requests in the application's durable inbox if they must survive process loss before acknowledgement.
 
 Set `Durability.DeferredApprovals` explicitly to persist approval requests and pause without a waiting resolver. Resume with the same request IDs in `ResumeInput.Approvals` and a command ID. Requests bind an invocation to its exact arguments. Saved approval never overrides newly revoked permissions. Without deferred mode, the existing resolver/refusal behavior is unchanged.
 
@@ -104,6 +108,8 @@ Register live dependencies and retry policy on `agent.Definition`; per-run overr
 Built-in `AgentMiddleware` stages require unique stable `AgentMiddlewareConfig.ID` values, separate from names and event indexes. `MapInput` and `ShouldRun` must be pure and deterministic: a crash before committing their outputs can reevaluate them. Once materialized, input, decision, child continuation and completed output decision are reused. Preserve/append/replace decisions survive recovery; completed stages never rerun.
 
 Durable v1 supports a flat ordered list of built-in agent stages. Custom streaming middleware and nested middleware definitions are rejected before primary execution. A paused or recoverable failed stage blocks downstream stages. `RecordError` may finish a failed stage only when no uncertain tool outcome remains; recovery-required failures propagate so the application can resolve them.
+
+This changes when `ShouldRun` runs. A stage is decided only after every earlier stage has completed, either successfully or with an error kept by `RecordError`. When the primary agent or an earlier stage fails, is canceled or pauses, later stages emit `EventStageStart` and `EventStageFinish` with `StageSkipped` and reason `upstream_unfinished`, and no decision is saved; they are decided after a resumed execution completes the earlier stage. A predicate written to run a fallback after a primary failure therefore never sees that failure in durable mode.
 
 ## Events, output and usage
 

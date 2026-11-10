@@ -3,6 +3,7 @@ package modelinput
 import (
 	"context"
 	"encoding/json"
+	"slices"
 
 	"github.com/lace-ai/gai/ai"
 )
@@ -21,10 +22,36 @@ type Snapshot struct {
 func (s Snapshot) Clone() Snapshot {
 	s.Messages = ai.CloneMessages(s.Messages)
 	s.User = ai.CloneParts(s.User)
-	data, _ := json.Marshal(s.Context)
-	s.Context = nil
-	_ = json.Unmarshal(data, &s.Context)
+	if s.Context != nil {
+		parts := make([]PartSnapshot, len(s.Context))
+		for i, part := range s.Context {
+			parts[i] = PartSnapshot{PartName: part.PartName, Node: cloneRenderNode(part.Node), Messages: ai.CloneMessages(part.Messages)}
+		}
+		s.Context = parts
+	}
 	return s
+}
+
+// Validate checks the canonical request prefix and budget without building a
+// prompt builder.
+func (s Snapshot) Validate() error {
+	if err := (ai.AIRequest{Messages: s.Messages}).Validate(); err != nil {
+		return err
+	}
+	return s.Budget.Validate()
+}
+
+// cloneRenderNode deep-copies a materialized render tree.
+func cloneRenderNode(node RenderNode) RenderNode {
+	node.Fields = slices.Clone(node.Fields)
+	if node.Children != nil {
+		children := make([]RenderNode, len(node.Children))
+		for i, child := range node.Children {
+			children[i] = cloneRenderNode(child)
+		}
+		node.Children = children
+	}
+	return node
 }
 
 // Snapshot captures a Builder after BuildContext has materialized its sources.
@@ -42,10 +69,7 @@ func (b *Builder) Snapshot(ctx context.Context) (Snapshot, error) {
 
 // Restore creates a run-owned builder using exactly the saved canonical prefix.
 func Restore(snapshot Snapshot) (*Builder, error) {
-	if err := (ai.AIRequest{Messages: snapshot.Messages}).Validate(); err != nil {
-		return nil, err
-	}
-	if err := snapshot.Budget.Validate(); err != nil {
+	if err := snapshot.Validate(); err != nil {
 		return nil, err
 	}
 	snapshot = snapshot.Clone()
@@ -82,10 +106,7 @@ func (p frozenPart) Name() string { return p.snapshot.PartName }
 
 // Render returns frozen content without invoking the original renderer.
 func (p frozenPart) Render(ctx context.Context) (RenderNode, error) {
-	data, _ := json.Marshal(p.snapshot.Node)
-	var node RenderNode
-	_ = json.Unmarshal(data, &node)
-	return node, ctx.Err()
+	return cloneRenderNode(p.snapshot.Node), ctx.Err()
 }
 
 // Tokens counts frozen content locally without refreshing its source.

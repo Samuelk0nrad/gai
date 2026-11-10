@@ -113,7 +113,7 @@ func replayResultOutput(result AgentResult, source EventSource, continuation *lo
 				event, emit := mapLoopEvent(loop.TokenEvent(it.Count, generation.Attempt, 0, ai.Token{Part: &p}), source)
 				if emit {
 					event.GenerationID = generation.ID
-					event.Replayed = true
+					event.replayed = true
 					events = append(events, event)
 				}
 			}
@@ -124,7 +124,7 @@ func replayResultOutput(result AgentResult, source EventSource, continuation *lo
 
 // finishDurablePrimary preserves completed stages instead of writing them again.
 func (w *Workflow) finishDurablePrimary(ctx context.Context, result AgentResult, paused bool) error {
-	if w.durability.stage(w.stageID).Complete {
+	if w.durability.stageComplete(w.stageID) {
 		return nil
 	}
 	return w.durability.finishStage(ctx, w.stageID, result, paused)

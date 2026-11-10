@@ -19,13 +19,16 @@ func (r *runExecution) prepareContinuation() error {
 	if control.Commit == nil || control.RunID == "" || control.ExecutionID == "" || control.StageID == "" {
 		return ErrContinuation
 	}
-	d := &durableLoop{control: control, events: r.events}
+	d := &durableLoop{control: control, events: r.events, started: time.Now()}
 	r.owner.durable = d
 	if control.Initial != nil {
 		d.state = control.Initial.Clone()
 		if err := d.state.Validate(); err != nil {
 			return err
 		}
+		d.validated = len(d.state.Generations)
+		d.promptValidated = true
+		d.baseElapsed = d.state.Elapsed
 		if err := d.state.ResolveRecovery(nil); err != nil {
 			return err
 		}
@@ -52,14 +55,18 @@ func (r *runExecution) prepareContinuation() error {
 		}
 	} else {
 		d.state = Continuation{Version: ContinuationVersion, Phase: PhaseReady, NextIteration: 1, NextAttempt: 1, InputPending: true, RequiredToolSatisfied: r.owner.ToolChoice.Mode != ai.ToolChoiceRequired}
-		if r.owner.RetryPolicy != nil && r.owner.RetryPolicy.TotalTimeout > 0 {
-			d.state.Deadline = time.Now().Add(r.owner.RetryPolicy.TotalTimeout)
-		}
 	}
-	if !d.state.Deadline.IsZero() {
-		var cancel context.CancelFunc
-		r.ctx, cancel = context.WithDeadline(r.ctx, d.state.Deadline)
-		r.continuationCancel = cancel
+	// TotalTimeout limits active execution time. Each handle gets the budget
+	// that earlier executions left, so time spent paused does not count.
+	if policy := r.owner.RetryPolicy; policy != nil && policy.TotalTimeout > 0 {
+		if d.state.TimeoutExhausted(policy) {
+			return ErrTimeoutExhausted
+		}
+		if remaining := policy.TotalTimeout - d.state.Elapsed; remaining > 0 {
+			var cancel context.CancelFunc
+			r.ctx, cancel = context.WithTimeout(r.ctx, remaining)
+			r.continuationCancel = cancel
+		}
 	}
 	return nil
 }

@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -80,15 +83,31 @@ type ResumeInput struct {
 	ToolResolutions []loop.ToolRecoveryResolution
 }
 
-// ContinuationCommand contains a materialized command, including both its
-// context and user messages. Exact redelivery never reapplies the command.
+// ContinuationCommand records an accepted command by ID and by a SHA-256 digest
+// of its materialized content. Exact redelivery never reapplies the command; a
+// different payload under the same ID is a conflict. The applied content itself
+// lives in the stage continuation (steering, approvals and tool resolutions).
 type ContinuationCommand struct {
-	ID              string                        `json:"id"`
-	StageID         string                        `json:"stage_id"`
-	Messages        []ai.Message                  `json:"messages,omitempty"`
-	PendingTools    PendingToolAction             `json:"pending_tools,omitempty"`
-	Approvals       []loop.ToolApprovalDecision   `json:"approvals,omitempty"`
-	ToolResolutions []loop.ToolRecoveryResolution `json:"tool_resolutions,omitempty"`
+	ID      string `json:"id"`
+	StageID string `json:"stage_id"`
+	Digest  string `json:"digest"`
+}
+
+// commandDigest identifies the materialized command content, including the
+// rendered context and user messages.
+func commandDigest(stageID string, messages []ai.Message, input ResumeInput) (string, error) {
+	data, err := json.Marshal(struct {
+		StageID         string                        `json:"stage_id"`
+		Messages        []ai.Message                  `json:"messages,omitempty"`
+		PendingTools    PendingToolAction             `json:"pending_tools,omitempty"`
+		Approvals       []loop.ToolApprovalDecision   `json:"approvals,omitempty"`
+		ToolResolutions []loop.ToolRecoveryResolution `json:"tool_resolutions,omitempty"`
+	}{stageID, messages, input.PendingTools, input.Approvals, input.ToolResolutions})
+	if err != nil {
+		return "", fmt.Errorf("%w: command: %w", ErrCheckpoint, err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // StageCheckpoint uses a registration ID, never EventSource.Index or a display
@@ -158,12 +177,83 @@ func normalizeDurableMeta(meta map[string]any) (map[string]any, error) {
 	return normalized, nil
 }
 
-// Clone detaches a validated checkpoint for callback or caller ownership.
+// Clone returns a deep copy that shares no mutable memory with c. Strings are
+// immutable and stay shared. Metadata maps and slices are copied; other
+// metadata values, which JSON-decoded checkpoints never contain, are shared.
 func (c Checkpoint) Clone() Checkpoint {
-	data, _ := json.Marshal(c)
-	var copy Checkpoint
-	_ = json.Unmarshal(data, &copy)
-	return copy
+	if c.Stages != nil {
+		stages := make([]StageCheckpoint, len(c.Stages))
+		for i, s := range c.Stages {
+			stages[i] = s.clone()
+		}
+		c.Stages = stages
+	}
+	c.Commands = slices.Clone(c.Commands)
+	return c
+}
+
+// clone deep-copies one stage record.
+func (s StageCheckpoint) clone() StageCheckpoint {
+	if s.Continuation != nil {
+		continuation := s.Continuation.Clone()
+		s.Continuation = &continuation
+	}
+	if s.Settings != nil {
+		settings := *s.Settings
+		settings.ToolChoice = cloneToolChoice(settings.ToolChoice)
+		settings.ResponseFormat = cloneResponseFormat(settings.ResponseFormat)
+		settings.RequestBudget = clonePointer(settings.RequestBudget)
+		s.Settings = &settings
+	}
+	if s.Input.ScalarExecution != nil {
+		s.Input.ScalarExecution = snapshotOverrides(restoreOverrides(s.Input.ScalarExecution))
+	}
+	s.Input.Meta = cloneJSONObject(s.Input.Meta)
+	s.Input.TraceContext = cloneTraceContext(s.Input.TraceContext)
+	s.Errors = slices.Clone(s.Errors)
+	return s
+}
+
+// cloneJSONObject deep-copies JSON-shaped metadata.
+func cloneJSONObject(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for key, value := range m {
+		out[key] = cloneJSONValue(value)
+	}
+	return out
+}
+
+func cloneJSONValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		return cloneJSONObject(v)
+	case []any:
+		out := make([]any, len(v))
+		for i := range v {
+			out[i] = cloneJSONValue(v[i])
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func cloneTraceContext(trace *gai.TraceContext) *gai.TraceContext {
+	if trace == nil {
+		return nil
+	}
+	copy := *trace
+	copy.Tags = slices.Clone(trace.Tags)
+	if trace.Metadata != nil {
+		copy.Metadata = make(map[string]string, len(trace.Metadata))
+		for key, value := range trace.Metadata {
+			copy.Metadata[key] = value
+		}
+	}
+	return &copy
 }
 
 // Validate rejects incompatible and structurally invalid saved state before any
@@ -172,6 +262,13 @@ func (c Checkpoint) Validate() error {
 	if _, err := json.Marshal(c); err != nil {
 		return fmt.Errorf("%w: %w", ErrCheckpoint, err)
 	}
+	return c.validate(true)
+}
+
+// validate checks checkpoint structure. With deep, it also validates every
+// stage continuation; commits skip that because the loop validates each
+// continuation before handing it over, and Resume validates loaded ones.
+func (c Checkpoint) validate(deep bool) error {
 	if c.Version != CheckpointVersion || c.RunID == "" || c.ExecutionID == "" || c.DefinitionRevision == "" || c.Revision == 0 || len(c.Stages) == 0 || c.Stages[0].ID != PrimaryStageID {
 		return ErrCheckpoint
 	}
@@ -191,7 +288,7 @@ func (c Checkpoint) Validate() error {
 		if s.Skipped && (!s.Complete || s.ShouldRun) {
 			return ErrCheckpoint
 		}
-		if s.Continuation != nil {
+		if deep && s.Continuation != nil {
 			if err := s.Continuation.Validate(); err != nil {
 				return fmt.Errorf("%w: %w", ErrCheckpoint, err)
 			}
@@ -205,7 +302,7 @@ func (c Checkpoint) Validate() error {
 	}
 	commandIDs := map[string]bool{}
 	for _, command := range c.Commands {
-		if command.ID == "" || commandIDs[command.ID] || !seen[command.StageID] {
+		if command.ID == "" || command.Digest == "" || commandIDs[command.ID] || !seen[command.StageID] {
 			return ErrCheckpoint
 		}
 		commandIDs[command.ID] = true
@@ -213,11 +310,15 @@ func (c Checkpoint) Validate() error {
 	return nil
 }
 
+// checkpointCoordinator owns the aggregate checkpoint. state is never modified
+// in place: each commit builds a new value that shares unchanged stage data with
+// the previous one, so readers only need mu to load the current value.
 type checkpointCoordinator struct {
-	mu               sync.RWMutex
-	commitMu         sync.Mutex
-	state            Checkpoint
-	latest           *Checkpoint
+	mu       sync.RWMutex
+	commitMu sync.Mutex
+	state    Checkpoint
+	// acknowledged reports whether state has been durably committed.
+	acknowledged     bool
 	durability       Durability
 	pause            atomic.Bool
 	pauseOnce        sync.Once
@@ -230,19 +331,50 @@ type checkpointCoordinator struct {
 // snapshot returns only acknowledged state, or nil before the first commit.
 func (d *checkpointCoordinator) snapshot() *Checkpoint {
 	d.mu.RLock()
-	defer d.mu.RUnlock()
-	if d.latest == nil {
+	state, acknowledged := d.state, d.acknowledged
+	d.mu.RUnlock()
+	if !acknowledged {
 		return nil
 	}
-	c := d.latest.Clone()
+	c := state.Clone()
 	return &c
 }
 
-// current detaches coordinator state before proposing the next revision.
+// current returns a detached copy of the coordinator state.
 func (d *checkpointCoordinator) current() Checkpoint {
 	d.mu.RLock()
+	state := d.state
+	d.mu.RUnlock()
+	return state.Clone()
+}
+
+// status reads the workflow status without copying stage payloads.
+func (d *checkpointCoordinator) status() WorkflowStatus {
+	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.state.Clone()
+	return d.state.Status
+}
+
+// runID reads the logical run identity without copying stage payloads.
+func (d *checkpointCoordinator) runID() string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.state.RunID
+}
+
+// earlierStagesComplete reports whether every stage before id has completed.
+func (d *checkpointCoordinator) earlierStagesComplete(id string) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, s := range d.state.Stages {
+		if s.ID == id {
+			return true
+		}
+		if !s.Complete {
+			return false
+		}
+	}
+	return true
 }
 
 // eventIdentity reads immutable stream identifiers without copying payloads.
@@ -263,43 +395,60 @@ func (d *checkpointCoordinator) revision() uint64 {
 }
 
 // commit serializes CAS transitions and latches storage failures to fence admission.
+// change may replace top-level and stage fields of its argument, but must not
+// modify values reachable through them: those are shared with earlier states.
 func (d *checkpointCoordinator) commit(ctx context.Context, change func(*Checkpoint)) error {
 	d.commitMu.Lock()
 	defer d.commitMu.Unlock()
 	if d.failure != nil {
 		return d.failure
 	}
-	next := d.current()
+	d.mu.RLock()
+	next := d.state
+	d.mu.RUnlock()
+	next.Stages = slices.Clone(next.Stages)
 	expected := next.Revision
 	change(&next)
 	next.Revision = expected + 1
-	// Validate serializability before cloning, so no unsupported value disappears.
-	if _, err := json.Marshal(next); err != nil {
-		return fmt.Errorf("%w: %w", ErrCheckpoint, err)
-	}
-	if err := next.Validate(); err != nil {
+	if err := next.validate(false); err != nil {
 		return err
 	}
+	// The callback owns its copy. Metadata is normalized to JSON values and the
+	// loop validates every continuation, so the copy is serializable.
 	if err := d.durability.Commit(ctx, expected, next.Clone()); err != nil {
 		d.failure = fmt.Errorf("%w: %w", loop.ErrCheckpointCommit, err)
 		return d.failure
 	}
 	d.mu.Lock()
-	d.state = next.Clone()
-	latest := next.Clone()
-	d.latest = &latest
+	d.state = next
+	d.acknowledged = true
 	d.mu.Unlock()
 	return nil
 }
 
-// stage returns an isolated stage record without exposing coordinator-owned data.
+// stage returns an isolated copy of one stage record.
 func (d *checkpointCoordinator) stage(id string) StageCheckpoint {
-	for _, s := range d.current().Stages {
+	d.mu.RLock()
+	state := d.state
+	d.mu.RUnlock()
+	for _, s := range state.Stages {
 		if s.ID == id {
-			return s
+			return s.clone()
 		}
 	}
 	return StageCheckpoint{}
+}
+
+// stageComplete reads one completion flag without copying stage payloads.
+func (d *checkpointCoordinator) stageComplete(id string) bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, s := range d.state.Stages {
+		if s.ID == id {
+			return s.Complete
+		}
+	}
+	return false
 }
 
 // changeStage applies a transition to the registered durable stage identity.
@@ -315,8 +464,8 @@ func changeStage(c *Checkpoint, id string, change func(*StageCheckpoint)) {
 // control connects one loop to the aggregate checkpoint coordinator.
 func (d *checkpointCoordinator) control(stageID string) *loop.ContinuationControl {
 	stage := d.stage(stageID)
-	state := d.current()
-	return &loop.ContinuationControl{RunID: state.RunID, ExecutionID: state.ExecutionID, StageID: stageID, Initial: stage.Continuation, Revision: d.revision, DeferredApprovals: d.durability.DeferredApprovals, PauseRequested: d.pause.Load, PauseSignal: d.pauseSignal, Commit: func(ctx context.Context, c loop.Continuation) error {
+	runID, executionID, _ := d.eventIdentity(-1)
+	return &loop.ContinuationControl{RunID: runID, ExecutionID: executionID, StageID: stageID, Initial: stage.Continuation, Revision: d.revision, DeferredApprovals: d.durability.DeferredApprovals, PauseRequested: d.pause.Load, PauseSignal: d.pauseSignal, Commit: func(ctx context.Context, c loop.Continuation) error {
 		return d.commit(ctx, func(cp *Checkpoint) {
 			cp.ActiveStageID = stageID
 			changeStage(cp, stageID, func(s *StageCheckpoint) { s.Continuation = &c })
@@ -393,7 +542,7 @@ func (w *Workflow) configureDurability(a *Agent, input RunInput) error {
 	default:
 		return ErrUnsupportedDurablePrompt
 	}
-	cp := Checkpoint{Version: CheckpointVersion, RunID: input.ID, ExecutionID: rand.Text(), DefinitionRevision: input.Durability.DefinitionRevision, DeferredApprovals: input.Durability.DeferredApprovals, Status: StatusRunning, ActiveStageID: PrimaryStageID, Stages: []StageCheckpoint{{ID: PrimaryStageID, Name: w.name, DecisionMade: true, ShouldRun: true, Settings: settingsForLoop(w.loop), Input: checkpointInput{Meta: input.Meta, TraceContext: input.TraceContext, ScalarExecution: snapshotOverrides(input.Execution)}}}}
+	cp := Checkpoint{Version: CheckpointVersion, RunID: input.ID, ExecutionID: rand.Text(), DefinitionRevision: input.Durability.DefinitionRevision, DeferredApprovals: input.Durability.DeferredApprovals, Status: StatusRunning, ActiveStageID: PrimaryStageID, Stages: []StageCheckpoint{{ID: PrimaryStageID, Name: w.name, DecisionMade: true, ShouldRun: true, Settings: settingsForLoop(w.loop), Input: checkpointInput{Meta: cloneJSONObject(input.Meta), TraceContext: cloneTraceContext(input.TraceContext), ScalarExecution: snapshotOverrides(input.Execution)}}}}
 	for _, item := range a.def.Middleware {
 		m := item.(*AgentMiddleware)
 		cp.Stages = append(cp.Stages, StageCheckpoint{ID: m.config.ID, Name: m.name(), Output: m.config.Output})
@@ -405,15 +554,17 @@ func (w *Workflow) configureDurability(a *Agent, input RunInput) error {
 }
 
 // Resume claims the loaded revision before executing any model/tool work. It
-// creates a fresh single-use handle and preserves the logical RunID. Terminal
-// success/cancellation require a new run. Failed checkpoints may be recovered
-// only through their last acknowledged continuation and explicit resolutions.
+// creates a fresh single-use handle and preserves the logical RunID. Only a
+// succeeded run is finished. A failed or canceled execution resumes from its
+// last acknowledged continuation, subject to explicit tool resolutions and the
+// remaining TotalTimeout budget. Ending a logical run early is an application
+// decision recorded in application storage.
 func (a *Agent) Resume(ctx context.Context, checkpoint Checkpoint, input ResumeInput, durability Durability) (*Workflow, error) {
 	if err := checkpoint.Validate(); err != nil {
 		return nil, err
 	}
 	checkpoint = checkpoint.Clone()
-	if checkpoint.Status == StatusSucceeded || checkpoint.Status == StatusCanceled {
+	if checkpoint.Status == StatusSucceeded {
 		return nil, ErrWorkflowFinished
 	}
 	if checkpoint.DefinitionRevision != durability.DefinitionRevision || checkpoint.DeferredApprovals != durability.DeferredApprovals {
@@ -454,15 +605,20 @@ func (a *Agent) Resume(ctx context.Context, checkpoint Checkpoint, input ResumeI
 		if input.CommandID == "" || (input.PendingTools != ContinuePendingTools && input.PendingTools != CancelUnstartedTools) {
 			return nil, ErrCheckpoint
 		}
+		if input.PendingTools == CancelUnstartedTools && slices.ContainsFunc(input.ToolResolutions, func(r loop.ToolRecoveryResolution) bool { return r.Action == loop.ReplayInvocation }) {
+			return nil, fmt.Errorf("%w: ReplayInvocation cannot be combined with CancelUnstartedTools", ErrCheckpoint)
+		}
 		messages, err := modelinput.MaterializeInput(ctx, input.Prompt)
 		if err != nil {
 			return nil, err
 		}
-		command := ContinuationCommand{ID: input.CommandID, StageID: stageID, Messages: messages, PendingTools: input.PendingTools, Approvals: input.Approvals, ToolResolutions: input.ToolResolutions}
+		digest, err := commandDigest(stageID, messages, input)
+		if err != nil {
+			return nil, err
+		}
+		command := ContinuationCommand{ID: input.CommandID, StageID: stageID, Digest: digest}
 		if previous != nil {
-			a, _ := json.Marshal(previous)
-			b, err := json.Marshal(command)
-			if err != nil || string(a) != string(b) {
+			if *previous != command {
 				return nil, ErrCommandConflict
 			}
 		} else {
@@ -500,17 +656,25 @@ func (a *Agent) Resume(ctx context.Context, checkpoint Checkpoint, input ResumeI
 	if err := checkpoint.Validate(); err != nil {
 		return nil, err
 	}
-	// Validate restored dependencies before changing checkpoint ownership.
+	// Validate restored dependencies and the remaining timeout budget before
+	// changing checkpoint ownership.
 	primary := checkpoint.Stages[0]
 	l, err := a.restoreCheckpointLoop(primary)
 	if err != nil {
 		return nil, err
 	}
+	if !primary.Complete && primary.Continuation.TimeoutExhausted(l.RetryPolicy) {
+		return nil, loop.ErrTimeoutExhausted
+	}
 	for i, item := range a.def.Middleware {
 		stage := checkpoint.Stages[i+1]
 		if stage.Continuation != nil && !stage.Complete {
-			if _, err := item.(*AgentMiddleware).agent.restoreCheckpointLoop(stage); err != nil {
+			child, err := item.(*AgentMiddleware).agent.restoreCheckpointLoop(stage)
+			if err != nil {
 				return nil, err
+			}
+			if stage.Continuation.TimeoutExhausted(child.RetryPolicy) {
+				return nil, loop.ErrTimeoutExhausted
 			}
 		}
 	}
@@ -521,7 +685,7 @@ func (a *Agent) Resume(ctx context.Context, checkpoint Checkpoint, input ResumeI
 		return nil, err
 	}
 	d.resumeCheckpoint = d.snapshot()
-	runInput := RunInput{ID: checkpoint.RunID, Meta: primary.Input.Meta, TraceContext: primary.Input.TraceContext, Durability: &durability, Execution: restoreOverrides(primary.Input.ScalarExecution)}
+	runInput := RunInput{ID: checkpoint.RunID, Meta: cloneJSONObject(primary.Input.Meta), TraceContext: cloneTraceContext(primary.Input.TraceContext), Durability: &durability, Execution: restoreOverrides(primary.Input.ScalarExecution)}
 	if primary.Continuation != nil && primary.Continuation.Prompt != nil {
 		runInput.Prompt = primary.Continuation.Prompt.Input()
 	}

@@ -108,8 +108,9 @@ type Event struct {
 	CheckpointRevision uint64
 	// Checkpoint on Resumed/Paused is the authoritative canonical recovery snapshot.
 	Checkpoint *Checkpoint
-	// Replayed is used internally to rebuild output without redelivering old output.
-	Replayed      bool
+	// replayed marks restored events that rebuild output and stage results
+	// without being delivered to the caller again.
+	replayed      bool
 	ToolExecution *loop.ToolExecution
 	ToolApproval  *loop.ToolApprovalRequest
 	Type          EventType

@@ -212,7 +212,7 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 				continue
 			}
 			accumulator.add(event)
-			if !event.Replayed {
+			if !event.replayed {
 				deliver = sendWorkflowEvent(ctx, out, stamp(cloneEvent(event)), deliver)
 			}
 		}
@@ -228,7 +228,7 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 		w.recordStageErrorsLocked(stageErrs)
 		terminal := Event{Type: EventDone, Source: EventSource{Kind: SourceWorkflow}}
 		w.result.Status = StatusSucceeded
-		if w.durability != nil && w.durability.current().Status == StatusPaused {
+		if w.durability != nil && w.durability.status() == StatusPaused {
 			w.result.Status = StatusPaused
 		}
 		switch {

@@ -448,18 +448,19 @@ func TestDurableDeferredApprovalAndCurrentPolicy(t *testing.T) {
 	}
 }
 
-func TestDurablePauseStopsQueuedToolsAndRetainsDeadline(t *testing.T) {
+func TestDurablePauseStopsQueuedToolsAndKeepsTimeoutBudget(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var w *agent.Workflow
 		var effects atomic.Int32
 		tool := durableTool(t, "write", func(context.Context, ai.ToolCall) (string, error) {
-			effects.Add(1)
-			if err := w.RequestPause(); err != nil {
-				t.Error(err)
+			if effects.Add(1) == 1 {
+				if err := w.RequestPause(); err != nil {
+					t.Error(err)
+				}
 			}
 			return "one", nil
 		})
-		def := durableDefinition(&durableModel{responses: [][]ai.Token{calls("write", "write")}}, tool)
+		def := durableDefinition(&durableModel{responses: [][]ai.Token{calls("write", "write"), response("done")}}, tool)
 		def.ToolExecution.MaxConcurrent = 1
 		def.RetryPolicy = &loop.RetryPolicy{TotalTimeout: time.Minute}
 		store := &checkpointStore{}
@@ -472,14 +473,53 @@ func TestDurablePauseStopsQueuedToolsAndRetainsDeadline(t *testing.T) {
 		if pending(cp).Invocations[0].Disposition != loop.InvocationCompleted || pending(cp).Invocations[1].Disposition != loop.InvocationPlanned {
 			t.Fatal("incorrect pause ledger")
 		}
+		if elapsed := cp.Stages[0].Continuation.Elapsed; elapsed < 0 || elapsed >= time.Minute {
+			t.Fatal("paused checkpoint has wrong elapsed time", elapsed)
+		}
+		// A person takes longer than TotalTimeout to resume; paused time is free.
 		time.Sleep(2 * time.Minute)
 		resumed, err := agent.New(def).Resume(context.Background(), cp, agent.ResumeInput{}, store.durability())
 		if err != nil {
 			t.Fatal(err)
 		}
 		result, err = resumed.Run(context.Background())
-		if !errors.Is(err, context.DeadlineExceeded) || effects.Load() != 1 {
-			t.Fatalf("deadline result=%+v err=%v effects=%d", result, err, effects.Load())
+		if err != nil || result.Status != agent.StatusSucceeded || result.Text != "done" || effects.Load() != 2 {
+			t.Fatalf("result=%+v err=%v effects=%d", result, err, effects.Load())
+		}
+	})
+}
+
+func TestDurableActiveTimeExhaustsTimeoutBudgetBeforeClaim(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		model := &durableModel{responses: [][]ai.Token{response("late")}, onRequest: func(ctx context.Context, _ int) { <-ctx.Done() }}
+		def := durableDefinition(model)
+		def.RetryPolicy = &loop.RetryPolicy{TotalTimeout: time.Minute}
+		store := &checkpointStore{}
+		result, err := newDurableRun(t, agent.New(def), store).Run(context.Background())
+		if !errors.Is(err, context.DeadlineExceeded) || result.Status != agent.StatusCanceled {
+			t.Fatal(err, result)
+		}
+		cp := store.load()
+		if cp.Status != agent.StatusCanceled || cp.Stages[0].Continuation.Elapsed < time.Minute {
+			t.Fatal("active time not recorded", cp.Status, cp.Stages[0].Continuation.Elapsed)
+		}
+		_, err = agent.New(def).Resume(context.Background(), cp, agent.ResumeInput{}, store.durability())
+		if !errors.Is(err, loop.ErrTimeoutExhausted) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cp, store.load()) {
+			t.Fatal("exhausted budget claimed the checkpoint")
+		}
+		// A definition with a larger compatible budget can continue the run.
+		// The interrupted attempt consumes one retry.
+		def.RetryPolicy = &loop.RetryPolicy{TotalTimeout: 2 * time.Minute, MaxRetries: 1}
+		def.Model = &durableModel{responses: [][]ai.Token{response("done")}}
+		resumed, err := agent.New(def).Resume(context.Background(), cp, agent.ResumeInput{}, store.durability())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result := runDurable(t, resumed); result.Text != "done" {
+			t.Fatal(result)
 		}
 	})
 }

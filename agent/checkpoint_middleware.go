@@ -8,6 +8,10 @@ import (
 	"github.com/lace-ai/gai/modelinput"
 )
 
+// stageReasonUpstreamUnfinished marks a durable stage that waits for an earlier
+// failed, canceled or paused stage to be resumed. No decision is saved for it.
+const stageReasonUpstreamUnfinished = "upstream_unfinished"
+
 // Durable MapInput/ShouldRun callbacks must be pure. A crash before their output
 // is committed can evaluate them again; after commit their output is reused.
 func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareContext, out chan<- Event, upstream []Event, result WorkflowResult, deliver bool) {
@@ -19,8 +23,21 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 			emit(event)
 		}
 	}
+	// The observation and StageStart event begin only for work in this execution,
+	// not for stages restored from the checkpoint.
+	var obs *middlewareObserver
+	stageCtx := ctx
+	start := func() {
+		stageCtx, obs = newMiddlewareObserver(ctx, run, m, result)
+		obs.Started(stageCtx)
+		emit(Event{Type: EventStageStart, Source: source})
+	}
 	fail := func(err error) {
+		if obs == nil {
+			start()
+		}
 		forward(upstream)
+		obs.Finished(stageCtx, AgentResult{Errors: []error{err}}, false)
 		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StageFailed, Err: err})
 	}
 	stageFailure := func(err error) {
@@ -37,33 +54,34 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 			return
 		}
 		forward(upstream)
-		run.workflow.addStage(StageResult{Name: m.name(), Output: m.config.Output, Result: AgentResult{Errors: []error{err}}})
-		reason := ""
+		failed := AgentResult{Errors: []error{err}}
+		run.workflow.addStage(StageResult{Name: m.name(), Output: m.config.Output, Result: failed})
+		obs.Finished(stageCtx, failed, false)
+		reason := stageReasonPropagated
 		if m.config.ErrorPolicy == RecordError {
 			reason = stageReasonRecorded
 		}
 		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StageFailed, StageReason: reason, Err: err})
 	}
-	if result.Status == StatusPaused || d.current().Status == StatusPaused {
+	if result.Status == StatusPaused || d.status() == StatusPaused {
 		forward(upstream)
 		return
 	}
-	// An unfinished earlier stage owns the continuation boundary. Do not let
-	// downstream skip decisions move that boundary away from recoverable work.
-	for _, earlier := range d.current().Stages {
-		if earlier.ID == m.config.ID {
-			break
-		}
-		if !earlier.Complete {
-			forward(upstream)
-			return
-		}
+	// An unfinished earlier stage owns the continuation boundary. This stage is
+	// decided only after that stage is resumed and completes, so ShouldRun is
+	// not called and no decision is saved.
+	if !d.earlierStagesComplete(m.config.ID) {
+		start()
+		forward(upstream)
+		obs.Skipped(stageCtx, stageReasonUpstreamUnfinished)
+		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StageSkipped, StageReason: stageReasonUpstreamUnfinished})
+		return
 	}
 	stage := d.stage(m.config.ID)
 	if stage.Complete {
 		if stage.Skipped {
 			forward(upstream)
-			emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StageSkipped, Replayed: true})
+			emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StageSkipped, replayed: true})
 			return
 		}
 		saved := checkpointAgentResult(stage)
@@ -87,7 +105,7 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 			outcome = StageCanceled
 			err = saved.CancellationErr
 		}
-		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: outcome, Err: err, StageReason: reason, Replayed: true})
+		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: outcome, Err: err, StageReason: reason, replayed: true})
 		return
 	}
 	if d.pause.Load() {
@@ -117,26 +135,33 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 		}
 		stage = d.stage(m.config.ID)
 	}
+	start()
 	if !stage.ShouldRun {
 		forward(upstream)
-		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StageSkipped})
+		reason := "predicate"
+		if result.Canceled {
+			reason = "upstream_canceled"
+		} else if m.config.ShouldRun == nil && len(result.Errors) > 0 {
+			reason = "upstream_error"
+		}
+		obs.Skipped(stageCtx, reason)
+		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StageSkipped, StageReason: reason})
 		return
 	}
-	emit(Event{Type: EventStageStart, Source: source})
 	var child *Workflow
 	var err error
 	if stage.Continuation != nil {
 		var l *loop.Loop
 		l, err = m.agent.restoreCheckpointLoop(stage)
 		if err == nil {
-			input := RunInput{ID: d.current().RunID, Meta: stage.Input.Meta, TraceContext: stage.Input.TraceContext}
+			input := RunInput{ID: d.runID(), Meta: stage.Input.Meta, TraceContext: stage.Input.TraceContext}
 			input.Prompt = stage.Continuation.Prompt.Input()
 			input.Execution = restoreOverrides(stage.Input.ScalarExecution)
 			child = newWorkflow(input, l, m.name(), m.agent.debugSink(), nil)
 		}
 	} else {
 		var input RunInput
-		input, err = m.input(ctx, result)
+		input, err = m.input(stageCtx, result)
 		if err == nil {
 			err = validateDurableOverrides(input.Execution)
 		}
@@ -144,9 +169,9 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 			input.Meta, err = normalizeDurableMeta(input.Meta)
 		}
 		if err == nil {
-			input.ID = d.current().RunID
+			input.ID = d.runID()
 			input.Durability = nil
-			child, err = m.agent.NewRun(ctx, input)
+			child, err = m.agent.NewRun(stageCtx, input)
 		}
 	}
 	if err != nil {
@@ -164,7 +189,7 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 	child.durableChild = true
 	control := d.control(m.config.ID)
 	settings := settingsForLoop(child.loop)
-	input := checkpointInput{Meta: child.result.Input.Meta, TraceContext: child.result.Input.TraceContext, ScalarExecution: snapshotOverrides(child.result.Input.Execution)}
+	input := checkpointInput{Meta: cloneJSONObject(child.result.Input.Meta), TraceContext: cloneTraceContext(child.result.Input.TraceContext), ScalarExecution: snapshotOverrides(child.result.Input.Execution)}
 	control.Commit = func(ctx context.Context, c loop.Continuation) error {
 		return d.commit(ctx, func(cp *Checkpoint) {
 			cp.ActiveStageID = m.config.ID
@@ -172,7 +197,7 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 		})
 	}
 	child.loop.Continuation = control
-	for event := range child.RunEvents(ctx) {
+	for event := range child.RunEvents(stageCtx) {
 		switch event.Type {
 		case EventStageStart, EventStageFinish, EventDone, EventError, EventCanceled, EventPaused, EventOutput:
 			continue
@@ -187,6 +212,7 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 		run.workflow.result.Status = StatusPaused
 		run.workflow.mu.Unlock()
 		forward(upstream)
+		obs.Paused(stageCtx)
 		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StagePaused})
 		return
 	}
@@ -217,21 +243,31 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 		if terminalErr == nil {
 			terminalErr = errors.Join(saved.Errors...)
 		}
+		reason = stageReasonPropagated
 		if m.config.ErrorPolicy == RecordError && !recoveryRequired {
 			reason = stageReasonRecorded
 		}
 		if saved.Canceled {
 			outcome = StageCanceled
+			reason = "canceled"
 			terminalErr = saved.CancellationErr
 		}
-	} else if m.config.Output != PreserveOutput {
-		events := child.canonicalPrimaryOutput()
-		for i := range events {
-			events[i].Source = source
-			events[i].StageID = m.config.ID
-			events[i].Replayed = false
+		observed := saved
+		if len(observed.Errors) == 0 && terminalErr != nil {
+			observed.Errors = []error{terminalErr}
 		}
-		forward(events)
+		obs.Finished(stageCtx, observed, false)
+	} else {
+		if m.config.Output != PreserveOutput {
+			events := child.canonicalPrimaryOutput()
+			for i := range events {
+				events[i].Source = source
+				events[i].StageID = m.config.ID
+				events[i].replayed = false
+			}
+			forward(events)
+		}
+		obs.Finished(stageCtx, saved, m.config.Output != PreserveOutput)
 	}
 	emit(Event{Type: EventStageFinish, Source: source, StageOutcome: outcome, StageReason: reason, Err: terminalErr})
 }

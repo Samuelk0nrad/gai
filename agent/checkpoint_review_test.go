@@ -175,7 +175,7 @@ func (m *cancellationModel) GenerateStream(ctx context.Context, _ ai.AIRequest) 
 	return out
 }
 
-func TestDurableCancellationPersistsKnownUsageAndTerminalStatus(t *testing.T) {
+func TestDurableCancellationPersistsKnownUsageAndCanResume(t *testing.T) {
 	for _, failSettlement := range []bool{false, true} {
 		t.Run(map[bool]string{false: "saved", true: "save failed"}[failSettlement], func(t *testing.T) {
 			type contextKey struct{}
@@ -218,8 +218,18 @@ func TestDurableCancellationPersistsKnownUsageAndTerminalStatus(t *testing.T) {
 			if cp.Status != agent.StatusCanceled || cp.Stages[0].Continuation.Usage[0].Usage.InputTokens != 17 {
 				t.Fatal(cp)
 			}
-			if _, err := agent.New(durableDefinition(model)).Resume(t.Context(), cp, agent.ResumeInput{}, d); !errors.Is(err, agent.ErrWorkflowFinished) {
+			// Canceling the context stops this execution handle, not the logical run.
+			resumeCtx := context.WithValue(t.Context(), contextKey{}, "trace")
+			resumed, err := agent.New(durableDefinition(&durableModel{responses: [][]ai.Token{response("done")}})).Resume(resumeCtx, cp, agent.ResumeInput{}, d)
+			if err != nil {
 				t.Fatal(err)
+			}
+			result, err = resumed.Run(resumeCtx)
+			if err != nil || result.Status != agent.StatusSucceeded || result.Text != "done" || result.BilledUsage.InputTokens != 17 {
+				t.Fatal(err, result)
+			}
+			if _, err := agent.New(durableDefinition(model)).Resume(resumeCtx, store.load(), agent.ResumeInput{}, d); !errors.Is(err, agent.ErrWorkflowFinished) {
+				t.Fatal("succeeded run resumed", err)
 			}
 		})
 	}
