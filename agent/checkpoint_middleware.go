@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/lace-ai/gai/loop"
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/loop"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 // stageReasonUpstreamUnfinished marks a durable stage that waits for an earlier

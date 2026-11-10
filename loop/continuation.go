@@ -9,8 +9,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 // ContinuationVersion identifies the loop's semantic snapshot schema.

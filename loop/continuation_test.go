@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput"
-	"github.com/lace-ai/gai/testutil/mocks"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/testutil/mocks"
 )
 
 // continuationForTest has one accepted generation and a pending plan whose
