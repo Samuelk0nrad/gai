@@ -49,7 +49,7 @@ GAI is aimed at Go teams that want a small runtime they can compose into an appl
 | Streaming order | Provider-specific chunks and lifecycle rules | One ordered event stream |
 | Prompt and history budgeting | Application-owned | Built-in primitives |
 | Retries and tool iterations | Application-owned | Managed by the loop |
-| Tracing | Add instrumentation around every layer | OpenTelemetry spans across agents, models, tools, and workflows |
+| Tracing and metrics | Add instrumentation around every layer | OpenTelemetry spans across agents, models, tools, and workflows, plus low-cardinality runtime metrics |
 
 ### Core strengths
 
@@ -490,6 +490,8 @@ Middleware is post-processing, not a supervisor or handoff runtime. Tool authori
 GAI creates OpenTelemetry spans across agent runs, workflows, model attempts, and tools. Safe metadata is recorded by default; prompts, completions, reasoning, tool arguments, tool results, and metadata values are not exported unless the application deliberately enables them.
 
 Set `Definition.ObservationSink` for structured lifecycle observations. Observation events and attributes use the `observation.*` OpenTelemetry namespace. Install any OpenTelemetry-compatible exporter before creating agents.
+
+GAI also records OpenTelemetry metrics through the global `MeterProvider`: model call duration and token usage, tool execution duration, loop retries, and loop run duration and iteration count. The model and tool metrics follow the GenAI semantic conventions (`gen_ai.client.inference.*`, `gen_ai.execute_tool.duration`). Metric attributes are limited to low-cardinality values such as provider, model, tool name, outcome, and a bounded `error.type`; IDs and content are never attached. With the default no-op provider nothing is recorded. See [runtime metrics](docs/metrics.md) for every metric, attribute, and error value.
 
 The optional `observability/langfuse` package provides a batched OTLP tracer provider for Langfuse:
 

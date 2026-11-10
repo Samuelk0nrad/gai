@@ -156,7 +156,8 @@ func (o *GenerationObservation) ObserveToken(token Token) {
 	}
 }
 
-// Finish records final metadata and ends the generation span. It is idempotent.
+// Finish records final metadata and generation metrics, then ends the
+// generation span. It is idempotent.
 func (o *GenerationObservation) Finish(result GenerationResult) {
 	if o == nil {
 		return
@@ -172,6 +173,7 @@ func (o *GenerationObservation) Finish(result GenerationResult) {
 			Fields: generationResultFields(o.config, result),
 			Err:    result.Err,
 		})
+		recordGenerationMetrics(o.ctx, o.config, result, time.Since(o.startedAt))
 		gai.EndSpan(o.span, result.Err)
 	})
 }

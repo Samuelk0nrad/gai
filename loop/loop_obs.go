@@ -16,7 +16,7 @@ import (
 // retryReason maps generation errors to stable retry classifications.
 func retryReason(err error) string {
 	if errors.Is(err, ErrAttemptTimeout) {
-		return "attempt_timeout"
+		return retryReasonAttemptTimeout
 	}
 	var providerErr *ai.ProviderError
 	if errors.As(err, &providerErr) && providerErr.Kind != "" {
@@ -26,6 +26,8 @@ func retryReason(err error) string {
 }
 
 const loopTracerName = "github.com/lace-ai/gai/loop"
+
+const retryReasonAttemptTimeout = "attempt_timeout"
 
 const (
 	toolOutcomeSuccess      = "success"
@@ -49,7 +51,10 @@ var (
 
 type loopRunState struct {
 	obs        *loopObserver
+	ctx        context.Context
 	sink       gai.ObservationSink
+	modelName  string
+	startedAt  time.Time
 	err        error
 	cancelErr  error
 	retryCount int
@@ -64,10 +69,11 @@ type loopRunStats struct {
 }
 
 type loopIterationState struct {
-	obs   *iterationObserver
-	ctx   context.Context
-	sink  gai.ObservationSink
-	stats loopIterationStats
+	obs       *iterationObserver
+	ctx       context.Context
+	sink      gai.ObservationSink
+	modelName string
+	stats     loopIterationStats
 }
 
 type loopIterationStats struct {
@@ -115,16 +121,18 @@ func newLoopRunState(ctx context.Context, l *Loop) (context.Context, *loopRunSta
 		attribute.Int("loop.tool_count", toolCount),
 		attribute.String("ai.model", modelName),
 	)
-	return ctx, &loopRunState{obs: &loopObserver{span: span}, sink: sink}
+	return ctx, &loopRunState{obs: &loopObserver{span: span}, ctx: ctx, sink: sink, modelName: modelName, startedAt: time.Now()}
 }
 
 func (s *loopRunState) startIteration(ctx context.Context, count int, attempt int) (context.Context, *loopIterationState) {
 	incrementalPrompt := false
 	var sink gai.ObservationSink
+	modelName := ""
 	if s != nil {
 		s.stats.IterationCount = count
 		incrementalPrompt = s.stats.IncrementalPrompt
 		sink = s.sink
+		modelName = s.modelName
 	}
 	ctx, span := gai.StartOperationSpan(ctx, loopTracerName, "loop", "loop.operation", "iteration",
 		attribute.Int("loop.iteration", count),
@@ -132,10 +140,11 @@ func (s *loopRunState) startIteration(ctx context.Context, count int, attempt in
 		attribute.Bool("loop.incremental_prompt", incrementalPrompt),
 	)
 	return ctx, &loopIterationState{
-		obs:   &iterationObserver{span: span},
-		ctx:   ctx,
-		sink:  sink,
-		stats: loopIterationStats{Iteration: count, AttemptID: attempt},
+		obs:       &iterationObserver{span: span},
+		ctx:       ctx,
+		sink:      sink,
+		modelName: modelName,
+		stats:     loopIterationStats{Iteration: count, AttemptID: attempt},
 	}
 }
 
@@ -179,6 +188,7 @@ func (s *loopRunState) finish() {
 	if s == nil || s.obs == nil {
 		return
 	}
+	recordRunMetrics(s.ctx, s.modelName, s.err, s.cancelErr, s.stats.IterationCount, time.Since(s.startedAt))
 	s.obs.finish(s.err, s.cancelErr, s.stats)
 }
 
@@ -243,6 +253,7 @@ func (s *loopIterationState) markRetrying(retryCount int, reason string, delay t
 	s.stats.RetryCount = retryCount
 	s.stats.RetryReason = reason
 	s.stats.RetryDelay = delay
+	recordRetryMetric(s.ctx, s.modelName, reason)
 	gai.EmitObservation(s.ctx, s.sink, gai.Observation{
 		Name:   "loop_retry_scheduled",
 		Source: "loop:Iteration",
@@ -454,6 +465,12 @@ func (o *toolObservation) setOutcome(outcome string, spanErr error, duration tim
 		attrs = append(attrs, attribute.String("gai.tool.execution", string(o.execution.State)), attribute.String("gai.tool.output", string(o.execution.Output)), attribute.String("gai.tool.decision", string(o.execution.Decision.Action)))
 	}
 	o.span.SetAttributes(attrs...)
+	// Only invoked executions are timed: uninvoked calls have no execution
+	// latency, and only registered tools can be invoked, which keeps
+	// model-supplied tool names out of metric attributes.
+	if o.execution != nil && o.execution.State != ToolNotStarted {
+		recordToolMetrics(o.ctx, o.call.Name, outcome, spanErr != nil, duration)
+	}
 	fields := toolObservationFields(o.call, o.execution, outcome, status, duration)
 	gai.EmitObservation(o.ctx, o.sink, gai.Observation{
 		Name:   "loop_tool_finished",
