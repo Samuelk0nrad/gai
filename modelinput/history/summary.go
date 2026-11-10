@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lace-ai/gai/agent/summary"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/agent/summary"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 // Summary is the compact representation of older conversation turns.

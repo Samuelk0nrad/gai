@@ -4,13 +4,13 @@ import (
 	"context"
 	"strings"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/internal/observe"
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/internal/observe"
+	"github.com/Samuelk0nrad/gai/modelinput"
 	"go.opentelemetry.io/otel/attribute"
 )
 
-const contextTracerName = "github.com/lace-ai/gai/context"
+const contextTracerName = "github.com/Samuelk0nrad/gai/context"
 
 const (
 	selectionStageLoaded    = "loaded"

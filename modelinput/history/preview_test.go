@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput/history"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput/history"
 )
 
 func TestToolResultPreviewUsesOneMarkerAcrossTextParts(t *testing.T) {

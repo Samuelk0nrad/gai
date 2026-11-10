@@ -10,8 +10,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 // Renderer converts ordered prompt parts into the model-facing prompt string.

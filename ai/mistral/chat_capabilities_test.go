@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 // chatServer records raw request bodies and replies with the queued responses.

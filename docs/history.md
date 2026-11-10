@@ -60,8 +60,8 @@ if err != nil {
 result, err := workflow.Run(ctx) // compacts if needed, then generates the answer
 ```
 
-Here `modelinput` is `github.com/lace-ai/gai/modelinput`, `history` is
-`github.com/lace-ai/gai/modelinput/history`, and `store` implements
+Here `modelinput` is `github.com/Samuelk0nrad/gai/modelinput`, `history` is
+`github.com/Samuelk0nrad/gai/modelinput/history`, and `store` implements
 `history.HistoryStore`. Return a fresh builder and history source for each run.
 Read-only readers are insufficient for this opt-in. Custom builders currently
 return `agent.ErrHistoryCompactionNotConfigurable`; they can orchestrate explicit

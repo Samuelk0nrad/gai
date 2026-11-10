@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 // ErrHistoryCompactionNotConfigurable means automatic history compaction was

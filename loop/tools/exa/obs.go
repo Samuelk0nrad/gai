@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 
-	"github.com/lace-ai/gai"
+	"github.com/Samuelk0nrad/gai"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
-const exaTracerName = "github.com/lace-ai/gai/loop/tools/exa"
+const exaTracerName = "github.com/Samuelk0nrad/gai/loop/tools/exa"
 
 var errObservedExaSearch = errors.New("exa search failed")
 

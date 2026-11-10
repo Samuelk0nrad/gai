@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/Samuelk0nrad/gai/ai"
 	antropic "github.com/anthropics/anthropic-sdk-go"
-	"github.com/lace-ai/gai/ai"
 )
 
 func TestCanonicalAnthropicRoundTripPreservesOrderedSignedReasoning(t *testing.T) {

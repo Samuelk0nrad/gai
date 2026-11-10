@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 type scheduledTool struct {

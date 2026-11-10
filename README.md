@@ -1,5 +1,5 @@
 <div align="center">
-  <a href="https://github.com/lace-ai/gai">
+  <a href="https://github.com/Samuelk0nrad/gai">
     <img alt="GAI" src="docs/GAI_thumbnail.png">
   </a>
 
@@ -7,10 +7,10 @@
   <p>Build streaming, tool-using agents across OpenAI, Anthropic, Gemini, and Mistral without hiding provider-native capabilities.</p>
 
   <p>
-    <a href="https://github.com/lace-ai/gai/blob/main/go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/lace-ai/gai"></a>
-    <a href="https://github.com/lace-ai/gai/actions"><img alt="CI" src="https://github.com/lace-ai/gai/actions/workflows/go.yml/badge.svg"></a>
-    <a href="https://github.com/lace-ai/gai/blob/main/LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-informational.svg"></a>
-    <a href="https://pkg.go.dev/github.com/lace-ai/gai"><img alt="Go reference" src="https://pkg.go.dev/badge/github.com/lace-ai/gai.svg"></a>
+    <a href="https://github.com/Samuelk0nrad/gai/blob/main/go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/Samuelk0nrad/gai"></a>
+    <a href="https://github.com/Samuelk0nrad/gai/actions"><img alt="CI" src="https://github.com/Samuelk0nrad/gai/actions/workflows/go.yml/badge.svg"></a>
+    <a href="https://github.com/Samuelk0nrad/gai/blob/main/LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-informational.svg"></a>
+    <a href="https://pkg.go.dev/github.com/Samuelk0nrad/gai"><img alt="Go reference" src="https://pkg.go.dev/badge/github.com/Samuelk0nrad/gai.svg"></a>
   </p>
 </div>
 
@@ -23,7 +23,7 @@ GAI is a composable Go runtime for model calls, tools, streaming, context, histo
 The included order-support example uses a typed local tool and streams the final answer:
 
 ```bash
-git clone https://github.com/lace-ai/gai.git
+git clone https://github.com/Samuelk0nrad/gai.git
 cd gai
 export OPENAI_API_KEY="..."
 go run ./examples/order-support
@@ -66,7 +66,7 @@ GAI is aimed at Go teams that want a small runtime they can compose into an appl
 Install the module in an existing application:
 
 ```bash
-go get github.com/lace-ai/gai
+go get github.com/Samuelk0nrad/gai
 ```
 
 ## Build a basic agent
@@ -83,10 +83,10 @@ import (
   "log"
   "os"
 
-  "github.com/lace-ai/gai/agent"
-  "github.com/lace-ai/gai/ai"
-  "github.com/lace-ai/gai/ai/openai"
-  "github.com/lace-ai/gai/modelinput"
+  "github.com/Samuelk0nrad/gai/agent"
+  "github.com/Samuelk0nrad/gai/ai"
+  "github.com/Samuelk0nrad/gai/ai/openai"
+  "github.com/Samuelk0nrad/gai/modelinput"
 )
 
 func main() {
@@ -337,7 +337,7 @@ applies the run input and execution configuration directly to that builder.
 Import it directly alongside Go's standard library `context` package:
 
 ```go
-import "github.com/lace-ai/gai/modelinput"
+import "github.com/Samuelk0nrad/gai/modelinput"
 ```
 
 The former `context`, `context/history`, and `context/tooldefinitions` import

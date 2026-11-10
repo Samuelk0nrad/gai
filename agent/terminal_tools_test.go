@@ -7,9 +7,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lace-ai/gai/agent"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/loop"
+	"github.com/Samuelk0nrad/gai/agent"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/loop"
 )
 
 func agentTerminalTool(t *testing.T) loop.Tool {

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/lace-ai/gai/modelinput/history"
+	"github.com/Samuelk0nrad/gai/modelinput/history"
 )
 
 // memoryStore illustrates the atomic contract. It is process-local and has no

@@ -3,12 +3,12 @@ package tooldefinitions
 import (
 	"context"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/internal/observe"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/internal/observe"
 	"go.opentelemetry.io/otel/attribute"
 )
 
-const tracerName = "github.com/lace-ai/gai/context/tooldefinitions"
+const tracerName = "github.com/Samuelk0nrad/gai/context/tooldefinitions"
 
 type observer struct {
 	operation   *observe.Operation

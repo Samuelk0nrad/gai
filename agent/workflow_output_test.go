@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lace-ai/gai"
+	"github.com/Samuelk0nrad/gai"
 )
 
 func TestWorkflowPublishesCompleteWithTerminalStreamClosure(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 // EventType identifies the kind of ordered loop event.

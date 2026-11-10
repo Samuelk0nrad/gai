@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 // EchoTool is a small Tool implementation that returns its text argument.

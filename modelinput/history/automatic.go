@@ -3,7 +3,7 @@ package history
 import (
 	"context"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 // CompactHistory is the explicit preparation capability used by
