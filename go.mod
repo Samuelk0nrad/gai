@@ -1,3 +1,4 @@
+// Deprecated: This module moved to github.com/Samuelk0nrad/gai. Update imports to the new path.
 module github.com/lace-ai/gai
 
 go 1.26.10
