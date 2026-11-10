@@ -299,6 +299,7 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 					fail(err)
 					break
 				}
+				dispatched := false
 				if l.durable != nil && !task.restored {
 					if err := l.durable.beforeDispatch(ctx, index, task.execution, task.result != nil); err != nil {
 						release()
@@ -307,17 +308,27 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 						}
 						break
 					}
+					dispatched = task.result == nil
+				}
+				// abandon stops before the handler starts. An acknowledged dispatch
+				// is reverted, because the handler provably never ran.
+				abandon := func(err error) {
+					release()
+					if dispatched {
+						if undoErr := l.durable.abandonDispatch(ctx, index); undoErr != nil {
+							err = errors.Join(err, undoErr)
+						}
+					}
+					fail(err)
 				}
 				if events != nil && task.result == nil {
 					if err := sendEvent(ctx, events, ToolStartEvent(iterationCount, attemptID, retryCount, task.pending.call)); err != nil {
-						release()
-						fail(err)
+						abandon(err)
 						break
 					}
 				}
 				if err := ctx.Err(); err != nil {
-					release()
-					fail(err)
+					abandon(err)
 					break
 				}
 				pending = append(pending[:position], pending[position+1:]...)

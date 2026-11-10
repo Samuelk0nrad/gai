@@ -269,7 +269,9 @@ func (c Checkpoint) Validate() error {
 // stage continuation; commits skip that because the loop validates each
 // continuation before handing it over, and Resume validates loaded ones.
 func (c Checkpoint) validate(deep bool) error {
-	if c.Version != CheckpointVersion || c.RunID == "" || c.ExecutionID == "" || c.DefinitionRevision == "" || c.Revision == 0 || len(c.Stages) == 0 || c.Stages[0].ID != PrimaryStageID {
+	// The loop's first commit saves the primary prompt, so every stored
+	// checkpoint has a primary continuation.
+	if c.Version != CheckpointVersion || c.RunID == "" || c.ExecutionID == "" || c.DefinitionRevision == "" || c.Revision == 0 || len(c.Stages) == 0 || c.Stages[0].ID != PrimaryStageID || c.Stages[0].Continuation == nil {
 		return ErrCheckpoint
 	}
 	if c.Status != StatusRunning && c.Status != StatusPaused && c.Status != StatusFailed && c.Status != StatusCanceled && c.Status != StatusSucceeded {
@@ -285,7 +287,7 @@ func (c Checkpoint) validate(deep bool) error {
 		if s.ID == c.ActiveStageID {
 			active = true
 		}
-		if s.Skipped && (!s.Complete || s.ShouldRun) {
+		if s.Skipped && (!s.Complete || s.ShouldRun) || s.Complete && s.Canceled {
 			return ErrCheckpoint
 		}
 		if deep && s.Continuation != nil {
@@ -340,12 +342,11 @@ func (d *checkpointCoordinator) snapshot() *Checkpoint {
 	return &c
 }
 
-// current returns a detached copy of the coordinator state.
-func (d *checkpointCoordinator) current() Checkpoint {
+// isAcknowledged reports whether any checkpoint has been durably committed.
+func (d *checkpointCoordinator) isAcknowledged() bool {
 	d.mu.RLock()
-	state := d.state
-	d.mu.RUnlock()
-	return state.Clone()
+	defer d.mu.RUnlock()
+	return d.acknowledged
 }
 
 // status reads the workflow status without copying stage payloads.
@@ -556,9 +557,10 @@ func (w *Workflow) configureDurability(a *Agent, input RunInput) error {
 // Resume claims the loaded revision before executing any model/tool work. It
 // creates a fresh single-use handle and preserves the logical RunID. Only a
 // succeeded run is finished. A failed or canceled execution resumes from its
-// last acknowledged continuation, subject to explicit tool resolutions and the
-// remaining TotalTimeout budget. Ending a logical run early is an application
-// decision recorded in application storage.
+// last acknowledged continuation, subject to explicit tool resolutions. A stage
+// that cannot continue because of its TotalTimeout, retry or iteration limit is
+// rejected before the claim (see loop.Continuation.LimitError). Ending a
+// logical run early is an application decision recorded in application storage.
 func (a *Agent) Resume(ctx context.Context, checkpoint Checkpoint, input ResumeInput, durability Durability) (*Workflow, error) {
 	if err := checkpoint.Validate(); err != nil {
 		return nil, err
@@ -663,8 +665,10 @@ func (a *Agent) Resume(ctx context.Context, checkpoint Checkpoint, input ResumeI
 	if err != nil {
 		return nil, err
 	}
-	if !primary.Complete && primary.Continuation.TimeoutExhausted(l.RetryPolicy) {
-		return nil, loop.ErrTimeoutExhausted
+	if !primary.Complete {
+		if err := primary.Continuation.LimitError(l); err != nil {
+			return nil, err
+		}
 	}
 	for i, item := range a.def.Middleware {
 		stage := checkpoint.Stages[i+1]
@@ -673,8 +677,8 @@ func (a *Agent) Resume(ctx context.Context, checkpoint Checkpoint, input ResumeI
 			if err != nil {
 				return nil, err
 			}
-			if stage.Continuation.TimeoutExhausted(child.RetryPolicy) {
-				return nil, loop.ErrTimeoutExhausted
+			if err := stage.Continuation.LimitError(child); err != nil {
+				return nil, err
 			}
 		}
 	}

@@ -836,13 +836,13 @@ func TestDurableDiscardBudgetAndKnownFailedUsage(t *testing.T) {
 		}
 		next := &durableModel{responses: [][]ai.Token{calls("write")}}
 		def.Model = next
-		resumed, err := agent.New(def).Resume(context.Background(), cp, agent.ResumeInput{}, store.durability())
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = resumed.Run(context.Background())
+		// No iteration is left, so Resume rejects the stage before claiming it.
+		_, err := agent.New(def).Resume(context.Background(), cp, agent.ResumeInput{}, store.durability())
 		if !errors.Is(err, loop.ErrMaxIterations) || next.count() != 0 {
 			t.Fatal(err, next.count())
+		}
+		if !reflect.DeepEqual(cp, store.load()) {
+			t.Fatal("exhausted iteration limit claimed the checkpoint")
 		}
 	})
 	t.Run("terminal provider usage survives", func(t *testing.T) {

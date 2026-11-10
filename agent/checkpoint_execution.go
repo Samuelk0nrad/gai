@@ -123,8 +123,10 @@ func replayResultOutput(result AgentResult, source EventSource, continuation *lo
 }
 
 // finishDurablePrimary preserves completed stages instead of writing them again.
+// A run that stopped before its first checkpoint stores nothing, so the
+// application can start it again with the same run ID.
 func (w *Workflow) finishDurablePrimary(ctx context.Context, result AgentResult, paused bool) error {
-	if w.durability.stageComplete(w.stageID) {
+	if w.durability.stageComplete(w.stageID) || !w.durability.isAcknowledged() {
 		return nil
 	}
 	return w.durability.finishStage(ctx, w.stageID, result, paused)

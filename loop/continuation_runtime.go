@@ -32,6 +32,9 @@ func (r *runExecution) prepareContinuation() error {
 		if err := d.state.ResolveRecovery(nil); err != nil {
 			return err
 		}
+		if err := d.state.LimitError(r.owner); err != nil {
+			return err
+		}
 		builder, err := modelinput.Restore(*d.state.Prompt)
 		if err != nil {
 			return err
@@ -45,10 +48,9 @@ func (r *runExecution) prepareContinuation() error {
 					d.state.UsageIncomplete = true
 				}
 			}
-			// The interrupted physical attempt consumed retry budget as well.
-			if r.owner.RetryPolicy != nil && !r.owner.RetryPolicy.hasRetryBudget(r.state.retryCount) {
-				return ErrMaxRetries
-			}
+			// A worker was lost during this attempt. Its outcome and cost are
+			// unknown, so it consumes retry budget; LimitError checked that some
+			// remains. Canceled and failed attempts are saved as settled instead.
 			r.state.retryCount++
 			d.state.RetryCount = r.state.retryCount
 			d.state.Phase = PhaseReady
@@ -59,9 +61,6 @@ func (r *runExecution) prepareContinuation() error {
 	// TotalTimeout limits active execution time. Each handle gets the budget
 	// that earlier executions left, so time spent paused does not count.
 	if policy := r.owner.RetryPolicy; policy != nil && policy.TotalTimeout > 0 {
-		if d.state.TimeoutExhausted(policy) {
-			return ErrTimeoutExhausted
-		}
 		if remaining := policy.TotalTimeout - d.state.Elapsed; remaining > 0 {
 			var cancel context.CancelFunc
 			r.ctx, cancel = context.WithTimeout(r.ctx, remaining)
@@ -325,6 +324,16 @@ func (d *durableLoop) beforeDispatch(ctx context.Context, index int, execution T
 	return nil
 }
 
+// abandonDispatch reverts an acknowledged dispatch whose handler never started,
+// so recovery does not report an unknown outcome for it.
+func (d *durableLoop) abandonDispatch(ctx context.Context, index int) error {
+	inv := &d.state.Pending.Invocations[index]
+	inv.Disposition = InvocationPlanned
+	inv.Execution.State = ToolNotStarted
+	inv.Attempt--
+	return d.commitSettled(ctx)
+}
+
 // completed saves processed outcomes independently, including during cancellation.
 func (d *durableLoop) completed(ctx context.Context, done toolCompletion) error {
 	inv := &d.state.Pending.Invocations[done.index]
@@ -443,7 +452,9 @@ func stampLoopEvent(ctx context.Context, event Event) Event {
 // isPause distinguishes cooperative suspension from execution failure.
 func isPause(err error) bool { return errors.Is(err, ErrPaused) }
 
-// commitTerminalUsage preserves known costs without granting another model attempt.
+// commitTerminalUsage saves the known cost of a canceled or failed attempt. The
+// attempt's outcome is then known, so it is settled: a resume starts a new
+// attempt instead of charging retry budget for an interrupted one.
 func (a *attemptExecution) commitTerminalUsage() error {
 	d := a.run.owner.durable
 	if d == nil {
@@ -456,5 +467,8 @@ func (a *attemptExecution) commitTerminalUsage() error {
 		return nil
 	}
 	d.account(a.generationID, a.iteration)
+	if d.state.Phase == PhaseGenerating {
+		d.state.Phase = PhaseReady
+	}
 	return d.commitSettled(a.run.ctx)
 }

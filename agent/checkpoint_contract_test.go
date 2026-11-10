@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/lace-ai/gai/agent"
 	"github.com/lace-ai/gai/ai"
@@ -188,6 +189,7 @@ func TestCheckpointValidateRejectsInvalidStructure(t *testing.T) {
 		"duplicate stage":    func(c *agent.Checkpoint) { c.Stages = append(c.Stages, c.Stages[0]) },
 		"output policy":      func(c *agent.Checkpoint) { c.Stages[0].Output = agent.ReplaceOutput + 1 },
 		"skipped incomplete": func(c *agent.Checkpoint) { c.Stages[0].Skipped = true; c.Stages[0].Complete = false },
+		"complete canceled":  func(c *agent.Checkpoint) { c.Stages[0].Canceled = true },
 		"complete without continuation": func(c *agent.Checkpoint) {
 			c.Stages[0].Continuation = nil
 		},
@@ -300,5 +302,198 @@ func TestDurablePausedUpstreamReportsDownstreamStages(t *testing.T) {
 	}
 	if events[len(events)-1].Type != agent.EventPaused {
 		t.Fatal("terminal event", events[len(events)-1].Type)
+	}
+}
+
+type flakySource struct{ fail *atomic.Bool }
+
+func (flakySource) Name() string { return "retrieval" }
+func (s flakySource) Function(context.Context, int) (modelinput.Part, error) {
+	if s.fail.Load() {
+		return nil, errors.New("vector store timeout")
+	}
+	return modelinput.NewTextPart("doc"), nil
+}
+
+func TestDurableRunStoppedBeforeFirstCheckpointStoresNothing(t *testing.T) {
+	var fail atomic.Bool
+	fail.Store(true)
+	def := durableDefinition(&durableModel{responses: [][]ai.Token{response("done"), response("done")}})
+	def.Prompt = func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+		return modelinput.New(modelinput.Definition{ContextSources: []modelinput.ContextSource{flakySource{&fail}}}), nil
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	for name, run := range map[string]func(*agent.Workflow) (agent.WorkflowResult, error){
+		"context source fails": func(w *agent.Workflow) (agent.WorkflowResult, error) { return w.Run(t.Context()) },
+		"already canceled":     func(w *agent.Workflow) (agent.WorkflowResult, error) { return w.Run(canceled) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fail.Store(true)
+			store := &checkpointStore{}
+			result, err := run(newDurableRun(t, agent.New(def), store))
+			if err == nil || result.Checkpoint != nil || store.load().Revision != 0 {
+				t.Fatal("stored a checkpoint without a continuation", err, result.Checkpoint, store.load().Revision)
+			}
+			// Nothing was stored, so the same run ID can start again.
+			fail.Store(false)
+			if result := runDurable(t, newDurableRun(t, agent.New(def), store)); result.Text != "done" {
+				t.Fatal(result.Text)
+			}
+		})
+	}
+}
+
+func TestDurableCanceledModelAttemptDoesNotConsumeRetryBudget(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	def := durableDefinition(&cancellationModel{ready: make(chan struct{})})
+	def.RetryPolicy = &loop.RetryPolicy{TotalTimeout: time.Hour} // no retries allowed
+	store := &checkpointStore{}
+	var lost agent.Checkpoint
+	store.hook = func(cp agent.Checkpoint) error {
+		if c := cp.Stages[0].Continuation; c != nil && c.Phase == loop.PhaseGenerating && lost.Revision == 0 {
+			lost = cp.Clone()
+		}
+		return nil
+	}
+	d := store.durability()
+	w, err := agent.New(def).NewRun(ctx, agent.RunInput{Durability: &d})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = w.RunEvents(ctx)
+	<-def.Model.(*cancellationModel).ready
+	cancel()
+	if result, _ := w.Wait(); result.Status != agent.StatusCanceled {
+		t.Fatal(result.Status)
+	}
+	store.hook = nil
+	cp := store.load()
+	if phase := cp.Stages[0].Continuation.Phase; phase != loop.PhaseReady {
+		t.Fatal("canceled attempt not settled", phase)
+	}
+	def.Model = &durableModel{responses: [][]ai.Token{response("done")}}
+	resumed, err := agent.New(def).Resume(t.Context(), cp, agent.ResumeInput{}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := runDurable(t, resumed); result.Text != "done" {
+		t.Fatal(result.Text)
+	}
+
+	// A worker lost mid-generation leaves an unknown attempt, which does cost a
+	// retry; with none left, Resume refuses before claiming.
+	if _, err := agent.New(def).Resume(t.Context(), lost, agent.ResumeInput{}, d); !errors.Is(err, loop.ErrMaxRetries) {
+		t.Fatal(err)
+	}
+	def.RetryPolicy = &loop.RetryPolicy{TotalTimeout: time.Hour, MaxRetries: 1}
+	def.Model = &durableModel{responses: [][]ai.Token{response("recovered")}}
+	fresh := &checkpointStore{saved: lost}
+	resumed, err = agent.New(def).Resume(t.Context(), lost, agent.ResumeInput{}, fresh.durability())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := runDurable(t, resumed); result.Text != "recovered" {
+		t.Fatal(result.Text)
+	}
+}
+
+func TestDurableCancelBeforeHandlerStartRevertsDispatch(t *testing.T) {
+	var effects atomic.Int32
+	tool := durableTool(t, "write", func(context.Context, ai.ToolCall) (string, error) { effects.Add(1); return "ok", nil })
+	def := durableDefinition(&durableModel{responses: [][]ai.Token{calls("write"), response("done")}}, tool)
+	store := &checkpointStore{}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	w := newDurableRun(t, agent.New(def), store)
+	store.hook = func(cp agent.Checkpoint) error {
+		if p := pending(cp); p != nil && p.Invocations[0].Disposition == loop.InvocationDispatched {
+			cancel()
+		}
+		return nil
+	}
+	if result, _ := w.Run(ctx); result.Status != agent.StatusCanceled {
+		t.Fatal(result.Status)
+	}
+	store.hook = nil
+	cp := store.load()
+	inv := pending(cp).Invocations[0]
+	if effects.Load() != 0 || inv.Disposition != loop.InvocationPlanned || inv.Attempt != 0 || inv.Execution.State != loop.ToolNotStarted {
+		t.Fatal("handler never started but dispatch was kept", effects.Load(), inv.Disposition, inv.Attempt, inv.Execution.State)
+	}
+	resumed, err := agent.New(def).Resume(t.Context(), cp, agent.ResumeInput{}, store.durability())
+	if err != nil {
+		t.Fatal("recovery demanded for a tool that never ran", err)
+	}
+	if result := runDurable(t, resumed); result.Text != "done" || effects.Load() != 1 {
+		t.Fatal(result.Text, effects.Load())
+	}
+}
+
+func TestDurablePauseBetweenStagesAcceptsSteering(t *testing.T) {
+	childModel := &durableModel{responses: [][]ai.Token{response("post")}}
+	child := agent.New(durableDefinition(childModel))
+	def := durableDefinition(&durableModel{responses: [][]ai.Token{response("main")}})
+	def.Middleware = []agent.Middleware{agent.NewAgentMiddleware(child, agent.AgentMiddlewareConfig{ID: "post", Name: "post", Output: agent.AppendOutput})}
+	store := &checkpointStore{}
+	w := newDurableRun(t, agent.New(def), store)
+	store.hook = func(cp agent.Checkpoint) error {
+		if c := cp.Stages[0].Continuation; c != nil && c.Phase == loop.PhaseDone {
+			_ = w.RequestPause()
+		}
+		return nil
+	}
+	if result := runDurable(t, w); result.Status != agent.StatusPaused {
+		t.Fatal(result.Status)
+	}
+	store.hook = nil
+	cp := store.load()
+	if cp.ActiveStageID != "post" || !cp.Stages[0].Complete || cp.Stages[1].Continuation == nil || childModel.count() != 0 {
+		t.Fatal("pause did not leave the next stage with a continuation", cp.ActiveStageID, cp.Stages[1].Continuation != nil, childModel.count())
+	}
+	input := agent.ResumeInput{CommandID: "steer", Prompt: modelinput.PromptInput{User: ai.TextParts("please add more")}}
+	resumed, err := agent.New(def).Resume(t.Context(), cp, input, store.durability())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := runDurable(t, resumed); result.Text != "mainpost" {
+		t.Fatal(result.Text)
+	}
+	if !strings.Contains(requestText(childModel.requests[0]), "please add more") {
+		t.Fatal("steering did not reach the stage", requestText(childModel.requests[0]))
+	}
+}
+
+func TestDurableAutoCompactedHistoryIsFrozenAcrossResume(t *testing.T) {
+	history := autoHistory(strings.Repeat("old context ", 500))
+	model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("short summary"), autoText("answer")}}
+	def := autoHistoryDefinition(model, history)
+	store := &checkpointStore{}
+	d := store.durability()
+	w, err := agent.New(def).NewRun(t.Context(), agent.RunInput{Prompt: modelinput.PromptInput{User: ai.TextParts("question")}, Durability: &d})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.RequestPause(); err != nil {
+		t.Fatal(err)
+	}
+	if result := runDurable(t, w); result.Status != agent.StatusPaused {
+		t.Fatal(result.Status)
+	}
+	loads, writes := history.loads, history.writes
+	if writes != 1 || len(model.Requests()) != 1 {
+		t.Fatal("compaction did not run once before the pause", writes, len(model.Requests()))
+	}
+	resumed, err := agent.New(def).Resume(t.Context(), store.load(), agent.ResumeInput{}, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := runDurable(t, resumed)
+	if result.Text != "answer" || history.loads != loads || history.writes != writes || len(model.Requests()) != 2 {
+		t.Fatal("resume selected or compacted history again", result.Text, history.loads, history.writes, len(model.Requests()))
+	}
+	if !strings.Contains(requestText(model.Requests()[1]), "Conversation summary:\nshort summary") {
+		t.Fatal("resumed request lost the frozen summary")
 	}
 }

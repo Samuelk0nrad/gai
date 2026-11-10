@@ -43,7 +43,7 @@ Checkpoints contain selected prompts, user content, tool arguments and processed
 
 ## Pause and resume
 
-`RequestPause()` is cooperative and non-blocking. Continue draining `RunEvents` until it closes. GAI finishes an in-flight model response, stops admitting new tools, waits for already-started tool pipelines, and commits the paused state. Long-running tools may delay pause; retry backoff is interrupted.
+`RequestPause()` is cooperative and non-blocking. Continue draining `RunEvents` until it closes. GAI finishes an in-flight model response, stops admitting new tools, waits for already-started tool pipelines, and commits the paused state. Long-running tools may delay pause; retry backoff is interrupted. A pause that arrives after a stage completes still decides the next stage and saves its prompt, then pauses before that stage's first model call. The paused checkpoint therefore always has an active stage that a resume command can steer. If no later stage runs, the workflow completes instead.
 
 On an acknowledged pause, `Wait()` returns nil error with `Complete == true`, `Status == agent.StatusPaused`, and an authoritative `Checkpoint`. Complete describes the execution handle, not the logical run. That handle remains single-use; repeated `Wait` calls return the same result.
 
@@ -54,9 +54,11 @@ resumed, err := a.Resume(ctx, checkpoint, agent.ResumeInput{}, durability)
 result, err := resumed.Run(ctx)
 ```
 
-The logical run ID stays the same; each handle gets a new execution ID. Only a checkpoint whose status is `StatusSucceeded` is finished; `Resume` returns `agent.ErrWorkflowFinished` for it. `StatusFailed` and `StatusCanceled` describe the last execution handle, not the logical run: both resume from the last acknowledged continuation, subject to limits and tool reconciliation. Interrupted model attempts consume retry budget and get new generation identities. Accepted tool plans are never regenerated.
+The logical run ID stays the same; each handle gets a new execution ID. Only a checkpoint whose status is `StatusSucceeded` is finished; `Resume` returns `agent.ErrWorkflowFinished` for it. `StatusFailed` and `StatusCanceled` describe the last execution handle, not the logical run: both resume from the last acknowledged continuation, subject to limits and tool reconciliation. A canceled or failed model attempt is saved with its known usage and settled, so a resume starts a new attempt without charging retry budget. An attempt interrupted by a lost worker has an unknown outcome and cost; it consumes one retry. Every new attempt gets a new generation identity. Accepted tool plans are never regenerated.
 
-`RetryPolicy.TotalTimeout` limits active execution time for each stage. Each continuation records the time used so far (`Continuation.Elapsed`), measured up to its last acknowledged commit. Time spent paused or waiting for a resume does not count, so an approval may wait longer than `TotalTimeout`. A worker lost between commits does not charge the time since its last commit. When a stage that still has work has used its whole budget, `Resume` returns `loop.ErrTimeoutExhausted` (which matches `context.DeadlineExceeded`) before claiming the checkpoint. A compatible definition with a larger `TotalTimeout` can continue it.
+A run that stops before its first checkpoint commit, for example because a context source fails or the context is already canceled, stores nothing and returns `Result().Checkpoint == nil`. Start it again with `NewRun` and the same run ID.
+
+`RetryPolicy.TotalTimeout` limits active execution time for each stage. Each continuation records the time used so far (`Continuation.Elapsed`), measured up to its last acknowledged commit. Time spent paused or waiting for a resume does not count, so an approval may wait longer than `TotalTimeout`. A worker lost between commits does not charge the time since its last commit. `Resume` checks the limits of every unfinished stage before claiming the checkpoint (see `loop.Continuation.LimitError`). A stage that still has work but has used its whole time budget returns `loop.ErrTimeoutExhausted`, which matches `context.DeadlineExceeded`. A stage whose interrupted attempt has no retry left returns `loop.ErrMaxRetries`, and a stage with no iteration left for new model work returns `loop.ErrMaxIterations`. A compatible definition with larger limits can continue it.
 
 | Transition | Preserved state and behavior |
 | --- | --- |
@@ -76,7 +78,7 @@ Canceling the execution context stops that handle. GAI saves known outcomes and 
 | --- | --- |
 | Planned, never dispatched | Run under current policy and approval rules. |
 | Processed result committed | Reuse it; do not call the handler or processor again. |
-| Dispatch committed without usable result | Require an explicit recovery resolution. |
+| Dispatch committed without usable result | Require an explicit recovery resolution. A dispatch canceled before its handler starts is reverted to planned. |
 | Denied or canceled before dispatch | Reuse the paired non-execution result. |
 
 `Resume` returns `*loop.RecoveryRequiredError` (also matching `loop.ErrRecoveryRequired`) with unresolved invocation records. Supply a command with `ToolResolutions` using one of:

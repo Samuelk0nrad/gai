@@ -183,14 +183,29 @@ func (g Generation) clone() Generation {
 	return g
 }
 
-// TimeoutExhausted reports whether continuing needs execution time that the
-// policy's TotalTimeout budget no longer has. A finished continuation without
-// steering needs no time.
-func (c Continuation) TimeoutExhausted(policy *RetryPolicy) bool {
-	if policy == nil || policy.TotalTimeout <= 0 || (c.Phase == PhaseDone && len(c.Steering) == 0) {
-		return false
+// LimitError reports a limit of l that already prevents continuing c: a
+// used-up TotalTimeout budget (ErrTimeoutExhausted), no retry left for an
+// attempt interrupted by a lost worker (ErrMaxRetries), or no iteration left
+// for new model work (ErrMaxIterations). A finished continuation without
+// steering needs nothing and reports nil. agent.Resume checks this before
+// claiming a checkpoint.
+func (c Continuation) LimitError(l *Loop) error {
+	if c.Phase == PhaseDone && len(c.Steering) == 0 {
+		return nil
 	}
-	return c.Elapsed >= policy.TotalTimeout
+	if p := l.RetryPolicy; p != nil {
+		if p.TotalTimeout > 0 && c.Elapsed >= p.TotalTimeout {
+			return ErrTimeoutExhausted
+		}
+		if c.Phase == PhaseGenerating && !p.hasRetryBudget(c.RetryCount) {
+			return fmt.Errorf("%w: limit=%d", ErrMaxRetries, p.MaxRetries)
+		}
+	}
+	// An accepted plan still runs its tools; only new model work needs an iteration.
+	if c.Pending == nil && c.NextIteration > l.MaxLoopIterations {
+		return fmt.Errorf("%w: limit=%d", ErrMaxIterations, l.MaxLoopIterations)
+	}
+	return nil
 }
 
 // Validate checks schema, canonical messages, identities and invocation consistency.

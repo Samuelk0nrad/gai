@@ -215,30 +215,50 @@ func TestContinuationCloneAndDetach(t *testing.T) {
 	}
 }
 
-func TestContinuationTimeoutExhausted(t *testing.T) {
-	policy := &RetryPolicy{TotalTimeout: time.Minute}
+func TestContinuationLimitError(t *testing.T) {
+	l := &Loop{MaxLoopIterations: 5, RetryPolicy: &RetryPolicy{TotalTimeout: time.Minute, MaxRetries: 1}}
 	c := continuationForTest()
+	if err := c.LimitError(l); err != nil {
+		t.Fatal(err)
+	}
 	c.Elapsed = time.Minute
-	if !c.TimeoutExhausted(policy) {
-		t.Fatal("used budget not reported")
+	if err := c.LimitError(l); !errors.Is(err, ErrTimeoutExhausted) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("used budget not reported", err)
 	}
-	if c.TimeoutExhausted(nil) || c.TimeoutExhausted(&RetryPolicy{}) {
-		t.Fatal("unlimited policy reported exhaustion")
+	if err := c.LimitError(&Loop{MaxLoopIterations: 5}); err != nil {
+		t.Fatal("unlimited policy reported exhaustion", err)
 	}
-	c.Elapsed = time.Minute - time.Nanosecond
-	if c.TimeoutExhausted(policy) {
-		t.Fatal("remaining budget reported as exhausted")
+
+	// Only an attempt interrupted by a lost worker consumes retry budget.
+	interrupted := continuationForTest()
+	interrupted.Phase, interrupted.Pending, interrupted.RetryCount = PhaseGenerating, nil, 1
+	if err := interrupted.LimitError(l); !errors.Is(err, ErrMaxRetries) {
+		t.Fatal("exhausted retry budget not reported", err)
 	}
-	done := continuationForTest()
-	done.Phase, done.Pending, done.Elapsed = PhaseDone, nil, 2*time.Minute
-	if done.TimeoutExhausted(policy) {
-		t.Fatal("finished continuation needs no budget")
+	interrupted.RetryCount = 0
+	if err := interrupted.LimitError(l); err != nil {
+		t.Fatal(err)
+	}
+
+	// New model work needs an iteration; an accepted plan still runs its tools.
+	planned := continuationForTest()
+	planned.NextIteration = 6
+	if err := planned.LimitError(l); err != nil {
+		t.Fatal("accepted plan blocked by iteration limit", err)
+	}
+	ready := continuationForTest()
+	ready.Phase, ready.Pending, ready.NextIteration = PhaseReady, nil, 6
+	if err := ready.LimitError(l); !errors.Is(err, ErrMaxIterations) {
+		t.Fatal("exhausted iterations not reported", err)
+	}
+
+	done := ready
+	done.Phase, done.Elapsed = PhaseDone, 2*time.Minute
+	if err := done.LimitError(l); err != nil {
+		t.Fatal("finished continuation needs no limits", err)
 	}
 	done.Steering = []ai.Message{{Role: ai.RoleUser, Parts: ai.TextParts("more")}}
-	if !done.TimeoutExhausted(policy) {
-		t.Fatal("steering needs execution time")
-	}
-	if !errors.Is(ErrTimeoutExhausted, context.DeadlineExceeded) {
-		t.Fatal("ErrTimeoutExhausted must match context.DeadlineExceeded")
+	if err := done.LimitError(l); err == nil {
+		t.Fatal("steering needs execution time and an iteration")
 	}
 }

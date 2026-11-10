@@ -85,43 +85,31 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 			emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StageSkipped, replayed: true})
 			return
 		}
+		// A completed stage either succeeded or kept its error via RecordError;
+		// Validate rejects completed canceled stages.
 		saved := checkpointAgentResult(stage)
 		run.workflow.addStage(StageResult{Name: m.name(), Output: m.config.Output, Result: saved})
-		if len(saved.Errors) > 0 || saved.Canceled {
-			forward(upstream)
-		} else if m.config.Output != PreserveOutput {
-			forward(replayResultOutput(saved, source, stage.Continuation))
-		}
 		outcome := StageSucceeded
 		var err error
 		reason := ""
 		if len(saved.Errors) > 0 {
+			forward(upstream)
 			outcome = StageFailed
 			err = errors.Join(saved.Errors...)
-			if m.config.ErrorPolicy == RecordError {
-				reason = stageReasonRecorded
-			}
-		}
-		if saved.Canceled {
-			outcome = StageCanceled
-			err = saved.CancellationErr
+			reason = stageReasonRecorded
+		} else if m.config.Output != PreserveOutput {
+			forward(replayResultOutput(saved, source, stage.Continuation))
 		}
 		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: outcome, Err: err, StageReason: reason, replayed: true})
 		return
 	}
-	if d.pause.Load() {
-		if err := d.commit(ctx, func(cp *Checkpoint) { cp.ActiveStageID = m.config.ID; cp.Status = StatusPaused }); err != nil {
-			fail(err)
-			return
-		}
-		run.workflow.mu.Lock()
-		run.workflow.result.Status = StatusPaused
-		run.workflow.mu.Unlock()
-		forward(upstream)
-		return
-	}
+	// A pause request does not stop here. The stage is decided and its prompt is
+	// saved; its loop then pauses at its first boundary, so a resume command has
+	// a continuation to apply to.
 	if !stage.DecisionMade {
-		shouldRun := !result.Canceled && m.shouldRun(result)
+		// Every earlier stage has completed, so the upstream result is neither
+		// canceled nor failed here.
+		shouldRun := m.shouldRun(result)
 		if err := d.commit(ctx, func(cp *Checkpoint) {
 			cp.ActiveStageID = m.config.ID
 			changeStage(cp, m.config.ID, func(s *StageCheckpoint) {
@@ -139,14 +127,8 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 	start()
 	if !stage.ShouldRun {
 		forward(upstream)
-		reason := "predicate"
-		if result.Canceled {
-			reason = "upstream_canceled"
-		} else if m.config.ShouldRun == nil && len(result.Errors) > 0 {
-			reason = "upstream_error"
-		}
-		obs.Skipped(stageCtx, reason)
-		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StageSkipped, StageReason: reason})
+		obs.Skipped(stageCtx, "predicate")
+		emit(Event{Type: EventStageFinish, Source: source, StageOutcome: StageSkipped, StageReason: "predicate"})
 		return
 	}
 	var child *Workflow

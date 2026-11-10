@@ -250,7 +250,8 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 		w.mu.Unlock()
 
 		if w.durability != nil {
-			if !w.durableChild && result.Status != StatusPaused {
+			// Nothing is stored for a run that stopped before its first checkpoint.
+			if !w.durableChild && result.Status != StatusPaused && w.durability.isAcknowledged() {
 				if err := w.durability.commit(context.WithoutCancel(ctx), func(cp *Checkpoint) { cp.Status = result.Status }); err != nil {
 					terminal.Type = EventError
 					terminal.Err = err
