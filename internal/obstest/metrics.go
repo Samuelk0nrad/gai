@@ -114,6 +114,8 @@ func RequireMetricAttributesAllowed(t testing.TB, metrics []metricdata.Metrics, 
 	}
 }
 
+// dataPointAttributes returns the attribute sets of every data point in
+// metric, for the aggregations GAI records.
 func dataPointAttributes(metric metricdata.Metrics) []attribute.Set {
 	var sets []attribute.Set
 	switch data := metric.Data.(type) {

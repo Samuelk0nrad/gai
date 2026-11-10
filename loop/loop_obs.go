@@ -94,6 +94,7 @@ type loopObserver struct {
 	span trace.Span
 }
 
+// newLoopRunState starts the run span and the state used for run metrics.
 func newLoopRunState(ctx context.Context, l *Loop) (context.Context, *loopRunState) {
 	maxIterations := 0
 	retryLimit := 0
@@ -124,6 +125,8 @@ func newLoopRunState(ctx context.Context, l *Loop) (context.Context, *loopRunSta
 	return ctx, &loopRunState{obs: &loopObserver{span: span}, ctx: ctx, sink: sink, modelName: modelName, startedAt: time.Now()}
 }
 
+// startIteration starts an iteration span and records the latest iteration
+// number for run telemetry.
 func (s *loopRunState) startIteration(ctx context.Context, count int, attempt int) (context.Context, *loopIterationState) {
 	incrementalPrompt := false
 	var sink gai.ObservationSink
@@ -184,6 +187,7 @@ func (s *loopRunState) cancel(err error) {
 	}
 }
 
+// finish records run metrics and ends the run span.
 func (s *loopRunState) finish() {
 	if s == nil || s.obs == nil {
 		return
@@ -245,6 +249,8 @@ func (s *loopIterationState) recordIteration(iteration Iteration) {
 	}
 }
 
+// markRetrying records an accepted retry on the iteration span, retry metric,
+// and observation sink.
 func (s *loopIterationState) markRetrying(retryCount int, reason string, delay time.Duration) {
 	if s == nil {
 		return
@@ -369,6 +375,10 @@ func processObservedToolDeadline(ctx context.Context, input ToolPolicyInput, too
 	execution := ToolExecution{State: ToolNotStarted, Decision: ToolDecision{Action: ToolAllow}}
 	return processObservedToolExecution(ctx, input, tools, processor, timeout, &execution, sinks...)
 }
+
+// processObservedToolExecution invokes one tool and its result processor while
+// recording a tool span, observation, and metric. The reported duration covers
+// tool execution only, not result processing.
 func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, tools []Tool, processor ToolResultProcessor, timeout time.Duration, execution *ToolExecution, sinks ...gai.ObservationSink) (response *ToolResult, duration time.Duration, processErr error) {
 	toolCtx, observation := startToolSpan(ctx, input.Call, sinks...)
 	observation.execution = execution

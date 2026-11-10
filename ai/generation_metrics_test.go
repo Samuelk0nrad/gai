@@ -22,6 +22,8 @@ var generationMetricAttributes = []string{
 	"error.type",
 }
 
+// finishGeneration runs one generation observation from start to finish with
+// a sentinel prompt that must never reach metric attributes.
 func finishGeneration(config GenerationConfig, result GenerationResult) {
 	_, observation := StartGenerationObservation(context.Background(), AIRequest{
 		Messages: []Message{TextMessage(RoleUser, "prompt-sentinel-secret")},
@@ -29,6 +31,8 @@ func finishGeneration(config GenerationConfig, result GenerationResult) {
 	observation.Finish(result)
 }
 
+// requireSinglePointAttributes fails unless got contains exactly the want
+// attribute set.
 func requireSinglePointAttributes(t *testing.T, name string, got map[string]string, want map[string]string) {
 	t.Helper()
 	if len(got) != len(want) {
@@ -41,6 +45,8 @@ func requireSinglePointAttributes(t *testing.T, name string, got map[string]stri
 	}
 }
 
+// TestGenerationMetricsRecordDurationAndReportedUsage checks names, units,
+// values, and the complete attribute set for a successful generation.
 func TestGenerationMetricsRecordDurationAndReportedUsage(t *testing.T) {
 	reader := obstest.InstallMetrics(t)
 
@@ -86,6 +92,8 @@ func TestGenerationMetricsRecordDurationAndReportedUsage(t *testing.T) {
 	obstest.RequireMetricAttributesAllowed(t, metrics, generationMetricAttributes, "request-id-sentinel", "prompt-sentinel-secret")
 }
 
+// TestGenerationMetricsSkipMissingAndZeroUsage checks that only positive
+// reported usage is added to the token counters.
 func TestGenerationMetricsSkipMissingAndZeroUsage(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
@@ -111,6 +119,8 @@ func TestGenerationMetricsSkipMissingAndZeroUsage(t *testing.T) {
 	}
 }
 
+// TestGenerationMetricsRecordBoundedErrorType checks that failures carry a
+// classified error.type and that failed calls still report usage.
 func TestGenerationMetricsRecordBoundedErrorType(t *testing.T) {
 	reader := obstest.InstallMetrics(t)
 
@@ -141,6 +151,7 @@ func TestGenerationMetricsRecordBoundedErrorType(t *testing.T) {
 	obstest.RequireMetricAttributesAllowed(t, metrics, generationMetricAttributes, "raw-provider-error-sentinel")
 }
 
+// TestGenerationErrorType checks the bounded generation error classes.
 func TestGenerationErrorType(t *testing.T) {
 	for _, tt := range []struct {
 		err  error
@@ -160,6 +171,8 @@ func TestGenerationErrorType(t *testing.T) {
 	}
 }
 
+// TestGenerationMetricsRecordOncePerGeneration checks that repeated Finish
+// calls record once and that streamed completion metadata is used.
 func TestGenerationMetricsRecordOncePerGeneration(t *testing.T) {
 	reader := obstest.InstallMetrics(t)
 

@@ -14,6 +14,8 @@ type testInstruments struct {
 	counter metric.Int64Counter
 }
 
+// newTestInstruments returns an instrument set that counts how often it is
+// rebuilt.
 func newTestInstruments(builds *int) *Instruments[testInstruments] {
 	return NewInstruments("github.com/lace-ai/gai/internal/observe/test", func(meter metric.Meter) testInstruments {
 		*builds++
@@ -21,6 +23,8 @@ func newTestInstruments(builds *int) *Instruments[testInstruments] {
 	})
 }
 
+// TestInstrumentsRebindWhenGlobalProviderChanges checks that instruments
+// follow later SetMeterProvider calls instead of the first provider only.
 func TestInstrumentsRebindWhenGlobalProviderChanges(t *testing.T) {
 	builds := 0
 	instruments := newTestInstruments(&builds)
@@ -48,6 +52,8 @@ func TestInstrumentsRebindWhenGlobalProviderChanges(t *testing.T) {
 	}
 }
 
+// TestInstrumentsWorkWithValueProviders checks that non-pointer providers are
+// rebuilt instead of cached.
 func TestInstrumentsWorkWithValueProviders(t *testing.T) {
 	previous := otel.GetMeterProvider()
 	t.Cleanup(func() { otel.SetMeterProvider(previous) })

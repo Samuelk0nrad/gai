@@ -80,6 +80,8 @@ func (m *Model) Close() error {
 	return nil
 }
 
+// GenerateStream streams one Gemini generation as normalized tokens, ending
+// with completion metadata when Gemini reports it.
 func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.Token {
 	out := make(chan ai.Token, 1)
 
@@ -334,6 +336,8 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 	return out
 }
 
+// Generate runs one non-streaming Gemini generation and returns the
+// normalized response.
 func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AIResponse, err error) {
 	req = req.Copy()
 	if err := ai.ValidateModelRequest(m, req); err != nil {

@@ -34,12 +34,14 @@ var loopMetricAttributes = []string{
 	"error.type",
 }
 
+// toolCallToken returns a streamed native tool-call token.
 func toolCallToken(id, name, args string) ai.Token {
 	return ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{
 		ID: id, Type: "function", Name: name, Args: json.RawMessage(args),
 	}}}
 }
 
+// requireAttributes fails unless got contains exactly the want attribute set.
 func requireAttributes(t *testing.T, name string, got, want map[string]string) {
 	t.Helper()
 	if len(got) != len(want) {
@@ -52,6 +54,8 @@ func requireAttributes(t *testing.T, name string, got, want map[string]string) {
 	}
 }
 
+// requireRunMetrics checks that exactly one run was recorded with the given
+// iteration count and attributes.
 func requireRunMetrics(t *testing.T, metrics []metricdata.Metrics, iterations int64, attrs map[string]string) {
 	t.Helper()
 	durations := obstest.HistogramPoints[float64](t, metrics, metricLoopRunDuration)
@@ -66,6 +70,8 @@ func requireRunMetrics(t *testing.T, metrics []metricdata.Metrics, iterations in
 	requireAttributes(t, metricLoopRunIterations, obstest.AttributeStrings(counts[0].Attributes), attrs)
 }
 
+// TestLoopMetricsRecordRetryToolAndSuccessfulRun checks retry, tool, and run
+// metrics for a run that retries, calls a tool, and succeeds.
 func TestLoopMetricsRecordRetryToolAndSuccessfulRun(t *testing.T) {
 	reader := obstest.InstallMetrics(t)
 	model := &scriptedStreamModel{sequences: [][]ai.Token{
@@ -107,6 +113,8 @@ func TestLoopMetricsRecordRetryToolAndSuccessfulRun(t *testing.T) {
 		"provider-error-sentinel", "call-id-sentinel", "tool-args-sentinel", "Initial prompt")
 }
 
+// TestLoopMetricsRecordFailedToolsWithoutModelSuppliedNames checks failed tool
+// classification and that hallucinated tool names are never recorded.
 func TestLoopMetricsRecordFailedToolsWithoutModelSuppliedNames(t *testing.T) {
 	reader := obstest.InstallMetrics(t)
 	model := &scriptedStreamModel{sequences: [][]ai.Token{
@@ -134,6 +142,8 @@ func TestLoopMetricsRecordFailedToolsWithoutModelSuppliedNames(t *testing.T) {
 		"hallucinated-tool-sentinel", "tool-output-sentinel-secret")
 }
 
+// TestLoopMetricsRecordFailedAndCanceledRuns checks run outcomes and error
+// classes for iteration limits, exhausted retries, and cancellation.
 func TestLoopMetricsRecordFailedAndCanceledRuns(t *testing.T) {
 	t.Run("max_iterations", func(t *testing.T) {
 		reader := obstest.InstallMetrics(t)

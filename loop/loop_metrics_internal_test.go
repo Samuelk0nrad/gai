@@ -12,6 +12,8 @@ import (
 	"github.com/lace-ai/gai/internal/obstest"
 )
 
+// TestToolMetricsRecordOnlyInvokedExecutions checks that unknown tools and
+// malformed calls, which never run, are not recorded.
 func TestToolMetricsRecordOnlyInvokedExecutions(t *testing.T) {
 	reader := obstest.InstallMetrics(t)
 	registered := observedTestTool{name: "test", call: func(context.Context, ai.ToolCall) (string, error) {
@@ -34,6 +36,8 @@ func TestToolMetricsRecordOnlyInvokedExecutions(t *testing.T) {
 	}
 }
 
+// TestToolMetricsClassifyPanics checks that a panicking tool is recorded with
+// a fixed error.type and without its panic value.
 func TestToolMetricsClassifyPanics(t *testing.T) {
 	reader := obstest.InstallMetrics(t)
 	tool := observedTestTool{name: "test", call: func(context.Context, ai.ToolCall) (string, error) {
@@ -56,6 +60,8 @@ func TestToolMetricsClassifyPanics(t *testing.T) {
 	obstest.RequireMetricAttributesAllowed(t, metrics, []string{"gen_ai.tool.name", "gen_ai.tool.type", "error.type"}, "panic-value-sentinel")
 }
 
+// TestRetryMetricBoundsCustomProviderKinds checks that custom provider error
+// kinds are reported as _OTHER.
 func TestRetryMetricBoundsCustomProviderKinds(t *testing.T) {
 	reader := obstest.InstallMetrics(t)
 
@@ -75,6 +81,7 @@ func TestRetryMetricBoundsCustomProviderKinds(t *testing.T) {
 	}
 }
 
+// TestRunErrorType checks the bounded run error classes and their match order.
 func TestRunErrorType(t *testing.T) {
 	for _, tt := range []struct {
 		err  error
