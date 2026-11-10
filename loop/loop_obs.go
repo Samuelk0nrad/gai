@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -25,7 +25,7 @@ func retryReason(err error) string {
 	return string(ai.ProviderErrorUnknown)
 }
 
-const loopTracerName = "github.com/lace-ai/gai/loop"
+const loopTracerName = "github.com/Samuelk0nrad/gai/loop"
 
 const retryReasonAttemptTimeout = "attempt_timeout"
 

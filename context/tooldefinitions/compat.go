@@ -1,14 +1,14 @@
 // Package tooldefinitions preserves the former tool-definition import path.
 //
-// Deprecated: Use github.com/lace-ai/gai/modelinput/tooldefinitions.
+// Deprecated: Use github.com/Samuelk0nrad/gai/modelinput/tooldefinitions.
 // It remains available until its removal in a future breaking release.
 package tooldefinitions
 
 import (
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput"
-	"github.com/lace-ai/gai/modelinput/tooldefinitions"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/modelinput/tooldefinitions"
 )
 
 type (

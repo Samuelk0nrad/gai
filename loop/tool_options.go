@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 // ToolExecutionConfig controls admission within one loop run. Zero preserves

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lace-ai/gai"
+	"github.com/Samuelk0nrad/gai"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )

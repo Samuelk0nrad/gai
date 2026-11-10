@@ -35,8 +35,8 @@ otel.SetMeterProvider(provider)
 GAI binds its instruments to whichever provider is currently installed, so a
 provider set after GAI was first used still receives data.
 
-Instrumentation scopes are `github.com/lace-ai/gai/ai` for model calls and
-`github.com/lace-ai/gai/loop` for tools, retries, and runs.
+Instrumentation scopes are `github.com/Samuelk0nrad/gai/ai` for model calls and
+`github.com/Samuelk0nrad/gai/loop` for tools, retries, and runs.
 
 ## Metrics
 

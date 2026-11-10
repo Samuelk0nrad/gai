@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lace-ai/gai/internal/obstest"
+	"github.com/Samuelk0nrad/gai/internal/obstest"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
@@ -17,7 +17,7 @@ type testInstruments struct {
 // newTestInstruments returns an instrument set that counts how often it is
 // rebuilt.
 func newTestInstruments(builds *int) *Instruments[testInstruments] {
-	return NewInstruments("github.com/lace-ai/gai/internal/observe/test", func(meter metric.Meter) testInstruments {
+	return NewInstruments("github.com/Samuelk0nrad/gai/internal/observe/test", func(meter metric.Meter) testInstruments {
 		*builds++
 		return testInstruments{counter: Int64Counter(meter, "gai.test.count", "{test}", "Test counter.")}
 	})

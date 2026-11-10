@@ -1,11 +1,11 @@
 package history
 
 import (
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 	"strings"
 	"testing"
 
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 func TestWriteTurnHandlesNilMessageContent(t *testing.T) {

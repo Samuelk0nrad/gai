@@ -4,7 +4,7 @@ import (
 	"context"
 	"strconv"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 // Part is a token-countable unit that can produce a renderer-neutral node.

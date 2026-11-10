@@ -1,4 +1,4 @@
-module github.com/lace-ai/gai
+module github.com/Samuelk0nrad/gai
 
 go 1.26.10
 

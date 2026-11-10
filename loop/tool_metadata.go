@@ -1,6 +1,6 @@
 package loop
 
-import "github.com/lace-ai/gai/ai"
+import "github.com/Samuelk0nrad/gai/ai"
 
 // ToolEffect describes declared side effects, not an authorization guarantee.
 type ToolEffect string

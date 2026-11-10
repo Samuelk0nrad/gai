@@ -1,6 +1,6 @@
 # Mistral provider
 
-Package `github.com/lace-ai/gai/ai/mistral` adapts the Mistral
+Package `github.com/Samuelk0nrad/gai/ai/mistral` adapts the Mistral
 [Chat Completions API](https://docs.mistral.ai/api/endpoint/chat) to GAI's
 canonical `ai.Message` model. Portable requests (`ai.AIRequest`) cover the
 controls that every adapter shares. Mistral-only controls use typed options on

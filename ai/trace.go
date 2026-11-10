@@ -1,3 +1,3 @@
 package ai
 
-const aiTracerName = "github.com/lace-ai/gai/ai"
+const aiTracerName = "github.com/Samuelk0nrad/gai/ai"

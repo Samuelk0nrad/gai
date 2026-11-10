@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lace-ai/gai"
+	"github.com/Samuelk0nrad/gai"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
-const generationTracerName = "github.com/lace-ai/gai/ai"
+const generationTracerName = "github.com/Samuelk0nrad/gai/ai"
 
 // GenerationConfig identifies one provider model invocation.
 type GenerationConfig struct {

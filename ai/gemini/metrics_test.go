@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/internal/obstest"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/obstest"
 )
 
 // TestGenerationMetricsIncludeThinkingInOutputTokens verifies provider wiring

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 type runExecution struct {

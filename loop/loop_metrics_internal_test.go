@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/internal/obstest"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/obstest"
 )
 
 // TestToolMetricsRecordOnlyInvokedExecutions checks that unknown tools and

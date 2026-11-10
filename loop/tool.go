@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 // ToolResult is the normalized result of an invocation or result processor.

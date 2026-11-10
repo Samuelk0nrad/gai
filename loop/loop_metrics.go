@@ -5,8 +5,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/internal/observe"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/observe"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )

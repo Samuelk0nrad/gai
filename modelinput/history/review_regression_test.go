@@ -10,10 +10,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput"
-	"github.com/lace-ai/gai/modelinput/history"
-	"github.com/lace-ai/gai/testutil/mocks"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/modelinput/history"
+	"github.com/Samuelk0nrad/gai/testutil/mocks"
 )
 
 func TestPlainSavedAndGeneratedSummariesFitTightBudget(t *testing.T) {

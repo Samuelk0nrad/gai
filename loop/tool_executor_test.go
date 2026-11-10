@@ -10,7 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 func schedulerTool(t *testing.T, name string, options ToolOptions, fn ToolFunc) Tool {

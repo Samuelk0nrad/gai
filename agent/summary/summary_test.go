@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lace-ai/gai/agent/summary"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/loop"
-	"github.com/lace-ai/gai/testutil/mocks"
+	"github.com/Samuelk0nrad/gai/agent/summary"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/loop"
+	"github.com/Samuelk0nrad/gai/testutil/mocks"
 )
 
 func TestSummarizerRunsSummaryAgentThroughLoop(t *testing.T) {

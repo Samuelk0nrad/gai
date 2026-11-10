@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/internal/obstest"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/internal/obstest"
 )
 
 // generationMetricAttributes is the complete set of attribute keys generation

@@ -8,14 +8,14 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lace-ai/gai/agent"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/ai/anthropic"
-	"github.com/lace-ai/gai/ai/gemini"
-	"github.com/lace-ai/gai/ai/mistral"
-	"github.com/lace-ai/gai/ai/openai"
-	"github.com/lace-ai/gai/modelinput"
-	"github.com/lace-ai/gai/modelinput/history"
+	"github.com/Samuelk0nrad/gai/agent"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai/anthropic"
+	"github.com/Samuelk0nrad/gai/ai/gemini"
+	"github.com/Samuelk0nrad/gai/ai/mistral"
+	"github.com/Samuelk0nrad/gai/ai/openai"
+	"github.com/Samuelk0nrad/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/modelinput/history"
 )
 
 // Deliberately offers only the single runtime method, with no embedded model.

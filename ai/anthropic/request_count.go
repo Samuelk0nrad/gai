@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/Samuelk0nrad/gai/ai"
 	sdk "github.com/anthropics/anthropic-sdk-go"
-	"github.com/lace-ai/gai/ai"
 )
 
 var _ ai.InputTokenCounter = (*Model)(nil)

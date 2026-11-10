@@ -2,10 +2,10 @@ package modelinput_test
 
 import (
 	"context"
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 	"testing"
 
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 // plainRenderer has no callback registration or tool signature methods.

@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lace-ai/gai"
+	"github.com/Samuelk0nrad/gai"
 )
 
 // ToolCall describes a model request to invoke a function tool.

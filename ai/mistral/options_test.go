@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/ai/mistral"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai/mistral"
 )
 
 func TestWithBaseURLTrailingSlashes(t *testing.T) {

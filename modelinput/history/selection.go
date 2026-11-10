@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 type selection struct {

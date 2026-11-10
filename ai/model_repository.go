@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/lace-ai/gai"
+	"github.com/Samuelk0nrad/gai"
 )
 
 // ModelRepository stores providers and resolves their models.

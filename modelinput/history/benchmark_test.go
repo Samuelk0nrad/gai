@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/ai/openai"
-	"github.com/lace-ai/gai/modelinput"
-	"github.com/lace-ai/gai/modelinput/history"
-	"github.com/lace-ai/gai/modelinput/tooldefinitions"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai/openai"
+	"github.com/Samuelk0nrad/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/modelinput/history"
+	"github.com/Samuelk0nrad/gai/modelinput/tooldefinitions"
 )
 
 // Reuse immutable static prompt parts and a persistent history store while

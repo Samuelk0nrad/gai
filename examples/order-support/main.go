@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lace-ai/gai/agent"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/ai/openai"
-	"github.com/lace-ai/gai/loop"
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/agent"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai/openai"
+	"github.com/Samuelk0nrad/gai/loop"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 const defaultPrompt = "Where is order LACE-1042, and when should it arrive?"

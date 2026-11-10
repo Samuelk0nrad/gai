@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/ai/mistral"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai/mistral"
 )
 
 // Reasoning output arrives as canonical reasoning parts before the answer.

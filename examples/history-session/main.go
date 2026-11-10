@@ -8,8 +8,8 @@ import (
 	"log"
 	"strings"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput/history"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput/history"
 )
 
 // textModel implements the same streaming boundary as a provider-backed model.

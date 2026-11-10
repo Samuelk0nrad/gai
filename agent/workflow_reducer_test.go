@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/loop"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/loop"
 )
 
 // TestWorkflowOutputAccumulatorDoesNotRetainLargeExecutionEvents ensures the output reducer
