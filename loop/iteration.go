@@ -1,7 +1,7 @@
 package loop
 
 import (
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 // IterationType identifies an execution diagnostic record.

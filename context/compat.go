@@ -1,12 +1,12 @@
 // Package context preserves the former model-input import path.
 //
-// Deprecated: Use github.com/lace-ai/gai/modelinput.
+// Deprecated: Use github.com/Samuelk0nrad/gai/modelinput.
 // It remains available until its removal in a future breaking release.
 package context
 
 import (
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 type (

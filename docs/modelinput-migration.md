@@ -9,14 +9,14 @@ an alias.
 
 | Former path | Preferred path |
 | --- | --- |
-| `github.com/lace-ai/gai/context` | `github.com/lace-ai/gai/modelinput` |
-| `github.com/lace-ai/gai/context/history` | `github.com/lace-ai/gai/modelinput/history` |
-| `github.com/lace-ai/gai/context/tooldefinitions` | `github.com/lace-ai/gai/modelinput/tooldefinitions` |
+| `github.com/Samuelk0nrad/gai/context` | `github.com/Samuelk0nrad/gai/modelinput` |
+| `github.com/Samuelk0nrad/gai/context/history` | `github.com/Samuelk0nrad/gai/modelinput/history` |
+| `github.com/Samuelk0nrad/gai/context/tooldefinitions` | `github.com/Samuelk0nrad/gai/modelinput/tooldefinitions` |
 
 For the smallest consumer change, keep your existing local import name:
 
 ```go
-import gaictx "github.com/lace-ai/gai/modelinput"
+import gaictx "github.com/Samuelk0nrad/gai/modelinput"
 ```
 
 Or use the package's new name directly:
@@ -24,8 +24,8 @@ Or use the package's new name directly:
 ```go
 import (
     "context"
-    "github.com/lace-ai/gai/ai"
-    "github.com/lace-ai/gai/modelinput"
+    "github.com/Samuelk0nrad/gai/ai"
+    "github.com/Samuelk0nrad/gai/modelinput"
 )
 
 func prompt(ctx context.Context) (*modelinput.Builder, error) {

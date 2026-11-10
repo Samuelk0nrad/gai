@@ -1,6 +1,6 @@
 package modelinput
 
-import "github.com/lace-ai/gai/ai"
+import "github.com/Samuelk0nrad/gai/ai"
 
 // Conversation exposes the canonical ordered messages for a model request.
 type Conversation interface {

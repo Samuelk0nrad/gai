@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lace-ai/gai/agent"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/internal/obstest"
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/agent"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/obstest"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 func TestModelGenerateMapsCapabilitiesAndResponse(t *testing.T) {

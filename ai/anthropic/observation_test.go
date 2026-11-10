@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"

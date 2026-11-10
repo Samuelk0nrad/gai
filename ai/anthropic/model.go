@@ -8,16 +8,16 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/modelcatalog"
 	antropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/internal/modelcatalog"
 )
 
 const (
-	anthropicTracerName = "github.com/lace-ai/gai/ai/anthropic"
+	anthropicTracerName = "github.com/Samuelk0nrad/gai/ai/anthropic"
 	defaultMaxTokens    = 4096
 	minThinkingTokens   = 1024
 )

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lace-ai/gai"
+	"github.com/Samuelk0nrad/gai"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"

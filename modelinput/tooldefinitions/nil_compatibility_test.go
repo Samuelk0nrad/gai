@@ -3,7 +3,7 @@ package tooldefinitions_test
 import (
 	"testing"
 
-	"github.com/lace-ai/gai/modelinput/tooldefinitions"
+	"github.com/Samuelk0nrad/gai/modelinput/tooldefinitions"
 )
 
 func TestNewAcceptsUntypedNilTools(t *testing.T) {

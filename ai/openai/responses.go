@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/openai/openai-go/packages/param"
 	"github.com/openai/openai-go/responses"
 	"github.com/openai/openai-go/shared"

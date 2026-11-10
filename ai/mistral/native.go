@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 // ModelOption configures a concrete model at construction.

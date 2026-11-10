@@ -9,7 +9,7 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 // TestCanonicalCanceledToolStartWaitsForAlreadyRunningTool ensures canceling a blocked start

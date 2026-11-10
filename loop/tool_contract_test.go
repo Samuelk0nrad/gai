@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/internal/obstest"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/obstest"
 )
 
 // TestTextToolContract protects empty successful output, error precedence over text, and wrapped

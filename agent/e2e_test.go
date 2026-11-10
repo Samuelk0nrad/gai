@@ -9,11 +9,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/lace-ai/gai/agent"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/loop"
-	"github.com/lace-ai/gai/modelinput"
-	"github.com/lace-ai/gai/testutil/mocks"
+	"github.com/Samuelk0nrad/gai/agent"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/loop"
+	"github.com/Samuelk0nrad/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/testutil/mocks"
 )
 
 type scriptedWorkflowModel struct {

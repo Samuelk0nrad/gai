@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 var (

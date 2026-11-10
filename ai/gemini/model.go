@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
 	"google.golang.org/genai"
 )
 

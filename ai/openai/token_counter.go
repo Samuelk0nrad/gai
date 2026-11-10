@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/lace-ai/gai/internal/syncutil"
+	"github.com/Samuelk0nrad/gai/internal/syncutil"
 	tiktoken "github.com/tiktoken-go/tokenizer"
 )
 

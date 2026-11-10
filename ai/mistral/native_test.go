@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lace-ai/gai/ai/mistral"
+	"github.com/Samuelk0nrad/gai/ai/mistral"
 )
 
 func TestNativeHTTPPreservesPayloadAndResponse(t *testing.T) {

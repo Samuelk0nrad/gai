@@ -3,8 +3,8 @@ package history
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 // HistorySchemaVersion describes the canonical serialized history format.
