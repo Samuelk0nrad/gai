@@ -69,11 +69,10 @@ type loopRunStats struct {
 }
 
 type loopIterationState struct {
-	obs       *iterationObserver
-	ctx       context.Context
-	sink      gai.ObservationSink
-	modelName string
-	stats     loopIterationStats
+	obs   *iterationObserver
+	ctx   context.Context
+	sink  gai.ObservationSink
+	stats loopIterationStats
 }
 
 type loopIterationStats struct {
@@ -130,12 +129,10 @@ func newLoopRunState(ctx context.Context, l *Loop) (context.Context, *loopRunSta
 func (s *loopRunState) startIteration(ctx context.Context, count int, attempt int) (context.Context, *loopIterationState) {
 	incrementalPrompt := false
 	var sink gai.ObservationSink
-	modelName := ""
 	if s != nil {
 		s.stats.IterationCount = count
 		incrementalPrompt = s.stats.IncrementalPrompt
 		sink = s.sink
-		modelName = s.modelName
 	}
 	ctx, span := gai.StartOperationSpan(ctx, loopTracerName, "loop", "loop.operation", "iteration",
 		attribute.Int("loop.iteration", count),
@@ -143,11 +140,10 @@ func (s *loopRunState) startIteration(ctx context.Context, count int, attempt in
 		attribute.Bool("loop.incremental_prompt", incrementalPrompt),
 	)
 	return ctx, &loopIterationState{
-		obs:       &iterationObserver{span: span},
-		ctx:       ctx,
-		sink:      sink,
-		modelName: modelName,
-		stats:     loopIterationStats{Iteration: count, AttemptID: attempt},
+		obs:   &iterationObserver{span: span},
+		ctx:   ctx,
+		sink:  sink,
+		stats: loopIterationStats{Iteration: count, AttemptID: attempt},
 	}
 }
 
@@ -192,7 +188,8 @@ func (s *loopRunState) finish() {
 	if s == nil || s.obs == nil {
 		return
 	}
-	recordRunMetrics(s.ctx, s.modelName, s.err, s.cancelErr, s.stats.IterationCount, time.Since(s.startedAt))
+	outcome, errorType := runOutcome(s.err, s.cancelErr)
+	recordRunMetrics(s.ctx, s.modelName, outcome, errorType, s.stats.IterationCount, time.Since(s.startedAt))
 	s.obs.finish(s.err, s.cancelErr, s.stats)
 }
 
@@ -249,8 +246,9 @@ func (s *loopIterationState) recordIteration(iteration Iteration) {
 	}
 }
 
-// markRetrying records an accepted retry on the iteration span, retry metric,
-// and observation sink.
+// markRetrying records a scheduled retry on the iteration span and
+// observation sink. The retry metric is recorded by scheduleRetry once the
+// next attempt is about to start.
 func (s *loopIterationState) markRetrying(retryCount int, reason string, delay time.Duration) {
 	if s == nil {
 		return
@@ -259,7 +257,6 @@ func (s *loopIterationState) markRetrying(retryCount int, reason string, delay t
 	s.stats.RetryCount = retryCount
 	s.stats.RetryReason = reason
 	s.stats.RetryDelay = delay
-	recordRetryMetric(s.ctx, s.modelName, reason)
 	gai.EmitObservation(s.ctx, s.sink, gai.Observation{
 		Name:   "loop_retry_scheduled",
 		Source: "loop:Iteration",
@@ -378,24 +375,24 @@ func processObservedToolDeadline(ctx context.Context, input ToolPolicyInput, too
 
 // processObservedToolExecution invokes one tool and its result processor while
 // recording a tool span, observation, and metric. The reported duration covers
-// tool execution only, not result processing.
+// tool execution only, not result processing. The tool metric is recorded as
+// soon as the tool returns and classifies the tool's own result, so a
+// ToolResultProcessor cannot change it.
 func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, tools []Tool, processor ToolResultProcessor, timeout time.Duration, execution *ToolExecution, sinks ...gai.ObservationSink) (response *ToolResult, duration time.Duration, processErr error) {
 	toolCtx, observation := startToolSpan(ctx, input.Call, sinks...)
 	observation.execution = execution
 	started := time.Now()
-	toolReturned := false
 	defer func() {
 		if panicValue := recover(); panicValue != nil {
+			// ToolRunning means the tool itself panicked. A processor panic
+			// happens after the tool returned, so duration already holds the
+			// tool's own execution time.
 			if execution.State == ToolRunning {
 				execution.State = ToolFailed
+				duration = time.Since(started)
+				recordToolMetrics(toolCtx, input.Call.Name, toolOutcomePanic, true, duration)
 			}
 			execution.Output = ToolOutputRejected
-			// A processor panic happens after the tool returned; keep the
-			// tool's own duration so processing time is not reported as
-			// execution latency.
-			if !toolReturned {
-				duration = time.Since(started)
-			}
 			observation.finishPanic(duration)
 			panic(panicValue)
 		}
@@ -413,13 +410,17 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 	defer cancel()
 	execution.State = ToolRunning
 	result, invoked := invokeTool(invokeCtx, input.Call, tools)
+	duration = time.Since(started)
 	execution.State = ToolNotStarted
 	if invoked {
 		execution.State = invocationState(result.Err)
+		// Only invoked executions are timed: uninvoked calls have no
+		// execution latency, and only registered tools can be invoked, which
+		// keeps model-supplied tool names out of metric attributes.
+		outcome, _, toolErr := toolResult(&result)
+		recordToolMetrics(toolCtx, input.Call.Name, outcome, toolErr != nil, duration)
 	}
 	cancel()
-	duration = time.Since(started)
-	toolReturned = true
 	original := result
 	execution.Output = ToolOutputAccepted
 	if processor != nil {
@@ -483,12 +484,6 @@ func (o *toolObservation) setOutcome(outcome string, spanErr error, duration tim
 		attrs = append(attrs, attribute.String("gai.tool.execution", string(o.execution.State)), attribute.String("gai.tool.output", string(o.execution.Output)), attribute.String("gai.tool.decision", string(o.execution.Decision.Action)))
 	}
 	o.span.SetAttributes(attrs...)
-	// Only invoked executions are timed: uninvoked calls have no execution
-	// latency, and only registered tools can be invoked, which keeps
-	// model-supplied tool names out of metric attributes.
-	if o.execution != nil && o.execution.State != ToolNotStarted {
-		recordToolMetrics(o.ctx, o.call.Name, outcome, spanErr != nil, duration)
-	}
 	fields := toolObservationFields(o.call, o.execution, outcome, status, duration)
 	gai.EmitObservation(o.ctx, o.sink, gai.Observation{
 		Name:   "loop_tool_finished",

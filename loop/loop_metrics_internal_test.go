@@ -60,13 +60,16 @@ func TestToolMetricsClassifyPanics(t *testing.T) {
 	obstest.RequireMetricAttributesAllowed(t, metrics, []string{"gen_ai.tool.name", "gen_ai.tool.type", "error.type"}, "panic-value-sentinel")
 }
 
-// TestRetryMetricBoundsCustomProviderKinds checks that custom provider error
-// kinds are reported as _OTHER.
-func TestRetryMetricBoundsCustomProviderKinds(t *testing.T) {
+// TestRetryMetricUsesModelCallErrorClasses checks that retry reasons use the
+// model call error.type classes: custom provider kinds and plain errors are
+// _OTHER, and context errors win over the provider kind.
+func TestRetryMetricUsesModelCallErrorClasses(t *testing.T) {
 	reader := obstest.InstallMetrics(t)
 
-	recordRetryMetric(t.Context(), "", "custom-kind-sentinel")
-	recordRetryMetric(t.Context(), "", retryReasonAttemptTimeout)
+	recordRetryMetric(t.Context(), "", &ai.ProviderError{Kind: "custom-kind-sentinel"})
+	recordRetryMetric(t.Context(), "", errors.New("plain-error-sentinel"))
+	recordRetryMetric(t.Context(), "", ErrAttemptTimeout)
+	recordRetryMetric(t.Context(), "", &ai.ProviderError{Kind: ai.ProviderErrorUnknown, Err: context.DeadlineExceeded})
 
 	got := map[string]int64{}
 	for _, point := range obstest.SumPoints[int64](t, obstest.CollectMetrics(t, reader), metricLoopRetries) {
@@ -76,8 +79,8 @@ func TestRetryMetricBoundsCustomProviderKinds(t *testing.T) {
 		}
 		got[attrs["gai.retry.reason"]] += point.Value
 	}
-	if len(got) != 2 || got["_OTHER"] != 1 || got[retryReasonAttemptTimeout] != 1 {
-		t.Fatalf("retry reasons = %v, want _OTHER and attempt_timeout", got)
+	if len(got) != 3 || got["_OTHER"] != 2 || got[retryReasonAttemptTimeout] != 1 || got["timeout"] != 1 {
+		t.Fatalf("retry reasons = %v, want two _OTHER, one attempt_timeout, and one timeout", got)
 	}
 }
 
@@ -95,7 +98,9 @@ func TestRunErrorType(t *testing.T) {
 		{err: fmt.Errorf("%w: resolver: %w", ErrToolApproval, context.Canceled), want: "tool_approval"},
 		{err: ErrMixedTerminalToolBatch, want: "terminal_tool_batch"},
 		{err: fmt.Errorf("%w: budget", ai.ErrRequestBudgetExceeded), want: "request_budget_exceeded"},
-		{err: ErrModelNotConfigured, want: "invalid_configuration"},
+		{err: fmt.Errorf("%w: %q", ErrRequiredToolNotConfigured, "missing"), want: "invalid_configuration"},
+		// Shared classes match model call error.type.
+		{err: &ai.ProviderError{Kind: ai.ProviderErrorUnknown, Err: context.DeadlineExceeded}, want: "timeout"},
 		{err: &ai.TerminalError{Provider: "openai", Reason: "length"}, want: "unsuccessful_generation"},
 		{err: context.DeadlineExceeded, want: "timeout"},
 		{err: context.Canceled, want: "canceled"},
@@ -154,5 +159,57 @@ func TestToolMetricsRecordExecutionDurationInSeconds(t *testing.T) {
 	// Sleep guarantees the lower bound; a millisecond unit would exceed 5.
 	if got := points[0].Sum; got < toolTime.Seconds() || got >= 5 {
 		t.Fatalf("tool duration = %g, want at least %gs recorded in seconds", got, toolTime.Seconds())
+	}
+}
+
+// TestToolMetricsClassifyToolResultBeforeProcessing checks that the tool
+// metric's error.type reflects the tool's own result, not the result a
+// ToolResultProcessor rewrote or rejected.
+func TestToolMetricsClassifyToolResultBeforeProcessing(t *testing.T) {
+	succeed := func(context.Context, ai.ToolCall) (string, error) { return "ok", nil }
+	fail := func(context.Context, ai.ToolCall) (string, error) { return "", errors.New("tool-error-sentinel") }
+	for _, tt := range []struct {
+		name      string
+		call      func(context.Context, ai.ToolCall) (string, error)
+		processor ToolResultProcessor
+		wantError string
+	}{
+		{
+			name: "processor hides tool error",
+			call: fail,
+			processor: ToolResultProcessorFunc(func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error) {
+				return ToolResult{Text: "recovered"}, nil
+			}),
+			wantError: "gai.tool.tool_error",
+		},
+		{
+			name: "processor turns success into error",
+			call: succeed,
+			processor: ToolResultProcessorFunc(func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error) {
+				return ToolResult{Err: errors.New("processed-error-sentinel")}, nil
+			}),
+		},
+		{
+			name: "processor rejects success",
+			call: succeed,
+			processor: ToolResultProcessorFunc(func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error) {
+				return ToolResult{}, errors.New("rejected-sentinel")
+			}),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := obstest.InstallMetrics(t)
+			tool := observedTestTool{name: "test", call: tt.call}
+
+			_, _, _ = processObservedTool(t.Context(), ToolPolicyInput{Call: ai.ToolCall{ID: "call-1", Type: "function", Name: "test", Args: json.RawMessage(`{}`)}}, []Tool{tool}, tt.processor)
+
+			points := obstest.HistogramPoints[float64](t, obstest.CollectMetrics(t, reader), metricToolDuration)
+			if len(points) != 1 || points[0].Count != 1 {
+				t.Fatalf("tool duration points = %#v, want one execution", points)
+			}
+			if got := obstest.AttributeStrings(points[0].Attributes)["error.type"]; got != tt.wantError {
+				t.Fatalf("error.type = %q, want %q", got, tt.wantError)
+			}
+		})
 	}
 }

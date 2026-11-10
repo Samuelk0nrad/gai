@@ -223,3 +223,66 @@ func TestLoopMetricsRecordRunDurationInSeconds(t *testing.T) {
 		t.Fatalf("run duration = %g, want at least %gs recorded in seconds", got, modelTime.Seconds())
 	}
 }
+
+// TestLoopMetricsSkipRetryCanceledDuringBackoff checks that a retry whose
+// backoff is canceled is not counted, because no new attempt starts.
+func TestLoopMetricsSkipRetryCanceledDuringBackoff(t *testing.T) {
+	reader := obstest.InstallMetrics(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	failure := ai.Token{Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("transient")}}
+	model := &scriptedStreamModel{sequences: [][]ai.Token{{failure}, {{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}}}}
+	l := loop.New(model, nil, testPromptBuilder(), nil)
+	l.RetryPolicy = &loop.RetryPolicy{
+		MaxRetries:     1,
+		InitialBackoff: time.Second,
+		Wait: func(ctx context.Context, _ time.Duration) error {
+			cancel()
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+
+	collectLoopEvents(t, l, ctx)
+
+	metrics := obstest.CollectMetrics(t, reader)
+	if retries := obstest.SumPoints[int64](t, metrics, metricLoopRetries); len(retries) != 0 {
+		t.Fatalf("retry points = %#v, want none for a retry canceled during backoff", retries)
+	}
+	requireRunMetrics(t, metrics, 1, map[string]string{
+		"gai.loop.outcome":     "canceled",
+		"gen_ai.request.model": "scripted-stream-model",
+		"error.type":           "canceled",
+	})
+}
+
+// TestLoopMetricsRecordRunsRejectedByValidation checks that runs rejected by
+// Loop.Validate are recorded as invalid_configuration with zero iterations.
+func TestLoopMetricsRecordRunsRejectedByValidation(t *testing.T) {
+	t.Run("no model", func(t *testing.T) {
+		reader := obstest.InstallMetrics(t)
+		l := loop.New(nil, nil, testPromptBuilder(), nil)
+
+		if err := loopError(collectLoopEvents(t, l, context.Background())); !errors.Is(err, loop.ErrModelNotConfigured) {
+			t.Fatalf("loop error = %v, want ErrModelNotConfigured", err)
+		}
+		requireRunMetrics(t, obstest.CollectMetrics(t, reader), 0, map[string]string{
+			"gai.loop.outcome": "error",
+			"error.type":       "invalid_configuration",
+		})
+	})
+
+	t.Run("no prompt builder", func(t *testing.T) {
+		reader := obstest.InstallMetrics(t)
+		l := loop.New(&scriptedStreamModel{}, nil, nil, nil)
+
+		if err := loopError(collectLoopEvents(t, l, context.Background())); !errors.Is(err, loop.ErrPromptNotConfigured) {
+			t.Fatalf("loop error = %v, want ErrPromptNotConfigured", err)
+		}
+		requireRunMetrics(t, obstest.CollectMetrics(t, reader), 0, map[string]string{
+			"gai.loop.outcome":     "error",
+			"gen_ai.request.model": "scripted-stream-model",
+			"error.type":           "invalid_configuration",
+		})
+	})
+}

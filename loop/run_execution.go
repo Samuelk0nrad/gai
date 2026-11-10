@@ -348,6 +348,9 @@ func (a *attemptExecution) scheduleRetry(retryErr error) attemptOutcome {
 		}
 	}
 	a.cancelAttempt()
+	// Count the retry only now that its next attempt will start; a failed
+	// RetryEvent send or a canceled backoff ends the run instead.
+	recordRetryMetric(a.run.ctx, a.modelName, retryErr)
 	a.finish(nil)
 	return attemptRetry
 }

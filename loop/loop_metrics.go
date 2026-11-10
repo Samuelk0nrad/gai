@@ -22,6 +22,10 @@ const (
 	runOutcomeSuccess  = "success"
 	runOutcomeError    = "error"
 	runOutcomeCanceled = "canceled"
+
+	// runErrorInvalidConfiguration classifies runs rejected by Loop.Validate
+	// and configuration errors found while preparing a run.
+	runErrorInvalidConfiguration = "invalid_configuration"
 )
 
 var (
@@ -44,7 +48,7 @@ var loopMetrics = observe.NewInstruments(loopTracerName, func(meter metric.Meter
 		toolDuration: observe.Float64Histogram(meter, metricToolDuration, "s",
 			"The duration of a single tool execution.", observe.DurationBuckets),
 		retries: observe.Int64Counter(meter, metricLoopRetries, "{retry}",
-			"The number of model attempts the loop scheduled for retry."),
+			"The number of model retries the loop started."),
 		runDuration: observe.Float64Histogram(meter, metricLoopRunDuration, "s",
 			"The end-to-end duration of one loop run.", runDurationBuckets),
 		runIterations: observe.Int64Histogram(meter, metricLoopRunIterations, "{iteration}",
@@ -52,8 +56,9 @@ var loopMetrics = observe.NewInstruments(loopTracerName, func(meter metric.Meter
 	}
 })
 
-// recordToolMetrics records one invoked tool execution. Callers must only pass
-// names of registered tools so the attribute stays application-bounded.
+// recordToolMetrics records one invoked tool execution. outcome classifies the
+// tool function's own result, before any ToolResultProcessor. Callers must
+// only pass names of registered tools so the attribute stays bounded.
 func recordToolMetrics(ctx context.Context, toolName, outcome string, failed bool, duration time.Duration) {
 	attrs := []attribute.KeyValue{
 		attribute.String("gen_ai.tool.name", toolName),
@@ -65,10 +70,15 @@ func recordToolMetrics(ctx context.Context, toolName, outcome string, failed boo
 	loopMetrics.Get().toolDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attrs...))
 }
 
-// recordRetryMetric counts one accepted retry with its bounded reason.
-func recordRetryMetric(ctx context.Context, modelName, reason string) {
-	if reason != retryReasonAttemptTimeout && !knownProviderErrorKind(ai.ProviderErrorKind(reason)) {
-		// ProviderError.Kind is an open string type; keep custom kinds bounded.
+// recordRetryMetric counts one retry whose next attempt is about to start.
+// The reason uses the same classes as model call error.type, plus
+// attempt_timeout.
+func recordRetryMetric(ctx context.Context, modelName string, retryErr error) {
+	reason := retryReasonAttemptTimeout
+	if !errors.Is(retryErr, ErrAttemptTimeout) {
+		reason = ai.TelemetryErrorType(retryErr)
+	}
+	if reason == "" {
 		reason = observe.ErrorTypeOther
 	}
 	attrs := []attribute.KeyValue{attribute.String("gai.retry.reason", reason)}
@@ -78,16 +88,21 @@ func recordRetryMetric(ctx context.Context, modelName, reason string) {
 	loopMetrics.Get().retries.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
-// recordRunMetrics records the final state of one loop run.
-func recordRunMetrics(ctx context.Context, modelName string, err, cancelErr error, iterations int, duration time.Duration) {
-	outcome := runOutcomeSuccess
-	var errorType string
+// runOutcome returns the outcome and bounded error class of a finished run.
+// Cancellation takes precedence over a recorded error.
+func runOutcome(err, cancelErr error) (outcome, errorType string) {
 	switch {
 	case cancelErr != nil:
-		outcome, errorType = runOutcomeCanceled, runErrorType(cancelErr)
+		return runOutcomeCanceled, runErrorType(cancelErr)
 	case err != nil:
-		outcome, errorType = runOutcomeError, runErrorType(err)
+		return runOutcomeError, runErrorType(err)
+	default:
+		return runOutcomeSuccess, ""
 	}
+}
+
+// recordRunMetrics records the final state of one loop run.
+func recordRunMetrics(ctx context.Context, modelName, outcome, errorType string, iterations int, duration time.Duration) {
 	attrs := []attribute.KeyValue{attribute.String("gai.loop.outcome", outcome)}
 	if modelName != "" {
 		attrs = append(attrs, attribute.String("gen_ai.request.model", modelName))
@@ -118,42 +133,32 @@ var runErrorTypes = []struct {
 	{ErrTerminalToolBatch, "terminal_tool_batch"},
 	{ErrBuildPrompt, "build_prompt"},
 	{ai.ErrRequestBudgetExceeded, "request_budget_exceeded"},
-	{ai.ErrUnsuccessfulGeneration, "unsuccessful_generation"},
-	{ErrModelNotConfigured, "invalid_configuration"},
-	{ErrPromptNotConfigured, "invalid_configuration"},
-	{ErrRequiredToolNotConfigured, "invalid_configuration"},
-	{ErrToolExecutionConfig, "invalid_configuration"},
-	{ai.ErrInvalidToolDefinition, "invalid_configuration"},
+	{ErrRequiredToolNotConfigured, runErrorInvalidConfiguration},
+	{ErrToolExecutionConfig, runErrorInvalidConfiguration},
+	{ai.ErrInvalidToolDefinition, runErrorInvalidConfiguration},
 }
 
 // runErrorType maps a run failure or cancellation to a bounded error class.
+// Errors outside the loop's own classes use the model call classification,
+// so run, retry, and inference metrics agree on shared classes.
 func runErrorType(err error) string {
 	for _, candidate := range runErrorTypes {
 		if errors.Is(err, candidate.err) {
 			return candidate.errorType
 		}
 	}
-	var providerErr *ai.ProviderError
-	if errors.As(err, &providerErr) && knownProviderErrorKind(providerErr.Kind) {
-		return string(providerErr.Kind)
-	}
-	switch {
-	case errors.Is(err, context.DeadlineExceeded):
-		return "timeout"
-	case errors.Is(err, context.Canceled):
-		return "canceled"
-	}
-	return observe.ErrorTypeOther
+	return ai.TelemetryErrorType(err)
 }
 
-// knownProviderErrorKind reports whether kind is one of GAI's documented
-// provider error classes.
-func knownProviderErrorKind(kind ai.ProviderErrorKind) bool {
-	switch kind {
-	case ai.ProviderErrorRateLimited, ai.ProviderErrorTransient, ai.ProviderErrorAuthentication,
-		ai.ProviderErrorInvalidRequest, ai.ProviderErrorUnsupported, ai.ProviderErrorUnknown:
-		return true
-	default:
-		return false
+// recordInvalidRunMetrics records a run that Loop.Validate rejected before it
+// started.
+func recordInvalidRunMetrics(ctx context.Context, l *Loop, started time.Time) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	modelName := ""
+	if l != nil && !nilImplementation(l.Model) {
+		modelName = ai.ModelName(l.Model)
+	}
+	recordRunMetrics(ctx, modelName, runOutcomeError, runErrorInvalidConfiguration, 0, time.Since(started))
 }
