@@ -5,10 +5,10 @@ import (
 	"errors"
 	"math"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/agent/summary"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/agent/summary"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 // CompactorDefinition configures explicit compaction of completed turns.

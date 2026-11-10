@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 func TestTerminalErrorIdentifiesUnsuccessfulProviderOutcome(t *testing.T) {

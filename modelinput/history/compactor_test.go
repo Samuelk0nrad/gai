@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput"
-	"github.com/lace-ai/gai/modelinput/history"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/modelinput/history"
 )
 
 type historyModel struct {

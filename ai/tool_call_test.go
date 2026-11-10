@@ -3,7 +3,7 @@ package ai_test
 import (
 	"testing"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 func TestToolCallStringNilReceiver(t *testing.T) {

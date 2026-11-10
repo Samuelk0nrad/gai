@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lace-ai/gai"
+	"github.com/Samuelk0nrad/gai"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"

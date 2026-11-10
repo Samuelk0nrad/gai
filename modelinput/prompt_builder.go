@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
-const contextTracerName = "github.com/lace-ai/gai/context"
+const contextTracerName = "github.com/Samuelk0nrad/gai/context"
 
 // ContextSource produces one prompt part using a remaining-capacity hint.
 // Sources are evaluated once in declaration order by Builder.BuildContext.

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 func TestClassifyProviderErrorPrioritizesUnsupported(t *testing.T) {

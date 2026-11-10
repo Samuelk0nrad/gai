@@ -3,7 +3,7 @@ package modelcatalog
 import (
 	"sync"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 // ModelCatalogCache stores the last successful provider catalog snapshot.

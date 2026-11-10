@@ -6,9 +6,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"

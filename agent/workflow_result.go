@@ -3,8 +3,8 @@ package agent
 import (
 	"strings"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/loop"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/loop"
 )
 
 // AgentResult contains canonical accepted output. AttemptedTokens and

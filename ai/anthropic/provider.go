@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/modelcatalog"
+	"github.com/Samuelk0nrad/gai/internal/syncutil"
 	antropic "github.com/anthropics/anthropic-sdk-go"
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/internal/modelcatalog"
-	"github.com/lace-ai/gai/internal/syncutil"
 )
 
 const (

@@ -3,7 +3,7 @@ package history
 import (
 	"testing"
 
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/modelinput"
 )
 
 func TestSortTurnsByCount(t *testing.T) {

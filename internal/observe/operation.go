@@ -4,7 +4,7 @@ package observe
 import (
 	"context"
 
-	"github.com/lace-ai/gai"
+	"github.com/Samuelk0nrad/gai"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )

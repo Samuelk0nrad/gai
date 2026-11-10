@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/loop"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/loop"
 )
 
 // EventType identifies one ordered workflow event.

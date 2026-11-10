@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lace-ai/gai/agent"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/modelinput/history"
+	"github.com/Samuelk0nrad/gai/agent"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/modelinput/history"
 )
 
 func testService(model ai.Model) *chatService {

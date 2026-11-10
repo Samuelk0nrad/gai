@@ -5,14 +5,14 @@ import (
 	"errors"
 	"sort"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/internal/observe"
-	"github.com/lace-ai/gai/modelinput"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/observe"
+	"github.com/Samuelk0nrad/gai/modelinput"
 	"go.opentelemetry.io/otel/attribute"
 )
 
-const agentTracerName = "github.com/lace-ai/gai/agent"
+const agentTracerName = "github.com/Samuelk0nrad/gai/agent"
 
 type agentRunObserver struct {
 	operation *observe.Operation

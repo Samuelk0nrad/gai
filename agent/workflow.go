@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"sync"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/loop"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/loop"
 )
 
 var (

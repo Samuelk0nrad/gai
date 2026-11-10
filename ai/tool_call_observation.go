@@ -3,8 +3,8 @@ package ai
 import (
 	"context"
 
-	"github.com/lace-ai/gai"
-	"github.com/lace-ai/gai/internal/observe"
+	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/internal/observe"
 	"go.opentelemetry.io/otel/attribute"
 )
 

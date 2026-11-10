@@ -11,13 +11,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lace-ai/gai/ai"
-	legacy "github.com/lace-ai/gai/context"
-	legacyhistory "github.com/lace-ai/gai/context/history"
-	legacytools "github.com/lace-ai/gai/context/tooldefinitions"
-	"github.com/lace-ai/gai/modelinput"
-	"github.com/lace-ai/gai/modelinput/history"
-	"github.com/lace-ai/gai/modelinput/tooldefinitions"
+	"github.com/Samuelk0nrad/gai/ai"
+	legacy "github.com/Samuelk0nrad/gai/context"
+	legacyhistory "github.com/Samuelk0nrad/gai/context/history"
+	legacytools "github.com/Samuelk0nrad/gai/context/tooldefinitions"
+	"github.com/Samuelk0nrad/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/modelinput/history"
+	"github.com/Samuelk0nrad/gai/modelinput/tooldefinitions"
 )
 
 // The return types intentionally use the old paths, as existing application

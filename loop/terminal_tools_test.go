@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lace-ai/gai/ai"
-	"github.com/lace-ai/gai/loop"
+	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/loop"
 )
 
 func configuredTerminalTool(t *testing.T, tool loop.Tool) loop.Tool {

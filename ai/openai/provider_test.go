@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lace-ai/gai/ai"
+	"github.com/Samuelk0nrad/gai/ai"
 )
 
 type errorRoundTripper struct{}
