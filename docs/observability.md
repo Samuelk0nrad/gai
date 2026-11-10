@@ -92,7 +92,8 @@ Every OpenAI, Mistral, Gemini, and Anthropic model invocation also creates one
 `chat {requested_model}` client span. Streaming spans remain open until the
 stream ends or is canceled. They use the same `gen_ai.*` contract for requested
 and resolved models, finish reasons, request IDs, reported token usage, and
-provider HTTP status. Langfuse generation type, model parameters, usage
+provider HTTP status. On failure, `error.type` is the same bounded class the
+inference metrics use, such as `rate_limited` or `timeout`. Langfuse generation type, model parameters, usage
 details, and completion-start time are included where known. Prompts,
 completions, reasoning, tool arguments, and raw provider payloads are not
 attached to these spans.
