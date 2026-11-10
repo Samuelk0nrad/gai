@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/lace-ai/gai/ai"
 	"github.com/lace-ai/gai/internal/obstest"
@@ -96,5 +97,33 @@ func TestRunErrorType(t *testing.T) {
 		if got := runErrorType(tt.err); got != tt.want {
 			t.Errorf("runErrorType(%v) = %q, want %q", tt.err, got, tt.want)
 		}
+	}
+}
+
+// TestToolMetricsProcessorPanicExcludesProcessingTime checks that a panicking
+// result processor does not add its own runtime to the tool execution duration.
+func TestToolMetricsProcessorPanicExcludesProcessingTime(t *testing.T) {
+	const toolTime, processingTime = 20 * time.Millisecond, 250 * time.Millisecond
+	reader := obstest.InstallMetrics(t)
+	tool := observedTestTool{name: "test", call: func(context.Context, ai.ToolCall) (string, error) {
+		time.Sleep(toolTime)
+		return "ok", nil
+	}}
+	processor := ToolResultProcessorFunc(func(context.Context, ToolPolicyInput, ToolResult) (ToolResult, error) {
+		time.Sleep(processingTime)
+		panic("processor-panic-sentinel")
+	})
+
+	func() {
+		defer func() { _ = recover() }()
+		_, _, _ = processObservedTool(t.Context(), ToolPolicyInput{Call: ai.ToolCall{ID: "call-1", Type: "function", Name: "test", Args: json.RawMessage(`{}`)}}, []Tool{tool}, processor)
+	}()
+
+	points := obstest.HistogramPoints[float64](t, obstest.CollectMetrics(t, reader), metricToolDuration)
+	if len(points) != 1 || points[0].Count != 1 {
+		t.Fatalf("tool duration points = %#v, want one execution", points)
+	}
+	if got := points[0].Sum; got < toolTime.Seconds() || got >= processingTime.Seconds() {
+		t.Fatalf("tool duration = %gs, want at least %gs and less than the %gs processing delay", got, toolTime.Seconds(), processingTime.Seconds())
 	}
 }

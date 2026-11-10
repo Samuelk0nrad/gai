@@ -373,13 +373,20 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 	toolCtx, observation := startToolSpan(ctx, input.Call, sinks...)
 	observation.execution = execution
 	started := time.Now()
+	toolReturned := false
 	defer func() {
 		if panicValue := recover(); panicValue != nil {
 			if execution.State == ToolRunning {
 				execution.State = ToolFailed
 			}
 			execution.Output = ToolOutputRejected
-			observation.finishPanic(time.Since(started))
+			// A processor panic happens after the tool returned; keep the
+			// tool's own duration so processing time is not reported as
+			// execution latency.
+			if !toolReturned {
+				duration = time.Since(started)
+			}
+			observation.finishPanic(duration)
 			panic(panicValue)
 		}
 		if processErr != nil {
@@ -402,6 +409,7 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 	}
 	cancel()
 	duration = time.Since(started)
+	toolReturned = true
 	original := result
 	execution.Output = ToolOutputAccepted
 	if processor != nil {
