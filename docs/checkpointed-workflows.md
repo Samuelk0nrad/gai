@@ -85,7 +85,7 @@ Canceling the execution context stops that handle. GAI saves known outcomes and 
 
 - `UseVerifiedResult`: provide a canonical, already processed/redacted `ai.ToolResult` and `ToolExecution` obtained from authoritative records. Preserve the original tool call ID/name. Handler execution and output-processing status are separate.
 - `ReplayInvocation`: explicitly assert `SafeReplay: true`. GAI preserves invocation identity and increments its dispatch attempt. Current authorization is still checked. `ToolTraits.Idempotent` alone never authorizes replay. A replay cannot be combined with `CancelUnstartedTools` in the same command, because the steering would cancel the replay.
-- `ConfirmNotExecuted`: assert that the operation did not happen, allowing normal admission.
+- `ConfirmNotExecuted`: assert that the operation did not happen, allowing normal admission. It is rejected when the saved state shows the handler ran, for example when only result processing failed; use `ReplayInvocation` or `UseVerifiedResult` instead.
 
 Otherwise leave the run blocked. GAI cannot infer whether an external effect occurred, undo an effect whose output processor failed, or provide exactly-once behavior for an external service that ignores idempotency keys.
 

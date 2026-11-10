@@ -148,6 +148,27 @@ func TestContinuationRecoveryResolutions(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	// Only result processing failed, so the handler ran: it cannot be
+	// confirmed as not executed, only replayed explicitly or verified.
+	processed := func(state ToolExecutionState) Continuation {
+		c := continuationForTest()
+		inv := &c.Pending.Invocations[0]
+		inv.Disposition, inv.ProcessingFailed, inv.Execution.State = InvocationCompleted, true, state
+		return c
+	}
+	ran := processed(ToolSucceeded)
+	if err := ran.ResolveRecovery([]ToolRecoveryResolution{{InvocationID: "i1", Action: ConfirmNotExecuted}}); !errors.Is(err, ErrContinuation) {
+		t.Fatal("handler that ran confirmed as not executed", err)
+	}
+	ran = processed(ToolSucceeded)
+	if err := ran.ResolveRecovery([]ToolRecoveryResolution{{InvocationID: "i1", Action: ReplayInvocation, SafeReplay: true}}); err != nil {
+		t.Fatal(err)
+	}
+	refused := processed(ToolNotStarted) // a synthetic refusal never runs a handler
+	if err := refused.ResolveRecovery([]ToolRecoveryResolution{{InvocationID: "i1", Action: ConfirmNotExecuted}}); err != nil {
+		t.Fatal(err)
+	}
+
 	// A completed invocation is no longer open to recovery.
 	if err := c.ResolveRecovery([]ToolRecoveryResolution{{InvocationID: "i1", Action: ConfirmNotExecuted}}); !errors.Is(err, ErrContinuation) {
 		t.Fatal(err)

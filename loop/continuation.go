@@ -431,6 +431,11 @@ func (c *Continuation) ResolveRecovery(resolutions []ToolRecoveryResolution) err
 			if resolution.Action == ReplayInvocation && !resolution.SafeReplay {
 				return ErrContinuation
 			}
+			// A saved handler outcome proves the handler ran, for example when only
+			// result processing failed. Only an explicit safe replay may repeat it.
+			if resolution.Action == ConfirmNotExecuted && inv.Disposition == InvocationCompleted && inv.Execution.State != ToolNotStarted {
+				return ErrContinuation
+			}
 			inv.Disposition = InvocationPlanned
 			inv.Result = nil
 			inv.ProcessingFailed = false
