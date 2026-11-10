@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/lace-ai/gai/ai"
@@ -12,6 +13,8 @@ import (
 
 // prepareContinuation restores consumed limits and the original logical deadline.
 func (r *runExecution) prepareContinuation() error {
+	// A reused Loop must not continue a previous run's durable state.
+	r.owner.durable = nil
 	control := r.owner.Continuation
 	if control == nil {
 		return nil
@@ -133,7 +136,7 @@ func (r *runExecution) continuationBoundary() bool {
 			d.state.Phase = PhaseReady
 		}
 		if err := d.commit(r.ctx); err != nil {
-			sendLoopError(r.ctx, r.events, r.state, err)
+			sendLoopFailure(r.ctx, r.events, r.state, err)
 			return true
 		}
 	}
@@ -144,7 +147,7 @@ func (r *runExecution) continuationBoundary() bool {
 func (r *runExecution) pauseContinuation() {
 	d := r.owner.durable
 	if err := d.commit(r.ctx); err != nil {
-		sendLoopError(r.ctx, r.events, r.state, err)
+		sendLoopFailure(r.ctx, r.events, r.state, err)
 		return
 	}
 	event := Event{Type: EventPaused}
@@ -309,23 +312,28 @@ func (d *durableLoop) beforeDispatch(ctx context.Context, index int, execution T
 	}
 	acknowledged := d.commits
 	if err := d.commit(ctx); err != nil {
-		// Storage can acknowledge the intent before delivering its commit event
-		// fails, for example when the run is canceled. The handler then never
-		// starts, so the saved dispatch is reverted.
-		if !synthetic && d.commits > acknowledged {
-			if undoErr := d.abandonDispatch(ctx, index); undoErr != nil {
-				err = errors.Join(err, undoErr)
+		if !synthetic {
+			if d.commits > acknowledged {
+				// Storage acknowledged the intent, but delivering its commit event
+				// failed, for example because the run was canceled. The handler
+				// never starts, so the saved dispatch is reverted.
+				if undoErr := d.abandonDispatch(ctx, index); undoErr != nil {
+					err = errors.Join(err, undoErr)
+				}
+			} else {
+				// The intent was not saved; later settlement writes must not save it.
+				d.revertDispatch(index)
 			}
 		}
 		return err
 	}
 	if d.pausing() {
-		inv.Disposition = InvocationPlanned
-		inv.Execution.State = ToolNotStarted
-		if !synthetic {
-			inv.Attempt--
-		}
-		if err := d.commit(ctx); err != nil {
+		if synthetic {
+			inv.Execution.State = ToolNotStarted
+			if err := d.commitSettled(ctx); err != nil {
+				return err
+			}
+		} else if err := d.abandonDispatch(ctx, index); err != nil {
 			return err
 		}
 		return ErrPaused
@@ -336,15 +344,27 @@ func (d *durableLoop) beforeDispatch(ctx context.Context, index int, execution T
 // abandonDispatch reverts an acknowledged dispatch whose handler never started,
 // so recovery does not report an unknown outcome for it.
 func (d *durableLoop) abandonDispatch(ctx context.Context, index int) error {
+	d.revertDispatch(index)
+	return d.commitSettled(ctx)
+}
+
+// revertDispatch undoes a dispatch intent in memory.
+func (d *durableLoop) revertDispatch(index int) {
 	inv := &d.state.Pending.Invocations[index]
 	inv.Disposition = InvocationPlanned
 	inv.Execution.State = ToolNotStarted
 	inv.Attempt--
-	return d.commitSettled(ctx)
 }
 
 // completed saves processed outcomes independently, including during cancellation.
-func (d *durableLoop) completed(ctx context.Context, done toolCompletion) error {
+// A handler interrupted because the execution stopped (canceled or timed out
+// with the batch) may have partly run its effect. Its dispatch stays saved, so
+// resuming requires an explicit recovery resolution instead of showing the
+// model an error that could lead to a duplicate call.
+func (d *durableLoop) completed(ctx context.Context, done toolCompletion, interrupted bool) error {
+	if interrupted {
+		return nil
+	}
 	inv := &d.state.Pending.Invocations[done.index]
 	inv.Execution = done.execution
 	inv.Disposition = InvocationCompleted
@@ -440,8 +460,16 @@ func (d *durableLoop) deferredApprovals(ctx context.Context, l *Loop, tasks []sc
 // Identity is attached at the loop event boundary by the single coordinator.
 type durableEventKey struct{}
 
+// durableRuns counts running durable loops. While it is zero, event sends skip
+// the context lookup for a durable loop, so processes that never use durability
+// pay nothing per streamed event.
+var durableRuns atomic.Int64
+
 // stampLoopEvent attaches recovery identities at the coordinator-owned event boundary.
 func stampLoopEvent(ctx context.Context, event Event) Event {
+	if durableRuns.Load() == 0 {
+		return event
+	}
 	d, _ := ctx.Value(durableEventKey{}).(*durableLoop)
 	if d == nil {
 		return event
@@ -480,4 +508,33 @@ func (a *attemptExecution) commitTerminalUsage() error {
 		d.state.Phase = PhaseReady
 	}
 	return d.commitSettled(a.run.ctx)
+}
+
+// joinTerminalUsage saves terminal usage and adds a failure to do so to err,
+// unless err already reports that same latched failure.
+func (a *attemptExecution) joinTerminalUsage(err error) error {
+	if commitErr := a.commitTerminalUsage(); commitErr != nil && !errors.Is(err, commitErr) {
+		return errors.Join(err, commitErr)
+	}
+	return err
+}
+
+// terminateCommit ends an attempt whose checkpoint commit failed. A failure
+// caused by canceling the execution, including a commit event that could not be
+// delivered, is a cancellation rather than a storage failure.
+func (a *attemptExecution) terminateCommit(err error) attemptOutcome {
+	if cancelErr := cancellationError(a.run.ctx, err); cancelErr != nil {
+		return a.terminateCanceled(cancelErr)
+	}
+	return a.terminateError(err)
+}
+
+// sendLoopFailure reports a run-level failure, as a cancellation when the
+// execution was canceled.
+func sendLoopFailure(ctx context.Context, events chan<- Event, state *loopRunState, err error) {
+	if cancelErr := cancellationError(ctx, err); cancelErr != nil {
+		sendLoopCanceled(ctx, events, state, cancelErr)
+		return
+	}
+	sendLoopError(ctx, events, state, err)
 }

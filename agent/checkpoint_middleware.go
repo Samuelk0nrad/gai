@@ -47,6 +47,8 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 				s.DecisionMade = true
 				s.ShouldRun = true
 				s.Complete = m.config.ErrorPolicy == RecordError
+				// This execution's setup failed; an earlier cancellation no longer applies.
+				s.Canceled = false
 				s.Errors = []string{checkpointError(err)}
 			})
 		}); commitErr != nil {
@@ -137,7 +139,7 @@ func (m *AgentMiddleware) processDurable(ctx context.Context, run *MiddlewareCon
 		var l *loop.Loop
 		l, err = m.agent.restoreCheckpointLoop(stage)
 		if err == nil {
-			input := RunInput{ID: d.runID(), Meta: stage.Input.Meta, TraceContext: stage.Input.TraceContext}
+			input := RunInput{ID: d.runID(), Meta: cloneJSONObject(stage.Input.Meta), TraceContext: cloneTraceContext(stage.Input.TraceContext)}
 			input.Prompt = stage.Continuation.Prompt.Input()
 			input.Execution = restoreOverrides(stage.Input.ScalarExecution)
 			child = newWorkflow(input, l, m.name(), m.agent.debugSink(), nil)

@@ -74,8 +74,11 @@ type InvocationRecord struct {
 	Execution        ToolExecution         `json:"execution"`
 	Result           *ai.ToolResult        `json:"result,omitempty"`
 	ProcessingFailed bool                  `json:"processing_failed,omitempty"`
-	Approval         *ToolApprovalRequest  `json:"approval,omitempty"`
-	ApprovalDecision *ToolApprovalDecision `json:"approval_decision,omitempty"`
+	// CanceledBySteering marks a call that a CancelUnstartedTools command
+	// resolved without running it.
+	CanceledBySteering bool                  `json:"canceled_by_steering,omitempty"`
+	Approval           *ToolApprovalRequest  `json:"approval,omitempty"`
+	ApprovalDecision   *ToolApprovalDecision `json:"approval_decision,omitempty"`
 }
 
 // Generation is semantic accepted state, not a serialized runtime Iteration.
@@ -291,11 +294,11 @@ func (g Generation) validate(ids map[string]bool, deep bool) error {
 		ids[inv.ID] = true
 		switch inv.Disposition {
 		case InvocationPlanned:
-			if inv.Result != nil || inv.ProcessingFailed {
+			if inv.Result != nil || inv.ProcessingFailed || inv.CanceledBySteering {
 				return ErrContinuation
 			}
 		case InvocationDispatched:
-			if inv.Attempt < 1 || inv.Result != nil {
+			if inv.Attempt < 1 || inv.Result != nil || inv.CanceledBySteering {
 				return ErrContinuation
 			}
 		case InvocationCompleted:
@@ -488,6 +491,7 @@ func (c *Continuation) CancelUnstarted() error {
 			continue
 		}
 		inv.Disposition = InvocationCompleted
+		inv.CanceledBySteering = true
 		inv.Execution = ToolExecution{State: ToolNotStarted, Output: ToolOutputAccepted, Decision: ToolDecision{Action: ToolDeny, Code: "steering_canceled"}}
 		inv.Result = &ai.ToolResult{ToolCallID: inv.Call.ID, Name: inv.Call.Name, Parts: ai.TextParts("Not executed: canceled by steering."), IsError: true}
 	}
@@ -567,8 +571,17 @@ func (d *durableLoop) commitWithContexts(storageCtx, eventCtx context.Context) e
 		return err
 	}
 	if err := d.control.Commit(storageCtx, d.state.detach()); err != nil {
-		d.failed = fmt.Errorf("%w: %w", ErrCheckpointCommit, err)
-		return d.failed
+		if !errors.Is(err, ErrCheckpointCommit) {
+			err = fmt.Errorf("%w: %w", ErrCheckpointCommit, err)
+		}
+		// A write that failed only because the execution was canceled does not
+		// prove storage is broken. Settlement writes, which ignore cancellation,
+		// may still save known outcomes; a write that did land makes their
+		// compare-and-swap fail instead.
+		if storageCtx.Err() == nil {
+			d.failed = err
+		}
+		return err
 	}
 	d.commits++
 	d.validated = len(d.state.Generations)

@@ -2,8 +2,8 @@ package modelinput
 
 import (
 	"context"
-	"encoding/json"
 	"slices"
+	"strings"
 
 	"github.com/lace-ai/gai/ai"
 )
@@ -109,16 +109,62 @@ func (p frozenPart) Render(ctx context.Context) (RenderNode, error) {
 	return cloneRenderNode(p.snapshot.Node), ctx.Err()
 }
 
-// Tokens counts frozen content locally without refreshing its source.
+// Tokens counts the frozen text locally without refreshing its source.
 func (p frozenPart) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
-	data, err := json.Marshal(p.snapshot.Node)
-	if err != nil {
-		return 0, err
+	if counter == nil {
+		return 0, ErrTokenCounterNotFound
 	}
-	return counter.CountTokens(ctx, string(data))
+	var text strings.Builder
+	appendNodeText(&text, p.snapshot.Node)
+	return counter.CountTokens(ctx, text.String())
+}
+
+// appendNodeText collects the field and value text of a render tree.
+func appendNodeText(b *strings.Builder, node RenderNode) {
+	for _, field := range node.Fields {
+		appendText(b, field.Key)
+		appendText(b, field.Value)
+	}
+	appendText(b, node.Value)
+	for _, child := range node.Children {
+		appendNodeText(b, child)
+	}
+}
+
+func appendText(b *strings.Builder, text string) {
+	if text == "" {
+		return
+	}
+	if b.Len() > 0 {
+		b.WriteByte(' ')
+	}
+	b.WriteString(text)
 }
 
 type frozenConversationPart struct{ frozenPart }
+
+// Tokens counts the conversation messages the part contributes, as MessagePart does.
+func (p frozenConversationPart) Tokens(ctx context.Context, counter ai.TokenCounter) (int, error) {
+	if counter == nil {
+		return 0, ErrTokenCounterNotFound
+	}
+	total := 0
+	for _, message := range p.snapshot.Messages {
+		text, err := messageTokenText(message)
+		if err != nil {
+			return 0, err
+		}
+		if text == "" {
+			continue
+		}
+		n, err := counter.CountTokens(ctx, text)
+		if err != nil {
+			return 0, err
+		}
+		total += n
+	}
+	return total, nil
+}
 
 // ConversationMessages returns a detached canonical context transcript.
 func (p frozenConversationPart) ConversationMessages() []ai.Message {

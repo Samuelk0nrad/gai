@@ -231,6 +231,18 @@ func (w *Workflow) finalize(ctx context.Context, upstream <-chan Event, obs *wor
 		if w.durability != nil && w.durability.status() == StatusPaused {
 			w.result.Status = StatusPaused
 		}
+		// Stage results travel as internal events, which a canceled context can
+		// drop. Success is final for a durable run, so it also requires every
+		// stage in the checkpoint to be complete.
+		if w.durability != nil && !w.durableChild && w.result.Status == StatusSucceeded && !w.result.Canceled &&
+			len(w.result.Errors) == 0 && !w.durability.allStagesComplete() {
+			if err := ctx.Err(); err != nil {
+				w.result.Canceled = true
+				w.result.CancellationErr = err
+			} else {
+				w.result.Errors = append(w.result.Errors, errUnfinishedStage)
+			}
+		}
 		switch {
 		case w.result.Canceled:
 			w.result.Status = StatusCanceled

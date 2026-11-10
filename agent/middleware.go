@@ -118,7 +118,7 @@ func (m *AgentMiddleware) Process(ctx context.Context, run *MiddlewareContext, u
 			case EventRetry, EventDiscard:
 				invalid[eventAttemptKey(event)] = true
 			case EventStageFinish:
-				if event.AttemptID != 0 && (event.StageOutcome == StageFailed || event.StageOutcome == StageCanceled) {
+				if event.AttemptID != 0 && (event.StageOutcome == StageFailed || event.StageOutcome == StageCanceled || event.StageOutcome == StagePaused) {
 					invalid[eventAttemptKey(event)] = true
 				}
 			}

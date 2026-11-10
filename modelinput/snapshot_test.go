@@ -2,6 +2,7 @@ package modelinput_test
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -71,6 +72,21 @@ func TestSnapshotInputRestoresFrozenContextParts(t *testing.T) {
 	if n, err := input.Context[0].Tokens(ctx, &mocks.MockTokenCounter{Count: 7}); err != nil || n != 7 {
 		t.Fatal(n, err)
 	}
+	// Restored parts count the same text as the parts they were saved from.
+	named, _ := modelinput.NewNamedPart("tenant", "ACME")
+	history := modelinput.NewMessagePart(ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("earlier turn")})
+	for i, original := range []modelinput.Part{named, history} {
+		want, err := original.Tokens(ctx, charCounter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := input.Context[i].Tokens(ctx, charCounter{}); err != nil || got != want {
+			t.Fatalf("%s tokens = %d, want %d (%v)", original.Name(), got, want, err)
+		}
+		if _, err := input.Context[i].Tokens(ctx, nil); !errors.Is(err, modelinput.ErrTokenCounterNotFound) {
+			t.Fatal("missing counter accepted", err)
+		}
+	}
 	conversation, ok := input.Context[1].(modelinput.ConversationPart)
 	if !ok {
 		t.Fatal("history part lost its conversation messages")
@@ -136,3 +152,10 @@ func containsValue(node modelinput.RenderNode, value string) bool {
 type testConversation []ai.Message
 
 func (c testConversation) Messages() []ai.Message { return ai.CloneMessages(c) }
+
+// charCounter counts characters, so token counts reflect exactly what text a part contributes.
+type charCounter struct{}
+
+func (charCounter) CountTokens(_ context.Context, text string) (int, error) { return len(text), nil }
+func (charCounter) ID() string                                              { return "test.chars" }
+func (charCounter) Fidelity() ai.TokenCountFidelity                         { return ai.TokenCountEstimated }

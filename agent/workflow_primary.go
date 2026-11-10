@@ -107,6 +107,9 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 			}
 		}
 		var terminal Event
+		// Iterations accepted in this execution, by generation, with their
+		// live diagnostics.
+		live := map[string]loop.Iteration{}
 		for low := range upstream {
 			event, emit := mapLoopEvent(low, source)
 			if emit {
@@ -121,7 +124,11 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 			case loop.EventIterationDone:
 				acc.account(event)
 				if low.Iteration != nil {
-					acc.accepted = append(acc.accepted, cloneIterations([]loop.Iteration{*low.Iteration})[0])
+					accepted := cloneIterations([]loop.Iteration{*low.Iteration})[0]
+					acc.accepted = append(acc.accepted, accepted)
+					if low.GenerationID != "" {
+						live[low.GenerationID] = accepted
+					}
 				}
 			case loop.EventError:
 				if low.Err != nil {
@@ -152,11 +159,18 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 			acc.errs = append(acc.errs, terminal.Err)
 		}
 		if w.durability != nil {
-			// Committed steering is conversation input, not model output. Include
-			// it in the aggregate even though it emits no generation event.
-			stage := w.durability.stage(w.stageID)
-			if stage.Continuation != nil {
-				acc.accepted = stage.Continuation.Iterations()
+			// Committed steering is conversation input, not model output, and
+			// emits no generation event, so the accepted order comes from the
+			// checkpoint. Iterations accepted live keep their full diagnostics;
+			// only restored ones are rebuilt from saved state.
+			if c := w.durability.stage(w.stageID).Continuation; c != nil {
+				accepted := c.Iterations()
+				for i, g := range c.Generations {
+					if it, ok := live[g.ID]; ok {
+						accepted[i] = it
+					}
+				}
+				acc.accepted = accepted
 			}
 		}
 		primary := acc.result()

@@ -9,6 +9,7 @@ import (
 
 	"github.com/lace-ai/gai/ai"
 	"github.com/lace-ai/gai/modelinput"
+	"github.com/lace-ai/gai/testutil/mocks"
 )
 
 // continuationForTest has one accepted generation and a pending plan whose
@@ -69,6 +70,7 @@ func TestContinuationValidateRejectsInvalidState(t *testing.T) {
 		"approval call": func(c *Continuation) {
 			c.Pending.Invocations[0].Approval = &ToolApprovalRequest{ID: "a1", Input: ToolPolicyInput{Call: ai.ToolCall{Type: "function", ID: "other", Name: "write"}}}
 		},
+		"steering flag on open call": func(c *Continuation) { c.Pending.Invocations[0].CanceledBySteering = true },
 		"decision without approval": func(c *Continuation) {
 			c.Pending.Invocations[0].ApprovalDecision = &ToolApprovalDecision{RequestID: "a1", Approved: true}
 		},
@@ -180,7 +182,7 @@ func TestContinuationApprovalsAndCancelUnstarted(t *testing.T) {
 	if err := c.CancelUnstarted(); err != nil {
 		t.Fatal(err)
 	}
-	if inv.Disposition != InvocationCompleted || inv.Result == nil || !inv.Result.IsError || inv.Execution.Decision.Code != "steering_canceled" {
+	if inv.Disposition != InvocationCompleted || inv.Result == nil || !inv.Result.IsError || !inv.CanceledBySteering {
 		t.Fatal(*inv)
 	}
 	if err := c.Validate(); err != nil {
@@ -260,5 +262,41 @@ func TestContinuationLimitError(t *testing.T) {
 	done.Steering = []ai.Message{{Role: ai.RoleUser, Parts: ai.TextParts("more")}}
 	if err := done.LimitError(l); err == nil {
 		t.Fatal("steering needs execution time and an iteration")
+	}
+}
+
+// Review findings 4 and 15: a reused Loop drops the previous durable state and
+// gets its prompt builder back, and the durable run counter returns to zero.
+func TestReusedLoopDropsDurableState(t *testing.T) {
+	answer := func(text string) mocks.MockModelResponse {
+		return mocks.MockModelResponse{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: ai.TextParts(text)}}}
+	}
+	model := &mocks.MockModel{Responses: []mocks.MockModelResponse{answer("first"), answer("second")}}
+	builder := modelinput.New(modelinput.Definition{SystemInstructions: []modelinput.Part{modelinput.NewTextPart("system")}, PromptInput: modelinput.PromptInput{User: ai.TextParts("question")}})
+	l := New(model, nil, builder, nil)
+	commits := 0
+	l.Continuation = &ContinuationControl{RunID: "run", ExecutionID: "execution", StageID: "primary", Commit: func(context.Context, Continuation) error {
+		commits++
+		return nil
+	}}
+	last := func() Event {
+		var event Event
+		for e := range l.Run(t.Context()) {
+			event = e
+		}
+		return event
+	}
+	if event := last(); event.Type != EventDone || commits == 0 {
+		t.Fatal(event.Type, event.Err, commits)
+	}
+	if l.PromptBuilder != modelinput.PromptBuilder(builder) {
+		t.Fatal("durable run kept its frozen prompt builder")
+	}
+	if n := durableRuns.Load(); n != 0 {
+		t.Fatal("durable run counter not released", n)
+	}
+	l.Continuation, l.Iterations = nil, nil
+	if event := last(); event.Type != EventDone || model.Count != 2 || l.durable != nil {
+		t.Fatal("reused loop continued the previous durable run", event.Type, model.Count, l.durable != nil)
 	}
 }

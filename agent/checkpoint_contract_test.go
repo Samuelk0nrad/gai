@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/lace-ai/gai/agent"
@@ -177,19 +178,20 @@ func TestCheckpointValidateRejectsInvalidStructure(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]func(*agent.Checkpoint){
-		"version":            func(c *agent.Checkpoint) { c.Version = 2 },
-		"run id":             func(c *agent.Checkpoint) { c.RunID = "" },
-		"execution id":       func(c *agent.Checkpoint) { c.ExecutionID = "" },
-		"definition":         func(c *agent.Checkpoint) { c.DefinitionRevision = "" },
-		"revision":           func(c *agent.Checkpoint) { c.Revision = 0 },
-		"status":             func(c *agent.Checkpoint) { c.Status = "unknown" },
-		"no stages":          func(c *agent.Checkpoint) { c.Stages = nil },
-		"primary first":      func(c *agent.Checkpoint) { c.Stages[0].ID = "other"; c.ActiveStageID = "other" },
-		"active stage":       func(c *agent.Checkpoint) { c.ActiveStageID = "missing" },
-		"duplicate stage":    func(c *agent.Checkpoint) { c.Stages = append(c.Stages, c.Stages[0]) },
-		"output policy":      func(c *agent.Checkpoint) { c.Stages[0].Output = agent.ReplaceOutput + 1 },
-		"skipped incomplete": func(c *agent.Checkpoint) { c.Stages[0].Skipped = true; c.Stages[0].Complete = false },
-		"complete canceled":  func(c *agent.Checkpoint) { c.Stages[0].Canceled = true },
+		"version":              func(c *agent.Checkpoint) { c.Version = 2 },
+		"run id":               func(c *agent.Checkpoint) { c.RunID = "" },
+		"execution id":         func(c *agent.Checkpoint) { c.ExecutionID = "" },
+		"definition":           func(c *agent.Checkpoint) { c.DefinitionRevision = "" },
+		"revision":             func(c *agent.Checkpoint) { c.Revision = 0 },
+		"status":               func(c *agent.Checkpoint) { c.Status = "unknown" },
+		"no stages":            func(c *agent.Checkpoint) { c.Stages = nil },
+		"primary first":        func(c *agent.Checkpoint) { c.Stages[0].ID = "other"; c.ActiveStageID = "other" },
+		"active stage":         func(c *agent.Checkpoint) { c.ActiveStageID = "missing" },
+		"duplicate stage":      func(c *agent.Checkpoint) { c.Stages = append(c.Stages, c.Stages[0]) },
+		"output policy":        func(c *agent.Checkpoint) { c.Stages[0].Output = agent.ReplaceOutput + 1 },
+		"skipped incomplete":   func(c *agent.Checkpoint) { c.Stages[0].Skipped = true; c.Stages[0].Complete = false },
+		"complete canceled":    func(c *agent.Checkpoint) { c.Stages[0].Canceled = true },
+		"succeeded unfinished": func(c *agent.Checkpoint) { c.Stages[0].Complete = false },
 		"complete without continuation": func(c *agent.Checkpoint) {
 			c.Stages[0].Continuation = nil
 		},
@@ -495,5 +497,292 @@ func TestDurableAutoCompactedHistoryIsFrozenAcrossResume(t *testing.T) {
 	}
 	if !strings.Contains(requestText(model.Requests()[1]), "Conversation summary:\nshort summary") {
 		t.Fatal("resumed request lost the frozen summary")
+	}
+}
+
+// Review finding 1: an admission write canceled with the execution must not
+// latch a storage failure that blocks settling tools that already finished.
+func TestDurableCanceledAdmissionWriteStillSettlesStartedTools(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	started := make(chan struct{}, 2)
+	tool := durableTool(t, "write", func(ctx context.Context, call ai.ToolCall) (string, error) {
+		if call.ID == "c" {
+			t.Error("third handler ran although its dispatch was never saved")
+		}
+		started <- struct{}{}
+		<-ctx.Done()
+		return "processed:" + call.ID, nil
+	})
+	def := durableDefinition(&durableModel{responses: [][]ai.Token{calls("write", "write", "write"), response("done")}}, tool)
+	store := &checkpointStore{}
+	w := newDurableRun(t, agent.New(def), store)
+	store.hook = func(cp agent.Checkpoint) error {
+		if p := pending(cp); p != nil && p.Invocations[2].Disposition == loop.InvocationDispatched {
+			<-started
+			<-started
+			cancel()
+			return context.Canceled // the storage driver saw the canceled context
+		}
+		return nil
+	}
+	result, err := w.Run(ctx)
+	if !errors.Is(err, context.Canceled) || result.Status != agent.StatusCanceled {
+		t.Fatal(err, result.Status)
+	}
+	store.hook = nil
+	cp := store.load()
+	if cp.Status != agent.StatusCanceled {
+		t.Fatal("terminal status not saved", cp.Status)
+	}
+	invocations := pending(cp).Invocations
+	for _, inv := range invocations[:2] {
+		if inv.Disposition != loop.InvocationCompleted || inv.Result.Text() != "processed:"+inv.Call.ID {
+			t.Fatal("finished tool not settled", inv.Disposition)
+		}
+	}
+	if invocations[2].Disposition != loop.InvocationPlanned || invocations[2].Attempt != 0 {
+		t.Fatal("unsaved dispatch leaked into storage", invocations[2].Disposition, invocations[2].Attempt)
+	}
+	if _, err := agent.New(def).Resume(t.Context(), cp, agent.ResumeInput{}, store.durability()); err != nil {
+		t.Fatal("finished work requires recovery", err)
+	}
+}
+
+// Review finding 2: a commit event that cannot be delivered because the run
+// was canceled is a cancellation, never a recorded stage failure.
+func TestDurableCancelDuringAdmissionCommitIsCancellation(t *testing.T) {
+	for i := range 30 {
+		child := agent.New(durableDefinition(&durableModel{responses: [][]ai.Token{response("post")}}))
+		def := durableDefinition(&durableModel{responses: [][]ai.Token{response("main")}})
+		def.Middleware = []agent.Middleware{agent.NewAgentMiddleware(child, agent.AgentMiddlewareConfig{ID: "post", Name: "post", ErrorPolicy: agent.RecordError})}
+		ctx, cancel := context.WithCancel(t.Context())
+		store := &checkpointStore{}
+		w := newDurableRun(t, agent.New(def), store)
+		store.hook = func(cp agent.Checkpoint) error {
+			if c := cp.Stages[1].Continuation; c != nil && c.Phase == loop.PhaseGenerating {
+				cancel() // the write is acknowledged; only event delivery sees the cancel
+			}
+			return nil
+		}
+		result, _ := w.Run(ctx)
+		cancel()
+		cp := store.load()
+		if result.Status != agent.StatusCanceled || cp.Stages[1].Complete || len(cp.Stages[1].Errors) != 0 {
+			t.Fatalf("run %d: status=%s stored complete=%v errors=%v", i, result.Status, cp.Stages[1].Complete, cp.Stages[1].Errors)
+		}
+	}
+}
+
+// Review finding 3: a handler interrupted because the run stopped keeps an
+// unknown outcome; a handler that hit its own tool timeout does not.
+func TestDurableInterruptedToolRequiresRecovery(t *testing.T) {
+	t.Run("run canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		tool := durableTool(t, "write", func(ctx context.Context, _ ai.ToolCall) (string, error) {
+			cancel()
+			<-ctx.Done()
+			return "", ctx.Err()
+		})
+		def := durableDefinition(&durableModel{responses: [][]ai.Token{calls("write")}}, tool)
+		store := &checkpointStore{}
+		if result, _ := newDurableRun(t, agent.New(def), store).Run(ctx); result.Status != agent.StatusCanceled {
+			t.Fatal(result.Status)
+		}
+		cp := store.load()
+		if inv := pending(cp).Invocations[0]; inv.Disposition != loop.InvocationDispatched || inv.Result != nil {
+			t.Fatal("interrupted handler saved as a known outcome", inv.Disposition)
+		}
+		if _, err := agent.New(def).Resume(t.Context(), cp, agent.ResumeInput{}, store.durability()); !errors.Is(err, loop.ErrRecoveryRequired) {
+			t.Fatal(err)
+		}
+	})
+	t.Run("own timeout", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tool := durableTool(t, "write", func(ctx context.Context, _ ai.ToolCall) (string, error) {
+				<-ctx.Done()
+				return "", ctx.Err()
+			})
+			model := &durableModel{responses: [][]ai.Token{calls("write"), response("done")}}
+			def := durableDefinition(model, tool)
+			def.ToolExecution.DefaultTimeout = time.Second
+			store := &checkpointStore{}
+			result := runDurable(t, newDurableRun(t, agent.New(def), store))
+			if result.Text != "done" || model.count() != 2 {
+				t.Fatal("tool timeout should be an ordinary tool error", result.Text, model.count())
+			}
+			inv := store.load().Stages[0].Continuation.Generations[0].Invocations[0]
+			if inv.Disposition != loop.InvocationCompleted || inv.Execution.State != loop.ToolTimedOut {
+				t.Fatal(inv.Disposition, inv.Execution.State)
+			}
+		})
+	})
+}
+
+// Review finding 5: the attempt timeout must not include checkpoint storage.
+func TestDurableAttemptTimeoutExcludesCommitLatency(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		model := &durableModel{responses: [][]ai.Token{response("done")}, onRequest: func(ctx context.Context, _ int) {
+			select {
+			case <-time.After(time.Second):
+			case <-ctx.Done():
+			}
+		}}
+		def := durableDefinition(model)
+		def.RetryPolicy = &loop.RetryPolicy{AttemptTimeout: 2 * time.Second}
+		store := &checkpointStore{}
+		store.hook = func(cp agent.Checkpoint) error {
+			if c := cp.Stages[0].Continuation; c != nil && c.Phase == loop.PhaseGenerating {
+				time.Sleep(1800 * time.Millisecond) // slow compare-and-swap write
+			}
+			return nil
+		}
+		result := runDurable(t, newDurableRun(t, agent.New(def), store))
+		if result.Text != "done" || model.count() != 1 {
+			t.Fatal("storage latency consumed the model timeout", result.Text, model.count())
+		}
+	})
+}
+
+// Review finding 6: a pause and a cancel landing on the dispatch commit leave
+// the dispatch reverted, never saved as an unknown outcome.
+func TestDurablePauseAndCancelAtDispatchRevertDispatch(t *testing.T) {
+	for i := range 30 {
+		var effects atomic.Int32
+		tool := durableTool(t, "write", func(context.Context, ai.ToolCall) (string, error) { effects.Add(1); return "ok", nil })
+		def := durableDefinition(&durableModel{responses: [][]ai.Token{calls("write")}}, tool)
+		ctx, cancel := context.WithCancel(t.Context())
+		store := &checkpointStore{}
+		w := newDurableRun(t, agent.New(def), store)
+		store.hook = func(cp agent.Checkpoint) error {
+			if p := pending(cp); p != nil && p.Invocations[0].Disposition == loop.InvocationDispatched {
+				_ = w.RequestPause()
+				cancel()
+			}
+			return nil
+		}
+		_, _ = w.Run(ctx)
+		cancel()
+		inv := pending(store.load()).Invocations[0]
+		if effects.Load() != 0 || inv.Disposition != loop.InvocationPlanned || inv.Attempt != 0 {
+			t.Fatalf("run %d: effects=%d disposition=%s attempt=%d", i, effects.Load(), inv.Disposition, inv.Attempt)
+		}
+	}
+}
+
+// Review finding 7: iterations accepted live keep their diagnostics.
+func TestDurableLiveIterationsKeepDiagnostics(t *testing.T) {
+	tool := durableTool(t, "write", func(context.Context, ai.ToolCall) (string, error) { return "ok", nil })
+	def := durableDefinition(&durableModel{responses: [][]ai.Token{calls("write"), response("done")}}, tool)
+	def.ToolPolicy = loop.ToolPolicyFunc(func(context.Context, loop.ToolPolicyInput) (loop.ToolDecision, error) {
+		return loop.ToolDecision{Action: loop.ToolDeny, Code: "blocked"}, nil
+	})
+	result := runDurable(t, newDurableRun(t, agent.New(def), &checkpointStore{}))
+	var denied bool
+	for _, it := range result.Primary.Iterations {
+		for _, part := range it.Parts {
+			if part.ToolResp != nil && errors.Is(part.ToolResp.Err, loop.ErrToolDenied) {
+				denied = true
+			}
+		}
+	}
+	if !denied {
+		t.Fatal("typed tool error lost in a durable run")
+	}
+}
+
+// Review finding 8: a pause during a final answer without tool calls finishes the run.
+func TestDurablePauseDuringFinalAnswerFinishes(t *testing.T) {
+	var w *agent.Workflow
+	model := &durableModel{responses: [][]ai.Token{response("done")}, onRequest: func(context.Context, int) {
+		if err := w.RequestPause(); err != nil {
+			t.Error(err)
+		}
+	}}
+	store := &checkpointStore{}
+	w = newDurableRun(t, agent.New(durableDefinition(model)), store)
+	result := runDurable(t, w)
+	if result.Status != agent.StatusSucceeded || result.Text != "done" || store.load().Status != agent.StatusSucceeded {
+		t.Fatal(result.Status, result.Text, store.load().Status)
+	}
+}
+
+// Review finding 9: a setup failure after a canceled execution records the
+// failure instead of producing an invalid checkpoint.
+func TestDurableSetupFailureAfterCanceledStage(t *testing.T) {
+	var maps atomic.Int32
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	child := agent.New(durableDefinition(&durableModel{responses: [][]ai.Token{response("post")}}))
+	def := durableDefinition(&durableModel{responses: [][]ai.Token{response("main")}})
+	def.Middleware = []agent.Middleware{agent.NewAgentMiddleware(child, agent.AgentMiddlewareConfig{ID: "post", Name: "post", ErrorPolicy: agent.RecordError, MapInput: func(context.Context, agent.WorkflowResult) (agent.RunInput, error) {
+		if maps.Add(1) == 1 {
+			cancel() // the child is canceled before its loop saves anything
+			return agent.RunInput{}, nil
+		}
+		return agent.RunInput{}, errors.New("mapping failure")
+	}})}
+	store := &checkpointStore{}
+	if result, _ := newDurableRun(t, agent.New(def), store).Run(ctx); result.Status != agent.StatusCanceled {
+		t.Fatal(result.Status)
+	}
+	cp := store.load()
+	if !cp.Stages[1].Canceled || cp.Stages[1].Complete {
+		t.Skip("child failed before cancellation was recorded")
+	}
+	resumed, err := agent.New(def).Resume(t.Context(), cp, agent.ResumeInput{}, store.durability())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := runDurable(t, resumed)
+	stage := result.Checkpoint.Stages[1]
+	if result.Status != agent.StatusSucceeded || !stage.Complete || stage.Canceled || len(stage.Errors) != 1 {
+		t.Fatal(result.Status, stage.Complete, stage.Canceled, stage.Errors)
+	}
+}
+
+// Review finding 10: provisional output of a paused attempt is not forwarded
+// by a ReplaceOutput stage.
+func TestDurablePausedAttemptOutputIsNotForwarded(t *testing.T) {
+	tool := durableTool(t, "write", func(context.Context, ai.ToolCall) (string, error) { return "ok", nil })
+	plan := append(response("thinking"), calls("write")...)
+	def := durableDefinition(&durableModel{responses: [][]ai.Token{plan}}, tool)
+	child := agent.New(durableDefinition(&durableModel{responses: [][]ai.Token{response("post")}}))
+	def.Middleware = []agent.Middleware{agent.NewAgentMiddleware(child, agent.AgentMiddlewareConfig{ID: "post", Name: "post", Output: agent.ReplaceOutput})}
+	store := &checkpointStore{}
+	w := newDurableRun(t, agent.New(def), store)
+	store.hook = func(cp agent.Checkpoint) error {
+		if pending(cp) != nil {
+			return w.RequestPause()
+		}
+		return nil
+	}
+	events := collectAgentEvents(w.RunEvents(t.Context()))
+	if result, err := w.Wait(); err != nil || result.Status != agent.StatusPaused {
+		t.Fatal(err, result.Status)
+	}
+	if text := outputText(events); text != "" {
+		t.Fatal("paused attempt output forwarded", text)
+	}
+}
+
+// Review finding 14: a commit failure is reported once.
+func TestDurableCommitFailureIsNotDuplicated(t *testing.T) {
+	tool := durableTool(t, "write", func(context.Context, ai.ToolCall) (string, error) { return "ok", nil })
+	def := durableDefinition(&durableModel{responses: [][]ai.Token{calls("write")}}, tool)
+	store := &checkpointStore{}
+	store.hook = func(cp agent.Checkpoint) error {
+		if pending(cp) != nil {
+			return errStore
+		}
+		return nil
+	}
+	result, err := newDurableRun(t, agent.New(def), store).Run(t.Context())
+	if !errors.Is(err, errStore) || len(result.Primary.Errors) == 0 {
+		t.Fatal(err)
+	}
+	if n := strings.Count(result.Primary.Errors[0].Error(), loop.ErrCheckpointCommit.Error()); n != 1 {
+		t.Fatalf("commit failure reported %d times: %v", n, result.Primary.Errors[0])
 	}
 }

@@ -18,8 +18,16 @@ func TestDurableJSONOutputSurvivesRestoration(t *testing.T) {
 	const raw = `{"answer":42}`
 	for _, boundary := range []string{"pending", "completed primary", "completed middleware"} {
 		t.Run(boundary, func(t *testing.T) {
-			model := &durableModel{responses: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(raw)}}}}}
+			jsonPart := ai.Token{Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(raw)}}
+			model := &durableModel{responses: [][]ai.Token{{jsonPart}}}
 			def := durableDefinition(model)
+			want, wantCalls := raw, 1
+			if boundary == "pending" {
+				// A pause keeps a plan pending only while it has tools to stop.
+				model.responses = [][]ai.Token{append([]ai.Token{jsonPart}, calls("write")...), response("done")}
+				def = durableDefinition(model, durableTool(t, "write", func(context.Context, ai.ToolCall) (string, error) { return "ok", nil }))
+				want, wantCalls = raw+"done", 2
+			}
 			if boundary == "completed middleware" {
 				def = durableDefinition(&durableModel{responses: [][]ai.Token{response("main")}})
 				def.Middleware = []agent.Middleware{agent.NewAgentMiddleware(agent.New(durableDefinition(model)), agent.AgentMiddlewareConfig{ID: "json", Output: agent.ReplaceOutput})}
@@ -46,12 +54,12 @@ func TestDurableJSONOutputSurvivesRestoration(t *testing.T) {
 			}
 			events := collectAgentEvents(w.RunEvents(t.Context()))
 			result, err := w.Wait()
-			if err != nil || result.Text != raw || model.count() != 1 || len(result.Output) != 1 || result.Output[0].Text != raw {
+			if err != nil || result.Text != want || model.count() != wantCalls || len(result.Output) == 0 || result.Output[0].Text != raw {
 				t.Fatal(err, result, model.count())
 			}
 			wantLive := ""
 			if boundary == "pending" {
-				wantLive = raw
+				wantLive = want
 			}
 			if outputText(events) != wantLive {
 				t.Fatalf("live output = %q, want %q", outputText(events), wantLive)

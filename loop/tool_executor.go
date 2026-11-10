@@ -217,7 +217,11 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 	publish := func(done toolCompletion) {
 		task := tasks[done.index]
 		if l.durable != nil && !task.restored {
-			if err := l.durable.completed(ctx, done); err != nil {
+			// A handler that stopped because the batch was canceled or timed out
+			// was interrupted, unlike one that hit its own tool timeout.
+			interrupted := task.result == nil && workerCtx.Err() != nil &&
+				(done.execution.State == ToolCanceled || done.execution.State == ToolTimedOut)
+			if err := l.durable.completed(ctx, done, interrupted); err != nil {
 				fail(err)
 			}
 		}

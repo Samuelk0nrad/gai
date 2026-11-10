@@ -44,6 +44,7 @@ var (
 	ErrUnsupportedDurablePrompt     = errors.New("durable workflows require the standard modelinput.Builder")
 	ErrCommandConflict              = errors.New("continuation command conflicts with a previously accepted command")
 	ErrWorkflowFinished             = errors.New("workflow execution has finished")
+	errUnfinishedStage              = errors.New("workflow ended before every stage completed")
 )
 
 // Durability opts into acknowledged checkpoint boundaries. Returning nil from
@@ -55,6 +56,9 @@ var (
 // remain application-owned. Commit may call Result or RequestPause.
 // Settled outcomes and terminal status use a context that retains values but
 // detaches execution cancellation. Commit must enforce its own storage timeout.
+// The checkpoint passed to Commit shares memory with the workflow and with later
+// revisions, so Commit must not modify it. Encoding or keeping it unchanged is
+// safe; use Checkpoint.Clone for a copy to modify.
 type Durability struct {
 	DefinitionRevision string
 	Commit             func(context.Context, uint64, Checkpoint) error
@@ -280,6 +284,10 @@ func (c Checkpoint) validate(deep bool) error {
 	seen := map[string]bool{}
 	active := false
 	for _, s := range c.Stages {
+		// A succeeded run is final, so every stage must be complete.
+		if c.Status == StatusSucceeded && !s.Complete {
+			return ErrCheckpoint
+		}
 		if s.ID == "" || seen[s.ID] || s.Output > ReplaceOutput {
 			return ErrCheckpoint
 		}
@@ -414,11 +422,18 @@ func (d *checkpointCoordinator) commit(ctx context.Context, change func(*Checkpo
 	if err := next.validate(false); err != nil {
 		return err
 	}
-	// The callback owns its copy. Metadata is normalized to JSON values and the
-	// loop validates every continuation, so the copy is serializable.
-	if err := d.durability.Commit(ctx, expected, next.Clone()); err != nil {
-		d.failure = fmt.Errorf("%w: %w", loop.ErrCheckpointCommit, err)
-		return d.failure
+	// The callback reads the shared revision without a copy: state is never
+	// modified in place. Metadata is normalized to JSON values and the loop
+	// validates every continuation, so the revision is serializable.
+	if err := d.durability.Commit(ctx, expected, next); err != nil {
+		err = fmt.Errorf("%w: %w", loop.ErrCheckpointCommit, err)
+		// A write that failed only because the execution was canceled does not
+		// prove storage is broken: later settlement writes may still succeed,
+		// and compare-and-swap rejects them if that write did land.
+		if ctx.Err() == nil {
+			d.failure = err
+		}
+		return err
 	}
 	d.mu.Lock()
 	d.state = next
@@ -427,17 +442,29 @@ func (d *checkpointCoordinator) commit(ctx context.Context, change func(*Checkpo
 	return nil
 }
 
-// stage returns an isolated copy of one stage record.
+// stage returns one stage record. It shares memory with coordinator state, so
+// callers must not modify anything reachable from it.
 func (d *checkpointCoordinator) stage(id string) StageCheckpoint {
 	d.mu.RLock()
-	state := d.state
-	d.mu.RUnlock()
-	for _, s := range state.Stages {
+	defer d.mu.RUnlock()
+	for _, s := range d.state.Stages {
 		if s.ID == id {
-			return s.clone()
+			return s
 		}
 	}
 	return StageCheckpoint{}
+}
+
+// allStagesComplete reports whether every stage has completed.
+func (d *checkpointCoordinator) allStagesComplete() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, s := range d.state.Stages {
+		if !s.Complete {
+			return false
+		}
+	}
+	return true
 }
 
 // stageComplete reads one completion flag without copying stage payloads.

@@ -81,6 +81,11 @@ func (l *Loop) executeRun(ctx context.Context, events chan<- Event) {
 	defer close(events)
 	defer state.finish()
 
+	// A durable run executes from a frozen prompt builder. Give the caller's
+	// builder back when the run ends, so a reused Loop does not keep it.
+	if callerBuilder := l.PromptBuilder; l.Continuation != nil {
+		defer func() { l.PromptBuilder = callerBuilder }()
+	}
 	if err := run.prepareContinuation(); err != nil {
 		sendLoopError(ctx, events, state, err)
 		return
@@ -89,13 +94,15 @@ func (l *Loop) executeRun(ctx context.Context, events chan<- Event) {
 		defer run.continuationCancel()
 	}
 	if l.durable != nil {
+		durableRuns.Add(1)
+		defer durableRuns.Add(-1)
 		run.ctx = context.WithValue(run.ctx, durableEventKey{}, l.durable)
 	}
 	if !run.prepareValidatedRun() {
 		return
 	}
 	if err := run.materializeContinuation(); err != nil {
-		sendLoopError(run.ctx, events, state, err)
+		sendLoopFailure(run.ctx, events, state, err)
 		return
 	}
 	start := 0
@@ -278,21 +285,22 @@ func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferToken
 		}
 		return attempt, attempt.terminateError(err)
 	}
+	if err := r.commitModelStart(attempt); err != nil {
+		return attempt, attempt.terminateCommit(err)
+	}
+	if r.owner.durable != nil {
+		if err := sendEvent(r.ctx, r.events, AttemptStartEvent(iterationCount, state.attemptID(), r.state.retryCount)); err != nil {
+			return attempt, attempt.terminateSendFailure(err)
+		}
+	}
+	// The attempt timeout covers the model call only, not checkpoint storage
+	// or event delivery.
 	modelCtx := attemptCtx
 	if r.owner.RetryPolicy != nil && r.owner.RetryPolicy.AttemptTimeout > 0 {
 		var deadlineCancel context.CancelFunc
 		attempt.deadline, deadlineCancel = context.WithTimeout(attemptCtx, r.owner.RetryPolicy.AttemptTimeout)
 		attempt.cancel = combineCancel(deadlineCancel, baseCancel)
 		modelCtx = attempt.deadline
-	}
-
-	if err := r.commitModelStart(attempt); err != nil {
-		return attempt, attempt.terminateError(err)
-	}
-	if r.owner.durable != nil {
-		if err := sendEvent(r.ctx, r.events, AttemptStartEvent(iterationCount, state.attemptID(), r.state.retryCount)); err != nil {
-			return attempt, attempt.terminateSendFailure(err)
-		}
 	}
 	retrying, outcome, retryErr := attempt.consumeModelStream(modelCtx, request, deferTokens)
 	if outcome == attemptTerminal {
@@ -388,7 +396,7 @@ func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request 
 func (a *attemptExecution) scheduleRetry(retryErr error) attemptOutcome {
 	a.run.state.retry()
 	if err := a.run.commitRetry(a); err != nil {
-		return a.terminateError(err)
+		return a.terminateCommit(err)
 	}
 	delay := time.Duration(0)
 	if a.run.owner.RetryPolicy != nil {
@@ -455,7 +463,7 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 	if !terminalBatch && deferTokens && (!r.requiredToolCallSatisfied || len(attempt.toolCalls) > 0) &&
 		!hasPermittedToolCall(attempt.toolCalls, r.owner.Tools, r.owner.ToolChoice.Names) {
 		if err := r.commitDiscard(attempt); err != nil {
-			attempt.terminateError(err)
+			attempt.terminateCommit(err)
 			return iterationTerminal
 		}
 		// A text-transport response that does not satisfy a required tool call is
@@ -470,10 +478,12 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		return iterationContinue
 	}
 	if err := r.commitPlan(attempt); err != nil {
-		attempt.terminateError(err)
+		attempt.terminateCommit(err)
 		return iterationTerminal
 	}
-	if r.owner.durable != nil && r.owner.durable.pausing() {
+	// Pause stops admission of tools. A response without tool calls has
+	// nothing left to stop, so it is accepted instead.
+	if r.owner.durable != nil && r.owner.durable.pausing() && len(attempt.toolCalls) > 0 {
 		attempt.cancelAttempt()
 		attempt.finish(nil)
 		r.pauseContinuation()
@@ -509,7 +519,7 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 	attempt.state.recordToolResults(attempt.iteration)
 	if terminalBatch && r.owner.durable != nil {
 		for _, inv := range r.owner.durable.state.Pending.Invocations {
-			if inv.Execution.Decision.Code == "steering_canceled" {
+			if inv.CanceledBySteering {
 				terminalBatch = false
 				break
 			}
@@ -523,7 +533,7 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 	}
 
 	if err := r.commitIteration(attempt, len(attempt.toolCalls) == 0 || terminalBatch); err != nil {
-		attempt.terminateError(err)
+		attempt.terminateCommit(err)
 		return iterationTerminal
 	}
 	attemptID := attempt.state.attemptID()
@@ -583,9 +593,7 @@ func (a *attemptExecution) terminateSendFailure(err error) attemptOutcome {
 }
 
 func (a *attemptExecution) terminateError(err error) attemptOutcome {
-	if commitErr := a.commitTerminalUsage(); commitErr != nil {
-		err = errors.Join(err, commitErr)
-	}
+	err = a.joinTerminalUsage(err)
 	sendAttemptError(a.run.ctx, a.run.events, a.run.state, a.iteration.Count, a.state.attemptID(), a.run.state.retryCount, &a.iteration, err)
 	a.cancelAttempt()
 	a.finish(err)
