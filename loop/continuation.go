@@ -542,6 +542,8 @@ type durableLoop struct {
 	// validated counts accepted generations that were already validated.
 	validated       int
 	promptValidated bool
+	// commits counts checkpoints acknowledged by Commit for this handle.
+	commits int
 }
 
 // commit acknowledges progress using the live execution context before new work.
@@ -568,6 +570,7 @@ func (d *durableLoop) commitWithContexts(storageCtx, eventCtx context.Context) e
 		d.failed = fmt.Errorf("%w: %w", ErrCheckpointCommit, err)
 		return d.failed
 	}
+	d.commits++
 	d.validated = len(d.state.Generations)
 	d.promptValidated = true
 	if d.events != nil {

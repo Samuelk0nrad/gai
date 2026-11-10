@@ -307,7 +307,16 @@ func (d *durableLoop) beforeDispatch(ctx context.Context, index int, execution T
 		inv.Attempt++
 		inv.Execution.State = ToolRunning
 	}
+	acknowledged := d.commits
 	if err := d.commit(ctx); err != nil {
+		// Storage can acknowledge the intent before delivering its commit event
+		// fails, for example when the run is canceled. The handler then never
+		// starts, so the saved dispatch is reverted.
+		if !synthetic && d.commits > acknowledged {
+			if undoErr := d.abandonDispatch(ctx, index); undoErr != nil {
+				err = errors.Join(err, undoErr)
+			}
+		}
 		return err
 	}
 	if d.pausing() {
