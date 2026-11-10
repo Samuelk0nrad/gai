@@ -127,3 +127,25 @@ func TestToolMetricsProcessorPanicExcludesProcessingTime(t *testing.T) {
 		t.Fatalf("tool duration = %gs, want at least %gs and less than the %gs processing delay", got, toolTime.Seconds(), processingTime.Seconds())
 	}
 }
+
+// TestToolMetricsRecordExecutionDurationInSeconds checks the recorded tool
+// duration value with a deterministic lower bound and a seconds-unit ceiling.
+func TestToolMetricsRecordExecutionDurationInSeconds(t *testing.T) {
+	const toolTime = 20 * time.Millisecond
+	reader := obstest.InstallMetrics(t)
+	tool := observedTestTool{name: "test", call: func(context.Context, ai.ToolCall) (string, error) {
+		time.Sleep(toolTime)
+		return "ok", nil
+	}}
+
+	callObservedTool(t.Context(), ai.ToolCall{ID: "call-1", Type: "function", Name: "test", Args: json.RawMessage(`{}`)}, []Tool{tool})
+
+	points := obstest.HistogramPoints[float64](t, obstest.CollectMetrics(t, reader), metricToolDuration)
+	if len(points) != 1 || points[0].Count != 1 {
+		t.Fatalf("tool duration points = %#v, want one execution", points)
+	}
+	// Sleep guarantees the lower bound; a millisecond unit would exceed 5.
+	if got := points[0].Sum; got < toolTime.Seconds() || got >= 5 {
+		t.Fatalf("tool duration = %g, want at least %gs recorded in seconds", got, toolTime.Seconds())
+	}
+}

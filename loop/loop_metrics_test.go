@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/lace-ai/gai/ai"
 	"github.com/lace-ai/gai/internal/obstest"
@@ -186,4 +187,29 @@ func TestLoopMetricsRecordFailedAndCanceledRuns(t *testing.T) {
 			"error.type":           "canceled",
 		})
 	})
+}
+
+// TestLoopMetricsRecordRunDurationInSeconds checks the recorded run duration
+// value with a deterministic lower bound and a seconds-unit ceiling.
+func TestLoopMetricsRecordRunDurationInSeconds(t *testing.T) {
+	const modelTime = 20 * time.Millisecond
+	reader := obstest.InstallMetrics(t)
+	model := &scriptedStreamModel{
+		sequences: [][]ai.Token{{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}}},
+		delays:    []time.Duration{modelTime},
+	}
+	l := loop.New(model, nil, testPromptBuilder(), nil)
+
+	if err := loopError(collectLoopEvents(t, l, context.Background())); err != nil {
+		t.Fatalf("unexpected loop error: %v", err)
+	}
+
+	durations := obstest.HistogramPoints[float64](t, obstest.CollectMetrics(t, reader), metricLoopRunDuration)
+	if len(durations) != 1 || durations[0].Count != 1 {
+		t.Fatalf("run duration points = %#v, want one run", durations)
+	}
+	// The model delay guarantees the lower bound; a millisecond unit would exceed 5.
+	if got := durations[0].Sum; got < modelTime.Seconds() || got >= 5 {
+		t.Fatalf("run duration = %g, want at least %gs recorded in seconds", got, modelTime.Seconds())
+	}
 }
