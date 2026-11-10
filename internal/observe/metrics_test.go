@@ -52,18 +52,48 @@ func TestInstrumentsRebindWhenGlobalProviderChanges(t *testing.T) {
 	}
 }
 
-// TestInstrumentsWorkWithValueProviders checks that non-pointer providers are
-// rebuilt instead of cached.
-func TestInstrumentsWorkWithValueProviders(t *testing.T) {
-	previous := otel.GetMeterProvider()
-	t.Cleanup(func() { otel.SetMeterProvider(previous) })
-	otel.SetMeterProvider(noop.NewMeterProvider())
+// TestInstrumentsCacheComparableValueProviders checks that comparable
+// non-pointer providers, such as noop.MeterProvider, are cached.
+func TestInstrumentsCacheComparableValueProviders(t *testing.T) {
+	setMeterProvider(t, noop.NewMeterProvider())
 
 	builds := 0
 	instruments := newTestInstruments(&builds)
 	instruments.Get().counter.Add(context.Background(), 1)
 	instruments.Get().counter.Add(context.Background(), 1)
-	if builds != 2 {
-		t.Fatalf("builds = %d, want uncached rebuilds for value providers", builds)
+	if builds != 1 {
+		t.Fatalf("builds = %d, want one cached build for a comparable value provider", builds)
 	}
+}
+
+// uncomparableProvider is a MeterProvider whose dynamic type cannot be
+// compared with ==.
+type uncomparableProvider struct {
+	noop.MeterProvider
+	tags []string
+}
+
+// TestInstrumentsRebuildUncomparableProviders checks that providers whose
+// identity cannot be compared are rebuilt without panicking, including after
+// a comparable provider was cached.
+func TestInstrumentsRebuildUncomparableProviders(t *testing.T) {
+	builds := 0
+	instruments := newTestInstruments(&builds)
+
+	setMeterProvider(t, noop.NewMeterProvider())
+	instruments.Get()
+	setMeterProvider(t, uncomparableProvider{tags: []string{"a"}})
+	instruments.Get().counter.Add(context.Background(), 1)
+	instruments.Get().counter.Add(context.Background(), 1)
+	if builds != 3 {
+		t.Fatalf("builds = %d, want a rebuild for each uncomparable provider call", builds)
+	}
+}
+
+// setMeterProvider installs provider globally until the test ends.
+func setMeterProvider(t *testing.T, provider metric.MeterProvider) {
+	t.Helper()
+	previous := otel.GetMeterProvider()
+	t.Cleanup(func() { otel.SetMeterProvider(previous) })
+	otel.SetMeterProvider(provider)
 }

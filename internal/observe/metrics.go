@@ -43,27 +43,28 @@ func NewInstruments[T any](scope string, build func(metric.Meter) T) *Instrument
 	return &Instruments[T]{scope: scope, build: build}
 }
 
-// Get returns instruments bound to the current global MeterProvider.
+// Get returns instruments bound to the current global MeterProvider. The
+// cached path is one atomic load and one interface comparison.
 func (i *Instruments[T]) Get() T {
 	provider := otel.GetMeterProvider()
-	cacheable := cacheableProvider(provider)
-	if cacheable {
-		if set := i.current.Load(); set != nil && set.provider == provider {
-			return set.value
-		}
+	// Only comparable providers are cached, so this comparison cannot panic:
+	// equal dynamic types are comparable, and different types compare false.
+	if set := i.current.Load(); set != nil && set.provider == provider {
+		return set.value
 	}
 	value := i.build(provider.Meter(i.scope))
-	if cacheable {
+	if comparableProvider(provider) {
 		i.current.Store(&instrumentSet[T]{provider: provider, value: value})
 	}
 	return value
 }
 
-// cacheableProvider reports whether provider identity can be compared without
-// panicking. Pointer providers (the SDK and the global delegate) are cached;
-// value providers such as noop.MeterProvider are cheap to rebuild.
-func cacheableProvider(provider metric.MeterProvider) bool {
-	return provider != nil && reflect.TypeOf(provider).Kind() == reflect.Pointer
+// comparableProvider reports whether provider can be compared with ==. This
+// covers pointer providers such as the SDK and value providers such as
+// noop.MeterProvider. A provider whose type holds slices, maps, or functions
+// is rebuilt on every call because its identity cannot be compared.
+func comparableProvider(provider metric.MeterProvider) bool {
+	return provider != nil && reflect.TypeOf(provider).Comparable()
 }
 
 // Float64Histogram creates a histogram, reporting creation errors through the
