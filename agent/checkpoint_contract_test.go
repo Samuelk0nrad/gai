@@ -389,6 +389,10 @@ func TestDurableCanceledModelAttemptDoesNotConsumeRetryBudget(t *testing.T) {
 	if _, err := agent.New(def).Resume(t.Context(), lost, agent.ResumeInput{}, d); !errors.Is(err, loop.ErrMaxRetries) {
 		t.Fatal(err)
 	}
+	def.RetryPolicy = nil // no policy allows no retries either
+	if _, err := agent.New(def).Resume(t.Context(), lost, agent.ResumeInput{}, d); !errors.Is(err, loop.ErrMaxRetries) {
+		t.Fatal("nil retry policy repeated an interrupted attempt", err)
+	}
 	def.RetryPolicy = &loop.RetryPolicy{TotalTimeout: time.Hour, MaxRetries: 1}
 	def.Model = &durableModel{responses: [][]ai.Token{response("recovered")}}
 	fresh := &checkpointStore{saved: lost}

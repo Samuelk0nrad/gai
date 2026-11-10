@@ -196,13 +196,18 @@ func (c Continuation) LimitError(l *Loop) error {
 	if c.Phase == PhaseDone && len(c.Steering) == 0 {
 		return nil
 	}
-	if p := l.RetryPolicy; p != nil {
-		if p.TotalTimeout > 0 && c.Elapsed >= p.TotalTimeout {
-			return ErrTimeoutExhausted
+	p := l.RetryPolicy
+	if p != nil && p.TotalTimeout > 0 && c.Elapsed >= p.TotalTimeout {
+		return ErrTimeoutExhausted
+	}
+	// Without a retry policy no retry is allowed, as in ordinary runs, so an
+	// interrupted attempt cannot be repeated.
+	if c.Phase == PhaseGenerating && (p == nil || !p.hasRetryBudget(c.RetryCount)) {
+		limit := 0
+		if p != nil {
+			limit = p.MaxRetries
 		}
-		if c.Phase == PhaseGenerating && !p.hasRetryBudget(c.RetryCount) {
-			return fmt.Errorf("%w: limit=%d", ErrMaxRetries, p.MaxRetries)
-		}
+		return fmt.Errorf("%w: limit=%d", ErrMaxRetries, limit)
 	}
 	// An accepted plan still runs its tools; only new model work needs an iteration.
 	if c.Pending == nil && c.NextIteration > l.MaxLoopIterations {

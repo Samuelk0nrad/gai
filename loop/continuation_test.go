@@ -241,6 +241,10 @@ func TestContinuationLimitError(t *testing.T) {
 	if err := interrupted.LimitError(l); err != nil {
 		t.Fatal(err)
 	}
+	// Without a retry policy no retry is allowed, as in ordinary runs.
+	if err := interrupted.LimitError(&Loop{MaxLoopIterations: 5}); !errors.Is(err, ErrMaxRetries) {
+		t.Fatal("nil retry policy allowed repeating an interrupted attempt", err)
+	}
 
 	// New model work needs an iteration; an accepted plan still runs its tools.
 	planned := continuationForTest()
