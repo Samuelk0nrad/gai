@@ -163,6 +163,9 @@ func (o *GenerationObservation) Finish(result GenerationResult) {
 		return
 	}
 	o.finishOnce.Do(func() {
+		// Measure before emitting so application sink latency is not
+		// attributed to the model.
+		duration := time.Since(o.startedAt)
 		o.mu.Lock()
 		result = mergeGenerationResults(o.stream, result)
 		o.mu.Unlock()
@@ -173,7 +176,7 @@ func (o *GenerationObservation) Finish(result GenerationResult) {
 			Fields: generationResultFields(o.config, result),
 			Err:    result.Err,
 		})
-		recordGenerationMetrics(o.ctx, o.config, result, time.Since(o.startedAt))
+		recordGenerationMetrics(o.ctx, o.config, result, duration)
 		gai.EndSpan(o.span, result.Err)
 	})
 }

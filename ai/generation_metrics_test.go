@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
+	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/internal/obstest"
 )
 
@@ -179,5 +181,27 @@ func TestGenerationMetricsRecordOncePerGeneration(t *testing.T) {
 		if len(points) != 1 || points[0].Value != want {
 			t.Fatalf("%s points = %#v, want streamed usage %d recorded once", name, points, want)
 		}
+	}
+}
+
+// TestGenerationMetricsDurationExcludesSinkLatency checks that the recorded
+// duration covers the model call in seconds and not synchronous sink work.
+func TestGenerationMetricsDurationExcludesSinkLatency(t *testing.T) {
+	const callTime, sinkTime = 20 * time.Millisecond, 250 * time.Millisecond
+	reader := obstest.InstallMetrics(t)
+	sink := gai.ObservationSinkFunc(func(context.Context, gai.Observation) {
+		time.Sleep(sinkTime)
+	})
+
+	_, observation := StartGenerationObservation(context.Background(), AIRequest{}, GenerationConfig{Provider: "openai", Model: "gpt-test", Sink: sink})
+	time.Sleep(callTime)
+	observation.Finish(GenerationResult{})
+
+	durations := obstest.HistogramPoints[float64](t, obstest.CollectMetrics(t, reader), metricInferenceDuration)
+	if len(durations) != 1 || durations[0].Count != 1 {
+		t.Fatalf("duration points = %#v, want one generation", durations)
+	}
+	if got := durations[0].Sum; got < callTime.Seconds() || got >= sinkTime.Seconds() {
+		t.Fatalf("duration = %gs, want at least %gs and less than the %gs sink delay", got, callTime.Seconds(), sinkTime.Seconds())
 	}
 }
