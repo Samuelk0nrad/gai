@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"unicode/utf8"
+
+	"github.com/Samuelk0nrad/gai/internal/appclock"
 )
 
 const (
@@ -156,6 +158,9 @@ func normalizedCaptureLimit(limit int) int {
 
 func safelyRedact(ctx context.Context, redact ContentRedactor, kind ContentKind, value []byte) (redacted []byte, ok bool) {
 	ok = false
+	// Redactor time is application time, not provider latency.
+	resume := appclock.Pause(ctx)
+	defer resume()
 	defer func() {
 		if recover() != nil {
 			redacted = nil

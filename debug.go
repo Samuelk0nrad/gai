@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/Samuelk0nrad/gai/internal/appclock"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -197,6 +198,9 @@ func EmitObservation(ctx context.Context, sink ObservationSink, observation Obse
 	observation = EnrichObservation(ctx, observation)
 	RecordObservation(ctx, observation)
 	if sink != nil {
+		// Sink time is application time, not provider latency.
+		resume := appclock.Pause(ctx)
+		defer resume()
 		sink.Emit(ctx, observation)
 	}
 }

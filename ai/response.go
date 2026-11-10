@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/Samuelk0nrad/gai/internal/appclock"
 )
 
 // AIResponse is the accumulated result of a non-streaming generation request.
@@ -162,6 +164,15 @@ func (t Token) ToolCall() *ToolCall {
 // SendToken forwards token unless ctx is canceled. It returns false when the
 // receiver can no longer be reached because ctx ended.
 func SendToken(ctx context.Context, out chan<- Token, token Token) bool {
+	select {
+	case out <- token:
+		return true
+	default:
+	}
+	// The receiver is busy. Time spent waiting for the application to accept
+	// the token is excluded from generation latency.
+	resume := appclock.Pause(ctx)
+	defer resume()
 	select {
 	case out <- token:
 		return true

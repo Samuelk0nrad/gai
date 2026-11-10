@@ -22,7 +22,7 @@ const (
 	tokenModalityUnknown = "unknown"
 )
 
-// Bounded error.type values for generation metrics, in addition to the
+// Bounded error.type values for model call telemetry, in addition to the
 // ProviderErrorKind values.
 const (
 	generationErrorTimeout      = "timeout"
@@ -64,7 +64,7 @@ func recordGenerationMetrics(ctx context.Context, config GenerationConfig, resul
 
 	durationAttrs := attrs
 	if result.Err != nil {
-		durationAttrs = append(slices.Clip(attrs), attribute.String("error.type", generationErrorType(result.Err)))
+		durationAttrs = append(slices.Clip(attrs), attribute.String("error.type", TelemetryErrorType(result.Err)))
 	}
 	instruments.duration.Record(ctx, duration.Seconds(), metric.WithAttributes(durationAttrs...))
 
@@ -82,9 +82,19 @@ func recordGenerationMetrics(ctx context.Context, config GenerationConfig, resul
 	}
 }
 
-// generationErrorType maps a generation failure to a bounded error class.
-func generationErrorType(err error) string {
+// TelemetryErrorType returns the bounded error class GAI reports as error.type
+// for a failed model call. It returns "timeout" or "canceled" for context
+// errors, which take precedence because they describe why the call ended,
+// then "unsuccessful_generation", then a documented ProviderErrorKind. Every
+// other error, including a custom ProviderErrorKind, is "_OTHER". It returns
+// "" for a nil error.
+//
+// Model call spans and metrics, loop retry metrics, and loop run metrics all
+// use this classification, so they can be joined by error class.
+func TelemetryErrorType(err error) string {
 	switch {
+	case err == nil:
+		return ""
 	case errors.Is(err, context.DeadlineExceeded):
 		return generationErrorTimeout
 	case errors.Is(err, context.Canceled):
@@ -93,12 +103,19 @@ func generationErrorType(err error) string {
 		return generationErrorUnsuccessful
 	}
 	var providerErr *ProviderError
-	if errors.As(err, &providerErr) {
-		switch providerErr.Kind {
-		case ProviderErrorRateLimited, ProviderErrorTransient, ProviderErrorAuthentication,
-			ProviderErrorInvalidRequest, ProviderErrorUnsupported, ProviderErrorUnknown:
-			return string(providerErr.Kind)
-		}
+	if errors.As(err, &providerErr) && providerErr.Kind.known() {
+		return string(providerErr.Kind)
 	}
 	return observe.ErrorTypeOther
+}
+
+// known reports whether k is one of the documented provider error kinds.
+func (k ProviderErrorKind) known() bool {
+	switch k {
+	case ProviderErrorRateLimited, ProviderErrorTransient, ProviderErrorAuthentication,
+		ProviderErrorInvalidRequest, ProviderErrorUnsupported, ProviderErrorUnknown:
+		return true
+	default:
+		return false
+	}
 }
