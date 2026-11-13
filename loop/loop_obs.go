@@ -16,7 +16,7 @@ import (
 // retryReason maps generation errors to stable retry classifications.
 func retryReason(err error) string {
 	if errors.Is(err, ErrAttemptTimeout) {
-		return "attempt_timeout"
+		return retryReasonAttemptTimeout
 	}
 	var providerErr *ai.ProviderError
 	if errors.As(err, &providerErr) && providerErr.Kind != "" {
@@ -26,6 +26,8 @@ func retryReason(err error) string {
 }
 
 const loopTracerName = "github.com/Samuelk0nrad/gai/loop"
+
+const retryReasonAttemptTimeout = "attempt_timeout"
 
 const (
 	toolOutcomeSuccess      = "success"
@@ -49,9 +51,13 @@ var (
 
 type loopRunState struct {
 	obs        *loopObserver
+	ctx        context.Context
 	sink       gai.ObservationSink
+	modelName  string
+	startedAt  time.Time
 	err        error
 	cancelErr  error
+	paused     bool
 	retryCount int
 	stats      loopRunStats
 }
@@ -88,6 +94,7 @@ type loopObserver struct {
 	span trace.Span
 }
 
+// newLoopRunState starts the run span and the state used for run metrics.
 func newLoopRunState(ctx context.Context, l *Loop) (context.Context, *loopRunState) {
 	maxIterations := 0
 	retryLimit := 0
@@ -115,9 +122,11 @@ func newLoopRunState(ctx context.Context, l *Loop) (context.Context, *loopRunSta
 		attribute.Int("loop.tool_count", toolCount),
 		attribute.String("ai.model", modelName),
 	)
-	return ctx, &loopRunState{obs: &loopObserver{span: span}, sink: sink}
+	return ctx, &loopRunState{obs: &loopObserver{span: span}, ctx: ctx, sink: sink, modelName: modelName, startedAt: time.Now()}
 }
 
+// startIteration starts an iteration span and records the latest iteration
+// number for run telemetry.
 func (s *loopRunState) startIteration(ctx context.Context, count int, attempt int) (context.Context, *loopIterationState) {
 	incrementalPrompt := false
 	var sink gai.ObservationSink
@@ -175,10 +184,20 @@ func (s *loopRunState) cancel(err error) {
 	}
 }
 
+// finish records run metrics and ends the run span.
+// markPaused records that the run stopped at a committed pause boundary.
+func (s *loopRunState) markPaused() {
+	if s != nil {
+		s.paused = true
+	}
+}
+
 func (s *loopRunState) finish() {
 	if s == nil || s.obs == nil {
 		return
 	}
+	outcome, errorType := runOutcome(s.err, s.cancelErr, s.paused)
+	recordRunMetrics(s.ctx, s.modelName, outcome, errorType, s.stats.IterationCount, time.Since(s.startedAt))
 	s.obs.finish(s.err, s.cancelErr, s.stats)
 }
 
@@ -235,6 +254,9 @@ func (s *loopIterationState) recordIteration(iteration Iteration) {
 	}
 }
 
+// markRetrying records a scheduled retry on the iteration span and
+// observation sink. The retry metric is recorded by scheduleRetry once the
+// next attempt is about to start.
 func (s *loopIterationState) markRetrying(retryCount int, reason string, delay time.Duration) {
 	if s == nil {
 		return
@@ -358,17 +380,28 @@ func processObservedToolDeadline(ctx context.Context, input ToolPolicyInput, too
 	execution := ToolExecution{State: ToolNotStarted, Decision: ToolDecision{Action: ToolAllow}}
 	return processObservedToolExecution(ctx, input, tools, processor, timeout, &execution, sinks...)
 }
+
+// processObservedToolExecution invokes one tool and its result processor while
+// recording a tool span, observation, and metric. The reported duration covers
+// tool execution only, not result processing. The tool metric is recorded as
+// soon as the tool returns and classifies the tool's own result, so a
+// ToolResultProcessor cannot change it.
 func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, tools []Tool, processor ToolResultProcessor, timeout time.Duration, execution *ToolExecution, sinks ...gai.ObservationSink) (response *ToolResult, duration time.Duration, processErr error) {
 	toolCtx, observation := startToolSpan(ctx, input.Call, sinks...)
 	observation.execution = execution
 	started := time.Now()
 	defer func() {
 		if panicValue := recover(); panicValue != nil {
+			// ToolRunning means the tool itself panicked. A processor panic
+			// happens after the tool returned, so duration already holds the
+			// tool's own execution time.
 			if execution.State == ToolRunning {
 				execution.State = ToolFailed
+				duration = time.Since(started)
+				recordToolMetrics(toolCtx, input.Call.Name, toolOutcomePanic, true, duration)
 			}
 			execution.Output = ToolOutputRejected
-			observation.finishPanic(time.Since(started))
+			observation.finishPanic(duration)
 			panic(panicValue)
 		}
 		if processErr != nil {
@@ -385,12 +418,17 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 	defer cancel()
 	execution.State = ToolRunning
 	result, invoked := invokeTool(invokeCtx, input.Call, tools)
+	duration = time.Since(started)
 	execution.State = ToolNotStarted
 	if invoked {
 		execution.State = invocationState(result.Err)
+		// Only invoked executions are timed: uninvoked calls have no
+		// execution latency, and only registered tools can be invoked, which
+		// keeps model-supplied tool names out of metric attributes.
+		outcome, _, toolErr := toolResult(&result)
+		recordToolMetrics(toolCtx, input.Call.Name, outcome, toolErr != nil, duration)
 	}
 	cancel()
-	duration = time.Since(started)
 	original := result
 	execution.Output = ToolOutputAccepted
 	if processor != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
@@ -210,7 +211,9 @@ type pendingToolCall struct {
 func (l *Loop) Run(ctx context.Context) <-chan Event {
 	events := make(chan Event, 32)
 
+	started := time.Now()
 	if err := l.Validate(); err != nil {
+		recordInvalidRunMetrics(ctx, l, started)
 		events <- ErrorEvent(err)
 		close(events)
 		return events

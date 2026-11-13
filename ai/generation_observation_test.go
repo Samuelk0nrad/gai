@@ -129,6 +129,27 @@ func TestGenerationObservationFailureRecordsOneException(t *testing.T) {
 	}
 }
 
+// TestGenerationObservationSpanErrorTypeMatchesMetrics checks that the span
+// reports the same bounded error.type as the inference duration metric.
+func TestGenerationObservationSpanErrorTypeMatchesMetrics(t *testing.T) {
+	recorder, restore := installGenerationSpanRecorder(t)
+	defer restore()
+
+	_, observation := StartGenerationObservation(context.Background(), AIRequest{}, GenerationConfig{Provider: "test", Model: "m"})
+	observation.Finish(GenerationResult{Err: &ProviderError{Kind: ProviderErrorRateLimited, Err: errors.New("limited")}})
+
+	span := generationSpan(t, recorder.Ended())
+	for _, attr := range span.Attributes() {
+		if attr.Key == "error.type" {
+			if got := attr.Value.AsString(); got != "rate_limited" {
+				t.Fatalf("span error.type = %q, want rate_limited", got)
+			}
+			return
+		}
+	}
+	t.Fatal("span has no error.type")
+}
+
 func TestGenerationObservationTimingBaselineDoesNotPredateSpan(t *testing.T) {
 	recorder, restore := installGenerationSpanRecorder(t)
 	defer restore()

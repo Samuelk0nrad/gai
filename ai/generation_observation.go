@@ -3,11 +3,11 @@ package ai
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sync"
 	"time"
 
 	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/internal/appclock"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -43,6 +43,7 @@ type GenerationObservation struct {
 	config     GenerationConfig
 	span       trace.Span
 	startedAt  time.Time
+	clock      *appclock.Clock
 	firstOnce  sync.Once
 	finishOnce sync.Once
 	mu         sync.Mutex
@@ -71,8 +72,11 @@ func StartGenerationObservation(ctx context.Context, req AIRequest, config Gener
 		attrs = append(attrs, attribute.String("langfuse.observation.model.parameters", parameters))
 	}
 	ctx, span := gai.StartClientOperationSpan(ctx, generationTracerName, "chat "+config.Model, "gen_ai.operation.name", "chat", attrs...)
+	// Sinks, redactors, and token sends under the returned context pause the
+	// clock, so inference duration excludes application time.
+	ctx, clock := appclock.With(ctx)
 	startedAt := time.Now()
-	return ctx, &GenerationObservation{ctx: ctx, config: config, span: span, startedAt: startedAt}
+	return ctx, &GenerationObservation{ctx: ctx, config: config, span: span, startedAt: startedAt, clock: clock}
 }
 
 // generationPromptLength counts selected system/user text without retaining
@@ -156,16 +160,23 @@ func (o *GenerationObservation) ObserveToken(token Token) {
 	}
 }
 
-// Finish records final metadata and ends the generation span. It is idempotent.
+// Finish records final metadata and generation metrics, then ends the
+// generation span. It is idempotent.
 func (o *GenerationObservation) Finish(result GenerationResult) {
 	if o == nil {
 		return
 	}
 	o.finishOnce.Do(func() {
+		// Measure before emitting so the final sink call is not attributed to
+		// the model; earlier sink, redactor, and token-send time is already
+		// excluded by the clock.
+		duration := o.clock.Since(o.startedAt)
 		o.mu.Lock()
 		result = mergeGenerationResults(o.stream, result)
 		o.mu.Unlock()
 		o.span.SetAttributes(generationResultAttributes(result)...)
+		// Record metrics before running the application sink, which may panic.
+		recordGenerationMetrics(o.ctx, o.config, result, duration)
 		gai.EmitObservation(o.ctx, o.config.Sink, gai.Observation{
 			Name:   "generation_finished",
 			Source: "ai:GenerationObservation",
@@ -258,7 +269,7 @@ func generationResultAttributes(result GenerationResult) []attribute.KeyValue {
 		attrs = append(attrs, attribute.Int("http.response.status_code", result.HTTPStatus))
 	}
 	if result.Err != nil {
-		attrs = append(attrs, attribute.String("error.type", fmt.Sprintf("%T", result.Err)))
+		attrs = append(attrs, attribute.String("error.type", TelemetryErrorType(result.Err)))
 	}
 	if result.Usage == nil {
 		return attrs

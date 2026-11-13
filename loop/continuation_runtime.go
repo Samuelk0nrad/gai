@@ -150,6 +150,7 @@ func (r *runExecution) pauseContinuation() {
 		sendLoopFailure(r.ctx, r.events, r.state, err)
 		return
 	}
+	r.state.markPaused()
 	event := Event{Type: EventPaused}
 	if d.state.Pending != nil {
 		event.IterationCount = d.state.Pending.Iteration
