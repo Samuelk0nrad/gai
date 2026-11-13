@@ -10,6 +10,8 @@ import (
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/internal/obstest"
 	"github.com/Samuelk0nrad/gai/loop"
+	"github.com/Samuelk0nrad/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/testutil/mocks"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
@@ -285,4 +287,31 @@ func TestLoopMetricsRecordRunsRejectedByValidation(t *testing.T) {
 			"error.type":           "invalid_configuration",
 		})
 	})
+}
+
+// TestLoopMetricsRecordPausedRuns checks that a durable run stopped at a pause
+// boundary is recorded as paused rather than success.
+func TestLoopMetricsRecordPausedRuns(t *testing.T) {
+	reader := obstest.InstallMetrics(t)
+	model := &mocks.MockModel{}
+	builder := modelinput.New(modelinput.Definition{PromptInput: modelinput.PromptInput{User: ai.TextParts("question")}})
+	l := loop.New(model, nil, builder, nil)
+	l.Continuation = &loop.ContinuationControl{
+		RunID: "run", ExecutionID: "execution", StageID: "primary",
+		Commit:         func(context.Context, loop.Continuation) error { return nil },
+		PauseRequested: func() bool { return true },
+	}
+
+	var last loop.Event
+	for event := range l.Run(context.Background()) {
+		last = event
+	}
+	if last.Type != loop.EventPaused {
+		t.Fatalf("last event = %s (%v), want paused", last.Type, last.Err)
+	}
+	attrs := map[string]string{"gai.loop.outcome": "paused"}
+	if name := model.Name(); name != "" {
+		attrs["gen_ai.request.model"] = name
+	}
+	requireRunMetrics(t, obstest.CollectMetrics(t, reader), 0, attrs)
 }

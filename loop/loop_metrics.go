@@ -22,6 +22,7 @@ const (
 	runOutcomeSuccess  = "success"
 	runOutcomeError    = "error"
 	runOutcomeCanceled = "canceled"
+	runOutcomePaused   = "paused"
 
 	// runErrorInvalidConfiguration classifies runs rejected by Loop.Validate
 	// and configuration errors found while preparing a run.
@@ -89,13 +90,16 @@ func recordRetryMetric(ctx context.Context, modelName string, retryErr error) {
 }
 
 // runOutcome returns the outcome and bounded error class of a finished run.
-// Cancellation takes precedence over a recorded error.
-func runOutcome(err, cancelErr error) (outcome, errorType string) {
+// Cancellation takes precedence over a recorded error, and both take
+// precedence over a pause.
+func runOutcome(err, cancelErr error, paused bool) (outcome, errorType string) {
 	switch {
 	case cancelErr != nil:
 		return runOutcomeCanceled, runErrorType(cancelErr)
 	case err != nil:
 		return runOutcomeError, runErrorType(err)
+	case paused:
+		return runOutcomePaused, ""
 	default:
 		return runOutcomeSuccess, ""
 	}

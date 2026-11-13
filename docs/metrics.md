@@ -187,9 +187,14 @@ A run that `Loop.Validate` rejects is recorded with outcome `error`,
 `error.type=invalid_configuration`, and zero iterations. The iteration count is
 the number of iterations the run started.
 
+A durable run that stops at a committed pause boundary is recorded with outcome
+`paused`. Each `Loop.Run` call records its own point. The duration covers only
+that call, while the iteration count is the latest iteration number of the
+whole durable run, so it includes iterations from calls before the resume.
+
 | Attribute | Values |
 |---|---|
-| `gai.loop.outcome` | `success`, `error`, `canceled` |
+| `gai.loop.outcome` | `success`, `error`, `canceled`, `paused` |
 | `gen_ai.request.model` | Loop model name, when the model reports one |
 | `error.type` | For `error` and `canceled` runs, see below |
 

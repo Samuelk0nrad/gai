@@ -57,6 +57,7 @@ type loopRunState struct {
 	startedAt  time.Time
 	err        error
 	cancelErr  error
+	paused     bool
 	retryCount int
 	stats      loopRunStats
 }
@@ -184,11 +185,18 @@ func (s *loopRunState) cancel(err error) {
 }
 
 // finish records run metrics and ends the run span.
+// markPaused records that the run stopped at a committed pause boundary.
+func (s *loopRunState) markPaused() {
+	if s != nil {
+		s.paused = true
+	}
+}
+
 func (s *loopRunState) finish() {
 	if s == nil || s.obs == nil {
 		return
 	}
-	outcome, errorType := runOutcome(s.err, s.cancelErr)
+	outcome, errorType := runOutcome(s.err, s.cancelErr, s.paused)
 	recordRunMetrics(s.ctx, s.modelName, outcome, errorType, s.stats.IterationCount, time.Since(s.startedAt))
 	s.obs.finish(s.err, s.cancelErr, s.stats)
 }
