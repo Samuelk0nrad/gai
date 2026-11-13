@@ -73,6 +73,28 @@ type uncomparableProvider struct {
 	tags []string
 }
 
+// wrappedProvider is a MeterProvider whose type is comparable but whose
+// value is not when Metadata holds an uncomparable value.
+type wrappedProvider struct {
+	metric.MeterProvider
+	Metadata any
+}
+
+// TestInstrumentsRebuildProvidersWithUncomparableValues checks that a provider
+// with a comparable type but an uncomparable value is not cached, so a later
+// lookup does not panic when it compares providers.
+func TestInstrumentsRebuildProvidersWithUncomparableValues(t *testing.T) {
+	builds := 0
+	instruments := newTestInstruments(&builds)
+
+	setMeterProvider(t, wrappedProvider{MeterProvider: noop.NewMeterProvider(), Metadata: []string{"a"}})
+	instruments.Get().counter.Add(context.Background(), 1)
+	instruments.Get().counter.Add(context.Background(), 1)
+	if builds != 2 {
+		t.Fatalf("builds = %d, want a rebuild for each uncomparable provider call", builds)
+	}
+}
+
 // TestInstrumentsRebuildUncomparableProviders checks that providers whose
 // identity cannot be compared are rebuilt without panicking, including after
 // a comparable provider was cached.

@@ -47,8 +47,9 @@ func NewInstruments[T any](scope string, build func(metric.Meter) T) *Instrument
 // cached path is one atomic load and one interface comparison.
 func (i *Instruments[T]) Get() T {
 	provider := otel.GetMeterProvider()
-	// Only comparable providers are cached, so this comparison cannot panic:
-	// equal dynamic types are comparable, and different types compare false.
+	// Only providers whose value is comparable are cached. Comparing against
+	// such a value cannot panic: every dynamic type it holds is comparable,
+	// and a field of a different dynamic type compares false.
 	if set := i.current.Load(); set != nil && set.provider == provider {
 		return set.value
 	}
@@ -61,10 +62,11 @@ func (i *Instruments[T]) Get() T {
 
 // comparableProvider reports whether provider can be compared with ==. This
 // covers pointer providers such as the SDK and value providers such as
-// noop.MeterProvider. A provider whose type holds slices, maps, or functions
-// is rebuilt on every call because its identity cannot be compared.
+// noop.MeterProvider. It checks the value, not only the type, because an
+// interface field can hold a slice, map, or function inside a comparable
+// type. A provider that cannot be compared is rebuilt on every call.
 func comparableProvider(provider metric.MeterProvider) bool {
-	return provider != nil && reflect.TypeOf(provider).Comparable()
+	return provider != nil && reflect.ValueOf(provider).Comparable()
 }
 
 // Float64Histogram creates a histogram, reporting creation errors through the
