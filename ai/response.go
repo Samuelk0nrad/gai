@@ -165,6 +165,10 @@ func (t Token) ToolCall() *ToolCall {
 // SendToken forwards token unless ctx is canceled. It returns false when the
 // receiver can no longer be reached because ctx ended.
 func SendToken(ctx context.Context, out chan<- Token, token Token) bool {
+	// Check first so a canceled producer stops even while out stays ready.
+	if ctx.Err() != nil {
+		return false
+	}
 	select {
 	case out <- token:
 		return true

@@ -43,6 +43,21 @@ func TestSendTokenStopsWhenContextCanceled(t *testing.T) {
 	}
 }
 
+// TestSendTokenStopsWhenContextCanceledAndReceiverReady checks that a canceled
+// producer stops even when the channel could accept the token.
+func TestSendTokenStopsWhenContextCanceledAndReceiverReady(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	out := make(chan ai.Token, 1)
+
+	if ai.SendToken(ctx, out, ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "ignored"}}) {
+		t.Fatal("expected canceled send to return false")
+	}
+	if len(out) != 0 {
+		t.Fatal("canceled send delivered the token")
+	}
+}
+
 func TestAIResponseAppendTokenSeparatesThoughtsAndToolCalls(t *testing.T) {
 	var response ai.AIResponse
 
