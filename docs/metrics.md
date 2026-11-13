@@ -174,7 +174,9 @@ the processed outcome instead, including `processing_error`.
 
 `gai.loop.retries` counts retries whose next attempt starts. A retry is not
 counted when the run ends first, for example when the context is canceled
-during the backoff wait or the `RetryEvent` cannot be delivered.
+during the backoff wait, the `RetryEvent` cannot be delivered, or a durable run
+pauses before the retry's attempt starts. Resuming that run does not count the
+retry either.
 
 | Attribute | Values |
 |---|---|

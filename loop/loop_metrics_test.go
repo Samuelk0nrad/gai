@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -314,4 +315,44 @@ func TestLoopMetricsRecordPausedRuns(t *testing.T) {
 		attrs["gen_ai.request.model"] = name
 	}
 	requireRunMetrics(t, obstest.CollectMetrics(t, reader), 0, attrs)
+}
+
+// TestLoopMetricsSkipRetryPausedBeforeNextAttempt checks that a retry is not
+// counted when a durable run pauses before the retry's attempt starts.
+func TestLoopMetricsSkipRetryPausedBeforeNextAttempt(t *testing.T) {
+	reader := obstest.InstallMetrics(t)
+	failure := ai.Token{Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("transient")}}
+	model := &scriptedStreamModel{sequences: [][]ai.Token{{failure}, {{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "done"}}}}}
+	builder := modelinput.New(modelinput.Definition{PromptInput: modelinput.PromptInput{User: ai.TextParts("question")}})
+	l := loop.New(model, nil, builder, nil)
+	l.RetryPolicy = &loop.RetryPolicy{MaxRetries: 1}
+	var pause atomic.Bool
+	l.Continuation = &loop.ContinuationControl{
+		RunID: "run", ExecutionID: "execution", StageID: "primary",
+		// Request the pause while the retry is committed, before the next
+		// attempt reaches the continuation boundary.
+		Commit: func(_ context.Context, c loop.Continuation) error {
+			if c.RetryCount > 0 {
+				pause.Store(true)
+			}
+			return nil
+		},
+		PauseRequested: pause.Load,
+	}
+
+	var last loop.Event
+	for event := range l.Run(context.Background()) {
+		last = event
+	}
+	if last.Type != loop.EventPaused {
+		t.Fatalf("last event = %s (%v), want paused", last.Type, last.Err)
+	}
+	metrics := obstest.CollectMetrics(t, reader)
+	if retries := obstest.SumPoints[int64](t, metrics, metricLoopRetries); len(retries) != 0 {
+		t.Fatalf("retry points = %#v, want none for a retry paused before its attempt", retries)
+	}
+	requireRunMetrics(t, metrics, 1, map[string]string{
+		"gai.loop.outcome":     "paused",
+		"gen_ai.request.model": "scripted-stream-model",
+	})
 }

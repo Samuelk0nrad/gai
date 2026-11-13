@@ -27,6 +27,24 @@ type runExecution struct {
 	counter                   ai.TokenCounter
 	checkpoint                *requestCheckpoint
 	continuationCancel        context.CancelFunc
+	// pendingRetry is the retry metric waiting for its next attempt to start.
+	pendingRetry *pendingRetryMetric
+}
+
+// pendingRetryMetric holds a retry until its next attempt passes the
+// continuation boundary, so a pause before that attempt does not count it.
+type pendingRetryMetric struct {
+	modelName string
+	err       error
+}
+
+// recordPendingRetry records the retry whose next attempt is about to start.
+func (r *runExecution) recordPendingRetry() {
+	if r.pendingRetry == nil {
+		return
+	}
+	recordRetryMetric(r.ctx, r.pendingRetry.modelName, r.pendingRetry.err)
+	r.pendingRetry = nil
 }
 
 type iterationOutcome uint8
@@ -216,6 +234,7 @@ func (r *runExecution) runIteration(iterationCount int) iterationOutcome {
 		if r.continuationBoundary() {
 			return iterationTerminal
 		}
+		r.recordPendingRetry()
 		attempt, outcome := r.runModelAttempt(iterationCount, attemptID, deferTokens)
 		switch outcome {
 		case attemptAccepted:
@@ -437,9 +456,10 @@ func (a *attemptExecution) scheduleRetry(retryErr error) attemptOutcome {
 		}
 	}
 	a.cancelAttempt()
-	// Count the retry only now that its next attempt will start; a failed
-	// RetryEvent send or a canceled backoff ends the run instead.
-	recordRetryMetric(a.run.ctx, a.modelName, retryErr)
+	// The retry is counted when its next attempt starts. A failed RetryEvent
+	// send, a canceled backoff, or a pause before that attempt ends the run
+	// first and leaves it uncounted.
+	a.run.pendingRetry = &pendingRetryMetric{modelName: a.modelName, err: retryErr}
 	a.finish(nil)
 	return attemptRetry
 }
