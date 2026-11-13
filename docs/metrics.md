@@ -90,8 +90,9 @@ attempt is a separate call, so every failed attempt is recorded with
 `gen_ai.client.inference.duration` measures time spent in the provider call.
 Time GAI spends running application code during the call is excluded:
 `ObservationSink` emits, content-capture redactors, and, for streaming calls,
-waiting for the application to accept tokens. A slow stream consumer is
-therefore not reported as model latency. If the consumer stalls while the
+waiting for the application to accept tokens. Overlapping application time,
+such as a redactor that runs inside a sink, is excluded once. A slow stream
+consumer is therefore not reported as model latency. If the consumer stalls while the
 provider keeps streaming into network buffers, the recorded duration can be
 shorter than the provider's wall-clock time.
 
