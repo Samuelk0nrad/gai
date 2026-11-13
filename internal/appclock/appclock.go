@@ -66,15 +66,17 @@ func Pause(ctx context.Context) (resume func()) {
 // measured so far, including a pause that is still open. It never returns a
 // negative duration. A nil Clock excludes nothing.
 func (c *Clock) Since(start time.Time) time.Duration {
-	elapsed := time.Since(start)
 	if c == nil {
-		return elapsed
+		return time.Since(start)
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	// One reading serves both terms, so a delay between them cannot subtract
+	// pause time that falls after the elapsed sample.
+	now := time.Now()
 	excluded := c.excluded
 	if c.open > 0 {
-		excluded += time.Since(c.openedAt)
+		excluded += now.Sub(c.openedAt)
 	}
-	c.mu.Unlock()
-	return max(elapsed-excluded, 0)
+	return max(now.Sub(start)-excluded, 0)
 }
