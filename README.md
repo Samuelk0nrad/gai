@@ -485,6 +485,17 @@ Use `AgentMiddlewareConfig.MapInput` to map a typed upstream `WorkflowResult` in
 
 Middleware is post-processing, not a supervisor or handoff runtime. Tool authorization and approval belong at the tool-execution boundary rather than in workflow middleware.
 
+## Checkpointed workflows
+
+Set `RunInput.Durability` to save an acknowledged checkpoint before each model
+attempt, tool dispatch and tool result. The application supplies compare-and-swap
+storage. `Workflow.RequestPause` stops at the next safe point, and `Agent.Resume`
+continues the same logical run from a saved checkpoint in a fresh process.
+Durable runs support deferred tool approvals, steering commands and explicit
+recovery of tool calls whose outcome is unknown. See the
+[checkpointed workflow guide](docs/checkpointed-workflows.md) for the storage
+contract and the [runnable example](examples/checkpointed-workflow).
+
 ## Observability
 
 GAI is observable out of the box with OpenTelemetry. Agent runs, workflows, model calls, and tool executions become spans; model call spans carry GenAI semantic-convention attributes for models, finish reasons, and token usage, plus time to first output; and low-cardinality metrics cover latency, token volume, retries, tool failures, and run length. Install any OpenTelemetry exporter, or use the built-in `observability/langfuse` provider to explore complete agent traces in Langfuse, filtered by user, session, tag, release, or environment.

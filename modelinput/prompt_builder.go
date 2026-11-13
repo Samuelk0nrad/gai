@@ -97,6 +97,7 @@ type Definition struct {
 // Builder assembles system instructions, dynamic context, user input, and loop
 // messages into one canonical model request.
 type Builder struct {
+	frozen             *Snapshot
 	SystemInstructions []Part
 	ContextSources     []ContextSource
 	ContextParts       []Part
@@ -269,6 +270,9 @@ func (b *Builder) AppendSystemInstructions(ctx context.Context, instructions ...
 }
 
 func (b *Builder) BuildContext(ctx context.Context) ([]Part, error) {
+	if b.frozen != nil {
+		return nil, ctx.Err()
+	}
 	return b.buildContext(ctx, nil)
 }
 
@@ -464,6 +468,14 @@ func (b *Builder) BuildRequest(ctx context.Context, conv Conversation) (ai.AIReq
 		return ai.AIRequest{}, err
 	}
 	var messages []ai.Message
+	if b.frozen != nil {
+		messages = ai.CloneMessages(b.frozen.Messages)
+		if conv != nil {
+			messages = append(messages, ai.CloneMessages(conv.Messages())...)
+		}
+		request := ai.AIRequest{Messages: messages}
+		return request, request.Validate()
+	}
 	if len(b.SystemInstructions) > 0 {
 		system, err := b.renderMessages(ctx, []Part{NewSystemPart(b.SystemInstructions)}, ai.RoleSystem, false)
 		if err != nil {

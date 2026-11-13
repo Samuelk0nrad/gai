@@ -284,6 +284,16 @@ func (o *middlewareObserver) Skipped(ctx context.Context, reason string) {
 	}
 }
 
+// Paused records a durable stage that stopped at a checkpoint and resumes later.
+func (o *middlewareObserver) Paused(ctx context.Context) {
+	if o == nil {
+		return
+	}
+	o.emit(ctx, "agent_middleware_paused", o.fields(), nil)
+	o.operation.Set(attribute.Bool("agent.middleware.paused", true))
+	o.operation.Finish(nil)
+}
+
 func (o *middlewareObserver) Finished(ctx context.Context, result AgentResult, applied bool) {
 	if o == nil {
 		return

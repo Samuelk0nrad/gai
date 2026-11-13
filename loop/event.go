@@ -34,7 +34,9 @@ const (
 	// EventToolError reports a failed tool completion.
 	EventToolError EventType = "tool_error"
 	// EventDone reports successful loop completion.
-	EventDone EventType = "done"
+	EventDone                EventType = "done"
+	EventPaused              EventType = "paused"
+	EventCheckpointCommitted EventType = "checkpoint_committed"
 	// EventError reports terminal loop failure.
 	EventError EventType = "error"
 	// EventCanceled reports terminal cancellation without treating it as a failure.
@@ -43,7 +45,10 @@ const (
 
 // Event is one item from the loop's ordered execution stream.
 type Event struct {
-	Type EventType
+	CheckpointRevision uint64
+	GenerationID       string
+	InvocationID       string
+	Type               EventType
 
 	IterationCount int
 	AttemptID      int
@@ -215,7 +220,7 @@ func cloneToolEventPayload(event Event) Event {
 
 // sendEvent copies mutable tool payloads and waits for delivery or cancellation.
 func sendEvent(ctx context.Context, ch chan<- Event, event Event) error {
-	event = cloneToolEventPayload(event)
+	event = cloneToolEventPayload(stampLoopEvent(ctx, event))
 	select {
 	case ch <- event:
 		return nil
