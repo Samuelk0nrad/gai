@@ -33,7 +33,9 @@ type StageResult struct {
 
 // WorkflowResult is a concurrency-safe snapshot of complete workflow state.
 type WorkflowResult struct {
-	Input RunInput
+	Status     WorkflowStatus
+	Checkpoint *Checkpoint
+	Input      RunInput
 
 	// Output is the canonical visible workflow output after middleware.
 	Output []OutputPart

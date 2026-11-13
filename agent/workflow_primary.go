@@ -84,7 +84,32 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 		defer close(w.primaryDone)
 		acc := primaryAccumulator{billedKey: make(map[attemptKey]struct{})}
 		deliver := w.sendEvent(ctx, out, Event{Type: EventStageStart, Source: source}, true)
+		if w.durability != nil {
+			stage := StageCheckpoint{Continuation: w.loop.Continuation.Initial}
+			prior := checkpointAgentResult(stage)
+			acc.accepted = prior.Iterations
+			acc.billed = prior.BilledUsage
+			if stage.Continuation != nil {
+				for _, g := range stage.Continuation.Generations {
+					acc.billedKey[attemptKey{source: 0, iteration: g.Iteration, attempt: g.Attempt}] = struct{}{}
+				}
+				if g := stage.Continuation.Pending; g != nil {
+					acc.billedKey[attemptKey{source: 0, iteration: g.Iteration, attempt: g.Attempt}] = struct{}{}
+				}
+			}
+			for _, event := range replayResultOutput(prior, source, stage.Continuation) {
+				acc.recordOutput(event)
+				if acc.acceptedAttempts == nil {
+					acc.acceptedAttempts = map[attemptKey]struct{}{}
+				}
+				acc.acceptedAttempts[eventAttemptKey(event)] = struct{}{}
+				deliver = w.sendEvent(ctx, out, event, deliver)
+			}
+		}
 		var terminal Event
+		// Iterations accepted in this execution, by generation, with their
+		// live diagnostics.
+		live := map[string]loop.Iteration{}
 		for low := range upstream {
 			event, emit := mapLoopEvent(low, source)
 			if emit {
@@ -99,7 +124,11 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 			case loop.EventIterationDone:
 				acc.account(event)
 				if low.Iteration != nil {
-					acc.accepted = append(acc.accepted, cloneIterations([]loop.Iteration{*low.Iteration})[0])
+					accepted := cloneIterations([]loop.Iteration{*low.Iteration})[0]
+					acc.accepted = append(acc.accepted, accepted)
+					if low.GenerationID != "" {
+						live[low.GenerationID] = accepted
+					}
 				}
 			case loop.EventError:
 				if low.Err != nil {
@@ -112,8 +141,14 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 				acc.cancelErr = low.Err
 				terminal = Event{Type: EventStageFinish, Source: source, IterationCount: low.IterationCount, AttemptID: low.AttemptID, RetryCount: low.RetryCount, PartCount: low.PartCount, Iteration: cloneIterationPtr(low.Iteration), StageOutcome: StageCanceled, Err: low.Err}
 				acc.account(terminal)
+			case loop.EventPaused:
+				acc.account(event)
+				terminal = Event{Type: EventStageFinish, Source: source, StageOutcome: StagePaused, IterationCount: low.IterationCount, AttemptID: low.AttemptID}
 			case loop.EventDone:
 				terminal = Event{Type: EventStageFinish, Source: source, StageOutcome: StageSucceeded}
+			}
+			if terminal.Type != "" {
+				terminal.GenerationID = low.GenerationID
 			}
 			if emit {
 				deliver = w.sendEvent(ctx, out, cloneEvent(event), deliver)
@@ -123,8 +158,33 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 			terminal = Event{Type: EventStageFinish, Source: source, StageOutcome: StageFailed, Err: errors.New("loop stream closed without a terminal event")}
 			acc.errs = append(acc.errs, terminal.Err)
 		}
+		if w.durability != nil {
+			// Committed steering is conversation input, not model output, and
+			// emits no generation event, so the accepted order comes from the
+			// checkpoint. Iterations accepted live keep their full diagnostics;
+			// only restored ones are rebuilt from saved state.
+			if c := w.durability.stage(w.stageID).Continuation; c != nil {
+				accepted := c.Iterations()
+				for i, g := range c.Generations {
+					if it, ok := live[g.ID]; ok {
+						accepted[i] = it
+					}
+				}
+				acc.accepted = accepted
+			}
+		}
 		primary := acc.result()
+		if w.durability != nil {
+			if err := w.finishDurablePrimary(ctx, primary, terminal.StageOutcome == StagePaused); err != nil {
+				primary.Errors = append(primary.Errors, err)
+				terminal.StageOutcome = StageFailed
+				terminal.Err = err
+			}
+		}
 		w.mu.Lock()
+		if terminal.StageOutcome == StagePaused {
+			w.result.Status = StatusPaused
+		}
 		w.result.Primary = cloneAgentResult(primary)
 		w.result.Usage = primary.Usage
 		w.result.BilledUsage = primary.BilledUsage
@@ -155,18 +215,21 @@ func (w *Workflow) canonicalPrimaryOutput() []Event {
 // mapLoopEvent converts loop lifecycle events into isolated workflow events.
 func mapLoopEvent(low loop.Event, source EventSource) (Event, bool) {
 	event := Event{
-		Source:         source,
-		IterationCount: low.IterationCount,
-		AttemptID:      low.AttemptID,
-		RetryCount:     low.RetryCount,
-		PartCount:      low.PartCount,
-		Iteration:      cloneIterationPtr(low.Iteration),
-		ToolCall:       cloneToolCall(low.ToolCall),
-		ToolResult:     cloneToolResult(low.ToolResult),
-		RetryReason:    low.RetryReason,
-		RetryDelay:     low.RetryDelay,
-		Duration:       low.Duration,
-		Err:            low.Err,
+		Source:             source,
+		GenerationID:       low.GenerationID,
+		InvocationID:       low.InvocationID,
+		CheckpointRevision: low.CheckpointRevision,
+		IterationCount:     low.IterationCount,
+		AttemptID:          low.AttemptID,
+		RetryCount:         low.RetryCount,
+		PartCount:          low.PartCount,
+		Iteration:          cloneIterationPtr(low.Iteration),
+		ToolCall:           cloneToolCall(low.ToolCall),
+		ToolResult:         cloneToolResult(low.ToolResult),
+		RetryReason:        low.RetryReason,
+		RetryDelay:         low.RetryDelay,
+		Duration:           low.Duration,
+		Err:                low.Err,
 	}
 	if low.ToolExecution != nil {
 		execution := *low.ToolExecution
@@ -177,6 +240,8 @@ func mapLoopEvent(low loop.Event, source EventSource) (Event, bool) {
 		event.ToolApproval = &request
 	}
 	switch low.Type {
+	case loop.EventCheckpointCommitted:
+		event.Type = EventCheckpointCommitted
 	case loop.EventToolApprovalRequested:
 		event.Type = EventToolApprovalRequested
 	case loop.EventToolApprovalResolved:
@@ -213,7 +278,7 @@ func mapLoopEvent(low loop.Event, source EventSource) (Event, bool) {
 	case loop.EventToolError:
 		event.Type = EventToolError
 	default:
-		return Event{}, false
+		return event, false
 	}
 	return event, true
 }

@@ -52,6 +52,9 @@ func (f ToolResultProcessorFunc) Process(ctx context.Context, input ToolPolicyIn
 // must not be run concurrently or reused without explicitly clearing that
 // state.
 type Loop struct {
+	// Continuation opts into synchronous semantic checkpoints. Nil preserves ordinary execution.
+	Continuation *ContinuationControl
+	durable      *durableLoop
 	// ObservationSink receives finalized normalized loop observations.
 	ObservationSink gai.ObservationSink
 	// Iterations contains completed model/tool interaction rounds.
@@ -348,7 +351,8 @@ func sendAttemptCanceled(ctx context.Context, events chan<- Event, state *loopRu
 	sendTerminalEvent(ctx, events, AttemptCanceledEvent(iterationCount, attemptID, retryCount, attemptIteration, err))
 }
 
-func sendTerminalEvent(_ context.Context, events chan<- Event, event Event) {
+func sendTerminalEvent(ctx context.Context, events chan<- Event, event Event) {
+	event = stampLoopEvent(ctx, event)
 	select {
 	case events <- event:
 	default:
