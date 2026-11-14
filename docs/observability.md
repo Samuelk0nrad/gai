@@ -167,7 +167,9 @@ On generation spans, assistant messages list their tool calls as `tool_calls`
 with only `id` and `name`, and tool messages carry only `tool_call_id` and
 `name`: tool arguments and results stay on tool spans under their own capture
 kinds. Reasoning and media are never included. A streaming generation exports
-the text and tool calls it streamed. Size, truncation, and redaction metadata is
+the text and tool calls its caller received. Where a provider detects
+text-encoded tool calls, as Mistral and Anthropic streams do, those calls appear
+as `tool_calls` entries, not as completion text. Size, truncation, and redaction metadata is
 recorded under `gai.gen_ai.input.*` and `gai.gen_ai.output.*` on generation
 spans, and under `loop.input.*` and `loop.output.*` on the run span. All content
 is set before the span ends, because Langfuse does not merge attributes from a
