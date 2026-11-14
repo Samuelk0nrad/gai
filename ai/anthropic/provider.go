@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Samuelk0nrad/gai"
@@ -30,6 +31,14 @@ type Provider struct {
 	debug      gai.ObservationSink
 	catalog    modelcatalog.ModelCatalogCache
 	catalogMu  syncutil.ContextMutex
+	// catalogThinking holds the thinking modes reported by the live catalog.
+	catalogThinking atomic.Pointer[map[string]thinkingMode]
+	// promptCache is the top-level cache_control sent when caching is on.
+	promptCache *antropic.CacheControlEphemeralParam
+	// fallbacks is the provider-wide server-side fallbacks value, or nil.
+	fallbacks any
+	// promptCacheErr reports an invalid WithPromptCaching TTL from Validate.
+	promptCacheErr error
 }
 
 var _ ai.Provider = (*Provider)(nil)
@@ -53,7 +62,7 @@ func (p *Provider) Validate() error {
 	if strings.TrimSpace(p.apiKey) == "" {
 		return ErrInvalidAPIKey
 	}
-	return nil
+	return p.promptCacheErr
 }
 
 func (p *Provider) Name() string { return "anthropic" }
@@ -81,6 +90,9 @@ func (p *Provider) TypedModel(name string, options ...ModelOption) (*Model, erro
 		if option != nil {
 			option(model)
 		}
+	}
+	if model.fallbacksErr != nil {
+		return nil, model.fallbacksErr
 	}
 	return model, nil
 }
@@ -111,37 +123,79 @@ func (p *Provider) ListModelDescriptors(ctx context.Context) ([]ai.ModelDescript
 	}
 	discoveryCtx, cancel := context.WithTimeout(ctx, modelDiscoveryTimeout)
 	defer cancel()
-	discovered, err := p.listModelCatalog(discoveryCtx)
+	discovered, thinking, err := p.listModelCatalog(discoveryCtx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		return p.fallbackDescriptors(), nil
 	}
+	p.catalogThinking.Store(&thinking)
 	p.catalog.Replace(discovered)
 	return p.effectiveDescriptors(discovered), nil
 }
 
-func (p *Provider) listModelCatalog(ctx context.Context) ([]ai.ModelDescriptor, error) {
+func (p *Provider) listModelCatalog(ctx context.Context) ([]ai.ModelDescriptor, map[string]thinkingMode, error) {
 	client := p.sdkClient()
 	pager := client.Models.ListAutoPaging(ctx, antropic.ModelListParams{})
 	descriptors := make([]ai.ModelDescriptor, 0)
+	thinking := map[string]thinkingMode{}
 	for pager.Next() {
 		model := pager.Current()
 		if name := strings.TrimSpace(model.ID); name != "" {
 			descriptors = append(descriptors, anthropicCatalogFacts(name, model))
+			if mode := anthropicCatalogThinking(model); mode != thinkingUnknown {
+				thinking[name] = mode
+			}
 		}
 	}
 	if err := pager.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return descriptors, nil
+	return descriptors, thinking, nil
+}
+
+// thinkingMode returns the thinking configuration model accepts. The live
+// catalog wins over the local table, and unknown models report thinkingUnknown.
+func (p *Provider) thinkingMode(model string) thinkingMode {
+	if modes := p.catalogThinking.Load(); modes != nil {
+		if mode, ok := (*modes)[model]; ok {
+			return mode
+		}
+	}
+	if facts, ok := lookupModelFacts(model); ok {
+		return facts.thinking
+	}
+	return thinkingUnknown
+}
+
+// anthropicCatalogThinking reads the accepted thinking types. A response that
+// omits either type cannot prove the other is the only one.
+func anthropicCatalogThinking(model antropic.ModelInfo) thinkingMode {
+	capabilities := model.Capabilities
+	if !capabilities.JSON.Thinking.Valid() || !capabilities.Thinking.JSON.Types.Valid() {
+		return thinkingUnknown
+	}
+	types := capabilities.Thinking.Types
+	if !types.JSON.Adaptive.Valid() || !types.Adaptive.JSON.Supported.Valid() || !types.JSON.Enabled.Valid() || !types.Enabled.JSON.Supported.Valid() {
+		return thinkingUnknown
+	}
+	switch adaptive, enabled := types.Adaptive.Supported, types.Enabled.Supported; {
+	case adaptive && enabled:
+		return thinkingAdaptiveOrBudget
+	case adaptive:
+		return thinkingAdaptive
+	case enabled:
+		return thinkingBudget
+	default:
+		return thinkingUnknown
+	}
 }
 
 func (p *Provider) fallbackDescriptors() []ai.ModelDescriptor {
 	descriptors := make([]ai.ModelDescriptor, 0, len(models))
 	for _, model := range models {
-		descriptors = append(descriptors, effectiveAnthropicDescriptor(model, ai.ModelDescriptor{Model: model}))
+		descriptors = append(descriptors, effectiveAnthropicDescriptor(model, ai.ModelDescriptor{Model: model}, p.thinkingMode(model)))
 	}
 	return descriptors
 }
@@ -149,7 +203,7 @@ func (p *Provider) fallbackDescriptors() []ai.ModelDescriptor {
 func (p *Provider) effectiveDescriptors(facts []ai.ModelDescriptor) []ai.ModelDescriptor {
 	descriptors := make([]ai.ModelDescriptor, 0, len(facts))
 	for _, fact := range facts {
-		descriptors = append(descriptors, effectiveAnthropicDescriptor(fact.Model, fact))
+		descriptors = append(descriptors, effectiveAnthropicDescriptor(fact.Model, fact, p.thinkingMode(fact.Model)))
 	}
 	return descriptors
 }
@@ -170,16 +224,21 @@ func anthropicCatalogFacts(name string, model antropic.ModelInfo) ai.ModelDescri
 			{ai.ReasoningEffortLow, capabilities.Effort.JSON.Low.Valid() && capabilities.Effort.Low.JSON.Supported.Valid(), capabilities.Effort.Low.Supported},
 			{ai.ReasoningEffortMedium, capabilities.Effort.JSON.Medium.Valid() && capabilities.Effort.Medium.JSON.Supported.Valid(), capabilities.Effort.Medium.Supported},
 			{ai.ReasoningEffortHigh, capabilities.Effort.JSON.High.Valid() && capabilities.Effort.High.JSON.Supported.Valid(), capabilities.Effort.High.Supported},
+			{ai.ReasoningEffortXHigh, capabilities.Effort.JSON.Xhigh.Valid() && capabilities.Effort.Xhigh.JSON.Supported.Valid(), capabilities.Effort.Xhigh.Supported},
+			{ai.ReasoningEffortMax, capabilities.Effort.JSON.Max.Valid() && capabilities.Effort.Max.JSON.Supported.Valid(), capabilities.Effort.Max.Supported},
 		}
-		allPresent := true
-		for _, effort := range efforts {
-			allPresent = allPresent && effort.present
+		// low, medium and high must all be present: a partial response cannot
+		// prove an omitted level is unsupported, so no restrictive list is
+		// published. xhigh and max were added later; a response that omits
+		// them predates them, so they count only when reported as supported.
+		const baseLevels = 3
+		basePresent := true
+		for _, effort := range efforts[:baseLevels] {
+			basePresent = basePresent && effort.present
 		}
-		// A partial provider response cannot prove omitted effort levels are
-		// unsupported, so preserve Unknown by publishing no restrictive list.
-		if allPresent {
+		if basePresent {
 			for _, effort := range efforts {
-				if effort.support {
+				if effort.present && effort.support {
 					facts.ReasoningEfforts = append(facts.ReasoningEfforts, effort.value)
 				}
 			}

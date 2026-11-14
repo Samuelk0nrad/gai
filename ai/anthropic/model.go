@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,12 @@ type Model struct {
 	client       *Provider
 	debug        gai.ObservationSink
 	messageHooks []func(*antropic.MessageNewParams) error
+	// fallbacks is the model's server-side fallbacks value. When fallbacksSet,
+	// it overrides the provider-wide option; nil then turns fallbacks off.
+	fallbacks    any
+	fallbacksSet bool
+	// fallbacksErr reports an invalid WithModelRefusalFallbacks from TypedModel.
+	fallbacksErr error
 }
 
 var _ ai.Model = (*Model)(nil)
@@ -39,10 +46,11 @@ func (m *Model) Close() error { return nil }
 func (m *Model) TokenCounter() ai.TokenCounter { return ai.TextTokenEstimator{} }
 
 func (m *Model) Descriptor() ai.ModelDescriptor {
+	mode := m.client.thinkingMode(m.name)
 	if facts, ok := m.client.catalog.Lookup(m.name); ok {
-		return effectiveAnthropicDescriptor(m.name, facts)
+		return effectiveAnthropicDescriptor(m.name, facts, mode)
 	}
-	return effectiveAnthropicDescriptor(m.name, ai.ModelDescriptor{Model: m.name})
+	return effectiveAnthropicDescriptor(m.name, ai.ModelDescriptor{Model: m.name}, mode)
 }
 
 func anthropicAdapterDescriptor(model string) ai.ModelDescriptor {
@@ -51,19 +59,28 @@ func anthropicAdapterDescriptor(model string) ai.ModelDescriptor {
 		Usage:           ai.FeatureSupportSupported, FinishReason: ai.FeatureSupportSupported, StreamingUsage: ai.FeatureSupportSupported,
 		JSONOutput: ai.FeatureSupportUnsupported, JSONSchemaOutput: ai.FeatureSupportSupported,
 		Reasoning: ai.FeatureSupportSupported, ReasoningEffort: ai.FeatureSupportSupported,
-		ReasoningEfforts: []ai.ReasoningEffort{ai.ReasoningEffortLow, ai.ReasoningEffortMedium, ai.ReasoningEffortHigh},
+		ReasoningEfforts: append([]ai.ReasoningEffort(nil), effortsAll...),
 	}
 }
 
+// anthropicLocalFacts describes a known model without the live catalog. The
+// catalog does not report tool-choice restrictions, so ToolChoiceModes always
+// comes from here.
 func anthropicLocalFacts(model string) ai.ModelDescriptor {
 	d := ai.ModelDescriptor{Model: model}
-	if supportsAdaptiveThinking(model) {
-		d.Reasoning = ai.FeatureSupportSupported
+	facts, ok := lookupModelFacts(model)
+	if !ok {
+		return d
+	}
+	d.Reasoning = ai.FeatureSupportSupported
+	if len(facts.efforts) > 0 {
 		d.ReasoningEffort = ai.FeatureSupportSupported
-		d.ReasoningEfforts = []ai.ReasoningEffort{ai.ReasoningEffortLow, ai.ReasoningEffortMedium, ai.ReasoningEffortHigh}
-	} else if isKnownModel(model) {
-		d.Reasoning = ai.FeatureSupportSupported
+		d.ReasoningEfforts = append([]ai.ReasoningEffort(nil), facts.efforts...)
+	} else {
 		d.ReasoningEffort = ai.FeatureSupportUnsupported
+	}
+	if !facts.forcedToolChoice {
+		d.ToolChoiceModes = []ai.ToolChoiceMode{ai.ToolChoiceAuto, ai.ToolChoiceNone}
 	}
 	return d
 }
@@ -75,12 +92,21 @@ func anthropicProviderDefaults(model string) ai.ModelDescriptor {
 	return d
 }
 
-func effectiveAnthropicDescriptor(model string, catalog ai.ModelDescriptor) ai.ModelDescriptor {
+// effectiveAnthropicDescriptor combines the adapter, local and catalog facts.
+// GAI sends effort only with adaptive thinking, so a budget-only model never
+// advertises effort, even when the catalog reports it: an effort-only request
+// would fail locally.
+func effectiveAnthropicDescriptor(model string, catalog ai.ModelDescriptor, mode thinkingMode) ai.ModelDescriptor {
 	adapter := anthropicAdapterDescriptor(model)
 	facts := anthropicProviderDefaults(model)
 	facts = modelcatalog.OverrideModelDescriptor(facts, anthropicLocalFacts(model))
 	facts = modelcatalog.OverrideModelDescriptor(facts, catalog)
-	return modelcatalog.IntersectModelDescriptors(adapter, facts)
+	descriptor := modelcatalog.IntersectModelDescriptors(adapter, facts)
+	if mode == thinkingBudget {
+		descriptor.ReasoningEffort = ai.FeatureSupportUnsupported
+		descriptor.ReasoningEfforts = nil
+	}
+	return descriptor
 }
 
 // sdkClient is deliberately created from the provider's fields for each call.
@@ -96,7 +122,13 @@ func (p *Provider) sdkClient() antropic.Client {
 	)
 }
 
-func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor) (antropic.MessageNewParams, error) {
+// requestRules are the model rules that ai.ModelDescriptor cannot express.
+type requestRules struct {
+	thinking              thinkingMode
+	midConversationSystem bool
+}
+
+func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor, rules requestRules) (antropic.MessageNewParams, error) {
 	req = req.Copy()
 	err := req.Validate()
 	if err != nil {
@@ -120,7 +152,10 @@ func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor) (antr
 			continue
 		}
 		if conversationStarted {
-			return antropic.MessageNewParams{}, fmt.Errorf("%w: Anthropic only supports leading system messages", ai.ErrUnsupportedCapability)
+			if !rules.midConversationSystem {
+				return antropic.MessageNewParams{}, fmt.Errorf("%w: Anthropic model %s only supports leading system messages", ai.ErrUnsupportedCapability, descriptor.Model)
+			}
+			continue
 		}
 		if err := unsupportedExtensions(message.Extensions); err != nil {
 			return antropic.MessageNewParams{}, err
@@ -138,7 +173,7 @@ func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor) (antr
 			p.System = append(p.System, antropic.TextBlockParam{Text: text})
 		}
 	}
-	msgs, err := mapNativeMessages(req.Messages)
+	msgs, err := mapNativeMessages(req.Messages, rules.midConversationSystem)
 	if err != nil {
 		return antropic.MessageNewParams{}, err
 	}
@@ -173,12 +208,19 @@ func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor) (antr
 			p.OutputConfig.Effort = antropic.OutputConfigEffortMedium
 		case ai.ReasoningEffortHigh:
 			p.OutputConfig.Effort = antropic.OutputConfigEffortHigh
+		case ai.ReasoningEffortXHigh:
+			p.OutputConfig.Effort = antropic.OutputConfigEffortXhigh
+		case ai.ReasoningEffortMax:
+			p.OutputConfig.Effort = antropic.OutputConfigEffortMax
 		default:
 			return antropic.MessageNewParams{}, fmt.Errorf("%w: %s", ai.ErrUnsupportedCapability, req.Reasoning.Effort)
 		}
 	}
 	if req.Reasoning.Enabled || req.Reasoning.IncludeThoughts || req.Reasoning.BudgetTokens > 0 || req.Reasoning.Effort != "" {
 		if req.Reasoning.BudgetTokens > 0 {
+			if rules.thinking == thinkingAdaptive {
+				return antropic.MessageNewParams{}, fmt.Errorf("%w: anthropic model %s accepts only adaptive thinking; set Reasoning.Effort instead of Reasoning.BudgetTokens", ai.ErrUnsupportedCapability, descriptor.Model)
+			}
 			if req.Reasoning.BudgetTokens < minThinkingTokens || req.Reasoning.BudgetTokens >= maxTokens {
 				return antropic.MessageNewParams{}, fmt.Errorf("%w: anthropic thinking budget must be at least %d and less than max_tokens", ai.ErrUnsupportedCapability, minThinkingTokens)
 			}
@@ -189,14 +231,14 @@ func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor) (antr
 				thinking.OfEnabled.Display = antropic.ThinkingConfigEnabledDisplayOmitted
 			}
 			p.Thinking = thinking
-		} else if descriptor.ReasoningEffort != ai.FeatureSupportUnsupported {
+		} else if adaptiveThinking(rules.thinking, descriptor) {
 			display := antropic.ThinkingConfigAdaptiveDisplayOmitted
 			if req.Reasoning.IncludeThoughts {
 				display = antropic.ThinkingConfigAdaptiveDisplaySummarized
 			}
 			p.Thinking = antropic.ThinkingConfigParamUnion{OfAdaptive: &antropic.ThinkingConfigAdaptiveParam{Display: display}}
 		} else {
-			return antropic.MessageNewParams{}, fmt.Errorf("%w: anthropic adaptive thinking is unsupported by %s", ai.ErrUnsupportedCapability, descriptor.Model)
+			return antropic.MessageNewParams{}, fmt.Errorf("%w: anthropic adaptive thinking is unsupported by %s; set Reasoning.BudgetTokens", ai.ErrUnsupportedCapability, descriptor.Model)
 		}
 		if p.ToolChoice.OfAny != nil || p.ToolChoice.OfTool != nil {
 			return antropic.MessageNewParams{}, fmt.Errorf("%w: anthropic thinking is incompatible with required tool choice", ai.ErrUnsupportedCapability)
@@ -205,8 +247,27 @@ func buildMessagesRequest(req ai.AIRequest, descriptor ai.ModelDescriptor) (antr
 	return p, nil
 }
 
-func mapNativeMessages(messages []ai.Message) ([]antropic.MessageParam, error) {
+// adaptiveThinking reports whether a request without a budget can use adaptive
+// thinking. Models GAI knows nothing about fall back to effort support, which
+// is how the API introduced adaptive thinking.
+func adaptiveThinking(mode thinkingMode, descriptor ai.ModelDescriptor) bool {
+	switch mode {
+	case thinkingAdaptive, thinkingAdaptiveOrBudget:
+		return true
+	case thinkingBudget:
+		return false
+	default:
+		return descriptor.ReasoningEffort != ai.FeatureSupportUnsupported
+	}
+}
+
+// mapNativeMessages maps the conversation. Leading system messages belong to
+// the top-level system field and are skipped. Later system messages become
+// role "system" entries when midConversationSystem is set; callers reject
+// them otherwise.
+func mapNativeMessages(messages []ai.Message, midConversationSystem bool) ([]antropic.MessageParam, error) {
 	out := make([]antropic.MessageParam, 0, len(messages))
+	conversationStarted := false
 	toolResults := []antropic.ContentBlockParamUnion{}
 	flushToolResults := func() {
 		if len(toolResults) > 0 {
@@ -222,10 +283,31 @@ func mapNativeMessages(messages []ai.Message) ([]antropic.MessageParam, error) {
 			return nil, err
 		}
 		if m.Role == ai.RoleSystem {
+			if !conversationStarted || !midConversationSystem {
+				continue
+			}
+			blocks, err := systemBlocks(m)
+			if err != nil {
+				return nil, err
+			}
+			flushToolResults()
+			if len(blocks) == 0 {
+				continue
+			}
+			if last := len(out) - 1; last >= 0 && out[last].Role == antropic.MessageParamRoleSystem {
+				out[last].Content = append(out[last].Content, blocks...)
+			} else {
+				out = append(out, antropic.MessageParam{Role: antropic.MessageParamRoleSystem, Content: blocks})
+			}
 			continue
 		}
+		conversationStarted = true
+		parts := m.Parts
+		if m.Role == ai.RoleAssistant {
+			parts = dropPreFallbackState(parts)
+		}
 		blocks := []antropic.ContentBlockParamUnion{}
-		for _, part := range m.Parts {
+		for _, part := range parts {
 			switch part.Kind {
 			case ai.ContentText, ai.ContentJSON:
 				if err := unsupportedExtensions(part.Extensions); err != nil {
@@ -279,6 +361,14 @@ func mapNativeMessages(messages []ai.Message) ([]antropic.MessageParam, error) {
 				}
 				blocks = append(blocks, antropic.NewToolResultBlock(r.ToolCallID, content.String(), r.IsError))
 			case ai.ContentExtension:
+				if hasAnthropicExtension(part.Extensions, fallbackExtension) {
+					raw, err := anthropicRawExtension(part.Extensions, fallbackExtension)
+					if err != nil {
+						return nil, err
+					}
+					blocks = append(blocks, param.Override[antropic.ContentBlockParamUnion](raw))
+					continue
+				}
 				data, err := anthropicExtension(part.Extensions, "redacted_thinking")
 				if err != nil {
 					return nil, err
@@ -305,7 +395,143 @@ func mapNativeMessages(messages []ai.Message) ([]antropic.MessageParam, error) {
 		}
 	}
 	flushToolResults()
+	if err := validateSystemPlacement(out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// systemBlocks maps a mid-conversation system message to text blocks.
+func systemBlocks(m ai.Message) ([]antropic.ContentBlockParamUnion, error) {
+	blocks := make([]antropic.ContentBlockParamUnion, 0, len(m.Parts))
+	for _, part := range m.Parts {
+		if err := unsupportedExtensions(part.Extensions); err != nil {
+			return nil, err
+		}
+		switch part.Kind {
+		case ai.ContentText:
+			blocks = append(blocks, antropic.NewTextBlock(part.Text))
+		case ai.ContentJSON:
+			blocks = append(blocks, antropic.NewTextBlock(string(part.JSON)))
+		default:
+			return nil, fmt.Errorf("%w: Anthropic system content %q", ai.ErrUnsupportedCapability, part.Kind)
+		}
+	}
+	return blocks, nil
+}
+
+// validateSystemPlacement applies the API's rule for mid-conversation system
+// messages: each follows a user turn (tool results count) and is either last
+// or followed by an assistant turn.
+func validateSystemPlacement(messages []antropic.MessageParam) error {
+	for i, message := range messages {
+		if message.Role != antropic.MessageParamRoleSystem {
+			continue
+		}
+		if i == 0 || messages[i-1].Role != antropic.MessageParamRoleUser {
+			return fmt.Errorf("%w: Anthropic mid-conversation system messages must follow a user or tool message", ai.ErrUnsupportedCapability)
+		}
+		if i+1 < len(messages) && messages[i+1].Role != antropic.MessageParamRoleAssistant {
+			return fmt.Errorf("%w: Anthropic mid-conversation system messages must be last or followed by an assistant message", ai.ErrUnsupportedCapability)
+		}
+	}
+	return nil
+}
+
+const fallbackExtension = "fallback"
+
+// dropPreFallbackState removes the reasoning, redacted reasoning and tool
+// calls that precede the last fallback block. They belong to the declined
+// attempt: the API rejects them on replay, and a tool call before the switch
+// was never part of the answer the fallback model produced. Text and the
+// fallback blocks stay in place.
+func dropPreFallbackState(parts []ai.ContentPart) []ai.ContentPart {
+	last := -1
+	for i, part := range parts {
+		if part.Kind == ai.ContentExtension && hasAnthropicExtension(part.Extensions, fallbackExtension) {
+			last = i
+		}
+	}
+	if last < 0 {
+		return parts
+	}
+	kept := make([]ai.ContentPart, 0, len(parts))
+	for i, part := range parts {
+		if i < last && isAttemptState(part) {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	return kept
+}
+
+// dropDeclinedToolCalls removes tool calls from a response before a fallback
+// block. Reasoning stays in the response, as it does in a stream, which cannot
+// hold it back without losing streaming; dropPreFallbackState removes it on
+// replay.
+func dropDeclinedToolCalls(parts []ai.ContentPart) []ai.ContentPart {
+	kept := parts[:0]
+	for _, part := range parts {
+		if part.Kind != ai.ContentToolCall {
+			kept = append(kept, part)
+		}
+	}
+	return kept
+}
+
+func isAttemptState(part ai.ContentPart) bool {
+	switch part.Kind {
+	case ai.ContentReasoning, ai.ContentToolCall:
+		return true
+	case ai.ContentExtension:
+		return hasAnthropicExtension(part.Extensions, "redacted_thinking")
+	default:
+		return false
+	}
+}
+
+func hasAnthropicExtension(extensions []ai.Extension, kind string) bool {
+	for _, ext := range extensions {
+		if ext.Namespace == "anthropic" && ext.Type == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// anthropicRawExtension returns the JSON data of the anthropic extension kind,
+// or nil when it is absent. Any other required extension is rejected.
+func anthropicRawExtension(extensions []ai.Extension, kind string) (json.RawMessage, error) {
+	var value json.RawMessage
+	for _, ext := range extensions {
+		if ext.Namespace == "anthropic" && ext.Type == kind {
+			if !json.Valid(ext.Data) {
+				return nil, fmt.Errorf("decode Anthropic %s: invalid JSON", kind)
+			}
+			value = append(json.RawMessage(nil), ext.Data...)
+		} else if ext.Required {
+			return nil, fmt.Errorf("%w: Anthropic extension %s/%s", ai.ErrUnsupportedCapability, ext.Namespace, ext.Type)
+		}
+	}
+	return value, nil
+}
+
+// fallbackPart preserves a fallback block so it replays where it appeared.
+func fallbackPart(raw string) ai.ContentPart {
+	return ai.ContentPart{Kind: ai.ContentExtension, Extensions: []ai.Extension{{Namespace: "anthropic", Type: fallbackExtension, Data: json.RawMessage(raw), Required: true}}}
+}
+
+// fallbackTarget returns the model a fallback block switched to.
+func fallbackTarget(raw string) string {
+	var block struct {
+		To struct {
+			Model string `json:"model"`
+		} `json:"to"`
+	}
+	if json.Unmarshal([]byte(raw), &block) != nil {
+		return ""
+	}
+	return block.To.Model
 }
 
 func unsupportedExtensions(extensions []ai.Extension) error {
@@ -317,16 +543,15 @@ func unsupportedExtensions(extensions []ai.Extension) error {
 	return nil
 }
 
+// anthropicExtension returns the string value of the anthropic extension kind.
 func anthropicExtension(extensions []ai.Extension, kind string) (string, error) {
+	raw, err := anthropicRawExtension(extensions, kind)
+	if err != nil || raw == nil {
+		return "", err
+	}
 	var value string
-	for _, ext := range extensions {
-		if ext.Namespace == "anthropic" && ext.Type == kind {
-			if err := json.Unmarshal(ext.Data, &value); err != nil {
-				return "", fmt.Errorf("decode Anthropic %s: %w", kind, err)
-			}
-		} else if ext.Required {
-			return "", fmt.Errorf("%w: Anthropic extension %s/%s", ai.ErrUnsupportedCapability, ext.Namespace, ext.Type)
-		}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", fmt.Errorf("decode Anthropic %s: %w", kind, err)
 	}
 	return value, nil
 }
@@ -424,7 +649,8 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		generationResult.HTTPStatus = anthropicHTTPStatus(err)
 		observation.Finish(generationResult)
 	}()
-	message, err := client.Messages.New(ctx, payload)
+	options, _ := m.requestOptions(req, payload)
+	message, err := client.Messages.New(ctx, payload, options...)
 	if err != nil {
 		return nil, localError(err)
 	}
@@ -447,7 +673,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	if message.JSON.Usage.Valid() {
 		generationResult.Usage = &usage
 	}
-	if err := anthropicTerminalError(string(message.StopReason)); err != nil {
+	if err := anthropicTerminalError(string(message.StopReason), message.StopDetails); err != nil {
 		return nil, err
 	}
 	if gai.ObservationEnabled(ctx, m.debug) {
@@ -461,8 +687,12 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	return response, nil
 }
 
+// mapCanonicalMessageContent maps a response. A malformed tool call fails the
+// response unless a later fallback block shows it belonged to a declined
+// attempt, matching GenerateStream.
 func mapCanonicalMessageContent(blocks []antropic.ContentBlockUnion) (ai.Message, error) {
 	message := ai.Message{Role: ai.RoleAssistant}
+	var toolErr error
 	for i, block := range blocks {
 		switch block.Type {
 		case "text":
@@ -471,17 +701,28 @@ func mapCanonicalMessageContent(blocks []antropic.ContentBlockUnion) (ai.Message
 			message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentReasoning, Text: block.Thinking, Extensions: anthropicExtensions("thinking_signature", block.Signature)})
 		case "redacted_thinking":
 			message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentExtension, Extensions: anthropicExtensions("redacted_thinking", block.Data)})
+		case fallbackExtension:
+			raw := block.RawJSON()
+			if !json.Valid([]byte(raw)) {
+				return ai.Message{}, fmt.Errorf("content[%d]: fallback block is invalid JSON", i)
+			}
+			// The declined attempt's tool calls, valid or not, are dropped.
+			toolErr = nil
+			message.Parts = dropDeclinedToolCalls(message.Parts)
+			message.Parts = append(message.Parts, fallbackPart(raw))
 		case "tool_use":
 			name := strings.TrimSpace(block.Name)
 			if name == "" {
-				return ai.Message{}, fmt.Errorf("content[%d]: tool use name empty", i)
+				toolErr = cmp.Or(toolErr, fmt.Errorf("content[%d]: tool use name empty", i))
+				continue
 			}
 			args := block.Input
 			if len(args) == 0 || string(args) == "null" {
 				args = json.RawMessage("{}")
 			}
 			if !json.Valid(args) {
-				return ai.Message{}, fmt.Errorf("content[%d]: tool use input is invalid JSON", i)
+				toolErr = cmp.Or(toolErr, fmt.Errorf("content[%d]: tool use input is invalid JSON", i))
+				continue
 			}
 			id := strings.TrimSpace(block.ID)
 			if id == "" {
@@ -491,6 +732,9 @@ func mapCanonicalMessageContent(blocks []antropic.ContentBlockUnion) (ai.Message
 		default:
 			return ai.Message{}, fmt.Errorf("%w: Anthropic output %q", ai.ErrUnsupportedCapability, block.Type)
 		}
+	}
+	if toolErr != nil {
+		return ai.Message{}, toolErr
 	}
 	if len(message.Parts) == 0 {
 		message.Parts = ai.TextParts("")
@@ -544,6 +788,32 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			streamErr = ctx.Err()
 			return false
 		}
+		// With fallbacks on, a fallback block can follow a tool call of the
+		// declined attempt. From the first tool_use on, parts are held in
+		// order so those calls can be dropped before anyone runs them.
+		fallbacksOn := false
+		holding := false
+		var held []ai.Token
+		emitPart := func(token ai.Token) bool {
+			if holding {
+				held = append(held, token)
+				return true
+			}
+			return emit(token)
+		}
+		release := func(dropToolCalls bool) bool {
+			pending := held
+			held, holding = nil, false
+			for _, token := range pending {
+				if dropToolCalls && token.Part != nil && token.Part.Kind == ai.ContentToolCall {
+					continue
+				}
+				if !emit(token) {
+					return false
+				}
+			}
+			return true
+		}
 		req = req.Copy()
 		if err := ai.ValidateModelRequest(m, req); err != nil {
 			streamErr = err
@@ -560,11 +830,14 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		generationCtx, startedObservation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "anthropic", Model: m.name, Streaming: true, Sink: m.debug})
 		observation = startedObservation
 		ctx = generationCtx
-		stream := client.Messages.NewStreaming(generationCtx, payload)
+		options, on := m.requestOptions(req, payload)
+		fallbacksOn = on
+		stream := client.Messages.NewStreaming(generationCtx, payload, options...)
 		defer stream.Close()
 		blocks := map[int64]*streamBlock{}
 		var pendingToolErr error
 		completion := ai.Completion{Provider: "anthropic"}
+		var stopDetails antropic.RefusalStopDetails
 		for stream.Next() {
 			event := stream.Current()
 			switch event.Type {
@@ -591,6 +864,10 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					completion.Usage.CacheCreationTokens = int(event.Usage.CacheCreationInputTokens)
 				}
 				completion.FinishReason = string(event.Delta.StopReason)
+				stopDetails = event.Delta.StopDetails
+				if !release(false) {
+					return
+				}
 				completion.Raw = append(completion.Raw[:0], []byte(event.RawJSON())...)
 				snapshot := completion
 				snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
@@ -603,19 +880,39 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				block.signature.WriteString(event.ContentBlock.Signature)
 				switch event.ContentBlock.Type {
 				case "text":
-					if event.ContentBlock.Text != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.ContentBlock.Text}}) {
+					if event.ContentBlock.Text != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.ContentBlock.Text}}) {
 						return
 					}
 				case "thinking":
-					if event.ContentBlock.Thinking != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: event.ContentBlock.Thinking}}) {
+					if event.ContentBlock.Thinking != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: event.ContentBlock.Thinking}}) {
 						return
 					}
 				case "redacted_thinking":
 					part := ai.ContentPart{Kind: ai.ContentExtension, Extensions: anthropicExtensions("redacted_thinking", event.ContentBlock.Data)}
-					if !emit(ai.Token{Part: &part}) {
+					if !emitPart(ai.Token{Part: &part}) {
 						return
 					}
 				case "tool_use":
+					holding = holding || fallbacksOn
+				case fallbackExtension:
+					// The declined attempt's tool calls never reach the caller,
+					// and its stream-level tool errors no longer apply.
+					raw := event.ContentBlock.RawJSON()
+					if !json.Valid([]byte(raw)) {
+						streamErr = errors.New("anthropic stream fallback block is invalid JSON")
+						break
+					}
+					pendingToolErr = nil
+					if !release(true) {
+						return
+					}
+					if model := fallbackTarget(raw); model != "" {
+						completion.Model = model
+					}
+					part := fallbackPart(raw)
+					if !emit(ai.Token{Part: &part}) {
+						return
+					}
 				default:
 					streamErr = fmt.Errorf("%w: Anthropic stream content %q", ai.ErrUnsupportedCapability, event.ContentBlock.Type)
 				}
@@ -627,11 +924,11 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				}
 				switch event.Delta.Type {
 				case "text_delta":
-					if event.Delta.Text != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.Delta.Text}}) {
+					if event.Delta.Text != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.Delta.Text}}) {
 						return
 					}
 				case "thinking_delta":
-					if event.Delta.Thinking != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: event.Delta.Thinking}}) {
+					if event.Delta.Thinking != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: event.Delta.Thinking}}) {
 						return
 					}
 				case "signature_delta":
@@ -648,7 +945,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				delete(blocks, event.Index)
 				if block.typ == "thinking" && block.signature.Len() > 0 {
 					part := ai.ContentPart{Kind: ai.ContentReasoning, Extensions: anthropicExtensions("thinking_signature", block.signature.String())}
-					if !emit(ai.Token{Part: &part}) {
+					if !emitPart(ai.Token{Part: &part}) {
 						return
 					}
 				}
@@ -660,7 +957,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 						}
 						continue
 					}
-					if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: call}}) {
+					if !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: call}}) {
 						return
 					}
 				}
@@ -675,8 +972,13 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		if streamErr == nil && len(blocks) != 0 {
 			streamErr = fmt.Errorf("anthropic stream ended with %d open content block(s)", len(blocks))
 		}
+		// A stream that ends cleanly without message_delta still delivers the
+		// parts held back for a possible fallback.
+		if streamErr == nil && !release(false) {
+			return
+		}
 		if streamErr == nil {
-			if terminalErr := anthropicTerminalError(completion.FinishReason); terminalErr != nil {
+			if terminalErr := anthropicTerminalError(completion.FinishReason, stopDetails); terminalErr != nil {
 				streamErr = terminalErr
 			} else {
 				streamErr = pendingToolErr
@@ -687,15 +989,6 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		}
 	}()
 	return ai.DetectToolCallsInStream(ctx, out, m.debug)
-}
-
-func anthropicTerminalError(reason string) error {
-	switch reason {
-	case "", "end_turn", "stop_sequence", "tool_use":
-		return nil
-	default:
-		return &ai.TerminalError{Provider: "anthropic", Reason: reason}
-	}
 }
 
 type streamBlock struct {

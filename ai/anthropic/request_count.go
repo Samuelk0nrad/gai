@@ -7,6 +7,7 @@ import (
 
 	"github.com/Samuelk0nrad/gai/ai"
 	sdk "github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
 var _ ai.InputTokenCounter = (*Model)(nil)
@@ -40,7 +41,11 @@ func (m *Model) CountInputTokens(ctx context.Context, request ai.AIRequest) (int
 		countParams.Tools = append(countParams.Tools, sdk.MessageCountTokensToolUnionParam(tool))
 	}
 	client := m.client.sdkClient()
-	count, err := client.Messages.CountTokens(ctx, countParams)
+	var options []option.RequestOption
+	if hasFallbackHistory(request.Messages) {
+		options = append(options, option.WithHeaderAdd(anthropicBetaHeader, fallbackBetaHeader))
+	}
+	count, err := client.Messages.CountTokens(ctx, countParams, options...)
 	if err != nil {
 		return 0, classifyProviderError(err)
 	}

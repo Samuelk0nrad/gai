@@ -45,7 +45,7 @@ func TestCanonicalLeadingSystemMessagesPreserveOrder(t *testing.T) {
 		ai.TextMessage(ai.RoleUser, "question"),
 		ai.TextMessage(ai.RoleAssistant, "answer"),
 	}}
-	params, err := buildMessagesRequest(req, ai.ModelDescriptor{Model: "test"})
+	params, err := buildMessagesRequest(req, ai.ModelDescriptor{Model: "test"}, requestRules{})
 	if err != nil {
 		t.Fatal(err)
 	}
