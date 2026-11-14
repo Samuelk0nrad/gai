@@ -25,7 +25,7 @@ The optional `observability/langfuse` package provides a batched OTLP tracer pro
 
 ```go
 provider, err := langfuse.NewTracerProvider(ctx, langfuse.Config{
-  Endpoint:    "https://cloud.langfuse.com/api/public/otel",
+  Endpoint:    "https://cloud.langfuse.com/api/public/otel/v1/traces",
   PublicKey:   os.Getenv("LANGFUSE_PUBLIC_KEY"),
   SecretKey:   os.Getenv("LANGFUSE_SECRET_KEY"),
   ServiceName: "my-agent-service",
@@ -40,6 +40,8 @@ defer func() {
 }()
 otel.SetTracerProvider(provider)
 ```
+
+`Endpoint` is the full OTLP traces URL. The bare `/api/public/otel` base, for example `https://cloud.langfuse.com/api/public/otel` or a self-hosted `http://localhost:3000/api/public/otel`, is also accepted: `/v1/traces` is appended to it. Any other path is used as given.
 
 The caller owns provider shutdown so the final batch can be flushed and any export error can be observed.
 

@@ -18,8 +18,10 @@ import (
 
 // Config configures Langfuse's OTLP trace exporter.
 type Config struct {
-	// Endpoint is the Langfuse OTLP endpoint, for example
-	// https://cloud.langfuse.com/api/public/otel.
+	// Endpoint is the Langfuse OTLP traces endpoint, for example
+	// https://cloud.langfuse.com/api/public/otel/v1/traces. The bare
+	// /api/public/otel base is also accepted; /v1/traces is appended to it.
+	// Any other path is used as given.
 	Endpoint string
 	// PublicKey and SecretKey are the Langfuse project credentials.
 	PublicKey string
@@ -41,6 +43,7 @@ func NewTracerProvider(ctx context.Context, config Config) (*sdktrace.TracerProv
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil, fmt.Errorf("invalid langfuse endpoint %q", endpoint)
 	}
+	endpoint = tracesEndpoint(parsed)
 	publicKey := strings.TrimSpace(config.PublicKey)
 	secretKey := strings.TrimSpace(config.SecretKey)
 	if publicKey == "" || secretKey == "" {
@@ -63,4 +66,22 @@ func NewTracerProvider(ctx context.Context, config Config) (*sdktrace.TracerProv
 		options = append(options, sdktrace.WithResource(resource.NewWithAttributes("", attribute.String("service.name", serviceName))))
 	}
 	return sdktrace.NewTracerProvider(options...), nil
+}
+
+// langfuseOTLPBase is the path of Langfuse's OTLP API. Langfuse accepts traces
+// only under its /v1/traces subpath.
+const langfuseOTLPBase = "/api/public/otel"
+
+// tracesEndpoint returns the URL to export traces to. otlptracehttp uses an
+// endpoint URL's path verbatim, so a Langfuse OTLP base path gets /v1/traces
+// appended; every other path is returned unchanged.
+func tracesEndpoint(endpoint *url.URL) string {
+	path := strings.TrimSuffix(endpoint.Path, "/")
+	if !strings.HasSuffix(path, langfuseOTLPBase) {
+		return endpoint.String()
+	}
+	resolved := *endpoint
+	resolved.Path = path + "/v1/traces"
+	resolved.RawPath = ""
+	return resolved.String()
 }
