@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,5 +115,72 @@ func TestTraceContextSpanProcessorMapsEveryLangfuseField(t *testing.T) {
 	tags, ok := attributes["langfuse.trace.tags"].([]string)
 	if !ok || len(tags) != 2 || tags[0] != "mobile" || tags[1] != "dogfood" {
 		t.Fatalf("langfuse tags = %#v", attributes["langfuse.trace.tags"])
+	}
+}
+
+func TestNewTracerProviderExportsToLangfuseTracesPath(t *testing.T) {
+	tests := []struct {
+		name      string
+		localhost bool
+		path      string
+		wantPath  string
+	}{
+		{name: "bare base", path: "/api/public/otel", wantPath: "/api/public/otel/v1/traces"},
+		{name: "base with trailing slash", path: "/api/public/otel/", wantPath: "/api/public/otel/v1/traces"},
+		{name: "full traces URL", path: "/api/public/otel/v1/traces", wantPath: "/api/public/otel/v1/traces"},
+		{name: "self-hosted localhost base", localhost: true, path: "/api/public/otel", wantPath: "/api/public/otel/v1/traces"},
+		{name: "base under a prefix", path: "/langfuse/api/public/otel", wantPath: "/langfuse/api/public/otel/v1/traces"},
+		{name: "unrelated path", path: "/collector/v1/traces", wantPath: "/collector/v1/traces"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := exportedPath(t, tt.localhost, tt.path); got != tt.wantPath {
+				t.Fatalf("export path = %q, want %q", got, tt.wantPath)
+			}
+		})
+	}
+}
+
+// exportedPath exports one span to an httptest server at the given endpoint
+// path and returns the request path the exporter sent it to. With localhost
+// set, the endpoint names the server as http://localhost:<port>.
+func exportedPath(t *testing.T, localhost bool, endpointPath string) string {
+	t.Helper()
+	paths := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case paths <- r.URL.Path:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	base := server.URL
+	if localhost {
+		base = strings.Replace(base, "127.0.0.1", "localhost", 1)
+	}
+	provider, err := NewTracerProvider(context.Background(), Config{
+		Endpoint:  base + endpointPath,
+		PublicKey: "pk",
+		SecretKey: "sk",
+	})
+	if err != nil {
+		t.Fatalf("NewTracerProvider() error = %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	_, span := provider.Tracer("test").Start(context.Background(), "test-span")
+	span.End()
+	if err := provider.ForceFlush(context.Background()); err != nil {
+		t.Fatalf("ForceFlush() error = %v", err)
+	}
+
+	select {
+	case got := <-paths:
+		return got
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for exported span")
+		return ""
 	}
 }
