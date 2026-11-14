@@ -13,7 +13,6 @@ import (
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
-	"github.com/Samuelk0nrad/gai/internal/genstream"
 )
 
 type Model struct {
@@ -499,27 +498,35 @@ func (a *mistralToolCallAccumulator) ready(final bool) []ai.ToolCall {
 }
 
 func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.Token {
-	raw := make(chan ai.Token, 1)
-	// Detection turns text-encoded tool calls into tool-call parts. The
-	// generation records that detected stream, which is what the caller sees.
-	detected := genstream.Detect(ctx, raw, m.debug)
+	out := make(chan ai.Token, 8)
 
 	go func() {
 		ctx := ctx
 		var streamErr error
 		var observation *ai.GenerationObservation
 		generationResult := ai.GenerationResult{}
+		// Text-encoded tool calls are detected in this goroutine, so the
+		// generation observes the tokens its caller receives.
+		detector := ai.NewToolCallDetector(ctx, m.debug, func(token ai.Token) bool {
+			if !ai.SendToken(ctx, out, token) {
+				return false
+			}
+			observation.Delivered(token)
+			return true
+		})
 		defer func() {
-			close(raw)
+			detector.Close()
 			generationResult.Err = streamErr
-			generationResult.Output = detected.Output(ctx)
 			observation.Finish(generationResult)
-			detected.Close()
+			close(out)
 		}()
 		emit := func(token ai.Token) bool {
 			observation.ObserveToken(token)
-			if ai.SendToken(ctx, raw, token) {
+			if detector.Push(token) {
 				return true
+			}
+			if streamErr == nil {
+				streamErr = detector.Err()
 			}
 			if streamErr == nil {
 				streamErr = ctx.Err()
@@ -589,7 +596,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		httpReq.Header.Set("Authorization", "Bearer "+m.client.apiKey)
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Accept", "text/event-stream")
-		generationCtx, startedObservation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "mistral", Model: m.name, Streaming: true, Sink: m.debug, StreamOutputInResult: true})
+		generationCtx, startedObservation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "mistral", Model: m.name, Streaming: true, Sink: m.debug})
 		observation = startedObservation
 		ctx = generationCtx
 		if gai.ObservationEnabled(ctx, m.debug) {
@@ -887,7 +894,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		}
 	}()
 
-	return detected.Tokens()
+	return out
 }
 
 // streamContentParts prepares delta parts for ai.Message.AppendToken. Empty

@@ -19,9 +19,10 @@ func contentCaptureRequest() AIRequest {
 			{Kind: ContentText, Text: "assistant secret"},
 			{Kind: ContentToolCall, ToolCall: &ToolCall{ID: "call-1", Type: "function", Name: "lookup", Args: json.RawMessage(`{"q":"args secret"}`)}},
 		}},
-		{Role: RoleTool, Parts: []ContentPart{{Kind: ContentToolResult, ToolResult: &ToolResult{
-			ToolCallID: "call-1", Name: "lookup", Parts: TextParts("result secret"),
-		}}}},
+		{Role: RoleTool, Parts: []ContentPart{
+			{Kind: ContentToolResult, ToolResult: &ToolResult{ToolCallID: "call-1", Name: "lookup", Parts: TextParts("result secret")}},
+			{Kind: ContentToolResult, ToolResult: &ToolResult{ToolCallID: "call-2", Name: "fetch", Parts: TextParts("other secret")}},
+		}},
 	}}
 }
 
@@ -58,7 +59,7 @@ func TestGenerationObservationCapturesInputAndOutput(t *testing.T) {
 	wantInput := `[{"role":"system","content":"system [redacted]"},` +
 		`{"role":"user","content":"user [redacted]"},` +
 		`{"role":"assistant","content":"assistant [redacted]","tool_calls":[{"id":"call-1","name":"lookup"}]},` +
-		`{"role":"tool","tool_call_id":"call-1","name":"lookup"}]`
+		`{"role":"tool","tool_results":[{"tool_call_id":"call-1","name":"lookup"},{"tool_call_id":"call-2","name":"fetch"}]}]`
 	assertStringAttribute(t, attrs, "langfuse.observation.input", wantInput)
 	assertStringAttribute(t, attrs, "langfuse.observation.output",
 		`{"role":"assistant","content":"answer [redacted]","tool_calls":[{"id":"call-2","name":"lookup"}]}`)
@@ -68,18 +69,23 @@ func TestGenerationObservationCapturesInputAndOutput(t *testing.T) {
 }
 
 // TestGenerationObservationCapturesStreamedOutput checks that a streaming
-// generation exports the text and tool calls it observed.
+// generation exports only the tokens it delivered, and counts the tool calls
+// it delivered rather than the raw ones it observed.
 func TestGenerationObservationCapturesStreamedOutput(t *testing.T) {
 	ctx := gai.WithContentCapturePolicy(context.Background(), gai.ContentCapturePolicy{Completion: gai.CaptureEnabled})
 	attrs := finishedGenerationAttributes(t, ctx, contentCaptureRequest(), true, func(o *GenerationObservation) {
-		o.ObserveToken(Token{Part: &ContentPart{Kind: ContentReasoning, Text: "thinking"}})
-		o.ObserveToken(Token{Part: &ContentPart{Kind: ContentText, Text: "Hello, "}})
-		o.ObserveToken(Token{Part: &ContentPart{Kind: ContentText, Text: "world"}})
-		o.ObserveToken(Token{Part: &ContentPart{Kind: ContentToolCall, ToolCall: &ToolCall{ID: "call-3", Name: "search", Args: json.RawMessage(`{}`)}}})
+		raw := `{"type":"function","name":"search","arguments":{"q":"args secret"}}`
+		o.ObserveToken(Token{Part: &ContentPart{Kind: ContentText, Text: raw}})
+		o.ObserveToken(Token{Part: &ContentPart{Kind: ContentText, Text: "never delivered"}})
+		o.Delivered(Token{Part: &ContentPart{Kind: ContentReasoning, Text: "thinking"}})
+		o.Delivered(Token{Part: &ContentPart{Kind: ContentText, Text: "Hello, "}})
+		o.Delivered(Token{Part: &ContentPart{Kind: ContentText, Text: "world"}})
+		o.Delivered(Token{Part: &ContentPart{Kind: ContentToolCall, ToolCall: &ToolCall{ID: "call-3", Name: "search", Args: json.RawMessage(`{"q":"args secret"}`)}}})
 	}, GenerationResult{})
 
 	assertStringAttribute(t, attrs, "langfuse.observation.output",
 		`{"role":"assistant","content":"Hello, world","tool_calls":[{"id":"call-3","name":"search"}]}`)
+	assertIntAttribute(t, attrs, "gai.gen_ai.response.tool_call_count", 1)
 	if _, ok := attrs["langfuse.observation.input"]; ok {
 		t.Fatalf("disabled prompt capture exported the input: %#v", attrs)
 	}
@@ -136,6 +142,7 @@ func TestGenerationObservationOmitsContentByDefault(t *testing.T) {
 	output := TextMessage(RoleAssistant, "answer secret")
 	attrs := finishedGenerationAttributes(t, context.Background(), contentCaptureRequest(), true, func(o *GenerationObservation) {
 		o.ObserveToken(Token{Part: &ContentPart{Kind: ContentText, Text: "streamed secret"}})
+		o.Delivered(Token{Part: &ContentPart{Kind: ContentText, Text: "streamed secret"}})
 	}, GenerationResult{Output: &output})
 	for key, value := range attrs {
 		if strings.HasPrefix(key, "langfuse.observation.input") || strings.HasPrefix(key, "langfuse.observation.output") ||

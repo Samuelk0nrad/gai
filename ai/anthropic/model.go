@@ -11,7 +11,6 @@ import (
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
-	"github.com/Samuelk0nrad/gai/internal/genstream"
 	"github.com/Samuelk0nrad/gai/internal/modelcatalog"
 	antropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -772,29 +771,37 @@ func classifyProviderError(err error) error {
 }
 
 func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.Token {
-	out := make(chan ai.Token, 1)
-	// Detection turns text-encoded tool calls into tool-call parts. The
-	// generation records that detected stream, which is what the caller sees.
-	detected := genstream.Detect(ctx, out, m.debug)
+	out := make(chan ai.Token, 8)
 	go func() {
 		ctx := ctx
 		var streamErr error
 		var observation *ai.GenerationObservation
 		generationResult := ai.GenerationResult{}
+		// Text-encoded tool calls are detected in this goroutine, so the
+		// generation observes the tokens its caller receives.
+		detector := ai.NewToolCallDetector(ctx, m.debug, func(token ai.Token) bool {
+			if !ai.SendToken(ctx, out, token) {
+				return false
+			}
+			observation.Delivered(token)
+			return true
+		})
 		defer func() {
-			close(out)
+			detector.Close()
 			generationResult.Err = streamErr
 			generationResult.HTTPStatus = anthropicHTTPStatus(streamErr)
-			generationResult.Output = detected.Output(ctx)
 			observation.Finish(generationResult)
-			detected.Close()
+			close(out)
 		}()
 		emit := func(token ai.Token) bool {
 			observation.ObserveToken(token)
-			if ai.SendToken(ctx, out, token) {
+			if detector.Push(token) {
 				return true
 			}
-			streamErr = ctx.Err()
+			streamErr = detector.Err()
+			if streamErr == nil {
+				streamErr = ctx.Err()
+			}
 			return false
 		}
 		// With fallbacks on, a fallback block can follow a tool call of the
@@ -836,7 +843,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			return
 		}
 		client := m.client.sdkClient()
-		generationCtx, startedObservation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "anthropic", Model: m.name, Streaming: true, Sink: m.debug, StreamOutputInResult: true})
+		generationCtx, startedObservation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "anthropic", Model: m.name, Streaming: true, Sink: m.debug})
 		observation = startedObservation
 		ctx = generationCtx
 		options, on := m.requestOptions(req, payload)
@@ -997,7 +1004,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			emit(ai.Token{Err: streamErr})
 		}
 	}()
-	return detected.Tokens()
+	return out
 }
 
 type streamBlock struct {

@@ -150,15 +150,26 @@ func (s *loopRunState) recordInput(user []ai.ContentPart) {
 	}
 }
 
-// recordOutput accumulates the assistant text of an accepted iteration, which
-// finish exports as the run's output.
-func (s *loopRunState) recordOutput(iteration Iteration) {
+// recordOutput accumulates the assistant text of accepted iterations, which
+// finish exports as the run's output. Separate assistant messages are joined
+// by a blank line.
+func (s *loopRunState) recordOutput(iterations ...Iteration) {
 	if s == nil || !s.captureOutput {
 		return
 	}
-	for _, message := range iteration.Conversation {
-		if message.Role == ai.RoleAssistant {
-			s.output.WriteString(message.Text())
+	for _, iteration := range iterations {
+		for _, message := range iteration.Conversation {
+			if message.Role != ai.RoleAssistant {
+				continue
+			}
+			text := message.Text()
+			if text == "" {
+				continue
+			}
+			if s.output.Len() > 0 {
+				s.output.WriteString("\n\n")
+			}
+			s.output.WriteString(text)
 		}
 	}
 }

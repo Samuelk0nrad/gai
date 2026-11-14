@@ -22,11 +22,6 @@ type GenerationConfig struct {
 	Model     string
 	Streaming bool
 	Sink      gai.ObservationSink
-	// StreamOutputInResult reports that a streaming provider passes the output
-	// its caller receives in GenerationResult.Output, for example after
-	// text-encoded tool calls were detected. The observation then does not
-	// record content from the tokens passed to ObserveToken.
-	StreamOutputInResult bool
 }
 
 // GenerationResult contains provider metadata known when a generation ends.
@@ -42,9 +37,8 @@ type GenerationResult struct {
 	Err           error
 	// Output is the generated assistant message, when the provider returned
 	// one. It is exported on the span only as far as the context's
-	// ContentCapturePolicy allows completion capture. Streaming providers may
-	// leave it nil; the observation then uses the tokens passed to
-	// ObserveToken.
+	// ContentCapturePolicy allows completion capture. Streaming providers
+	// leave it nil; the observation then uses the tokens passed to Delivered.
 	Output *Message
 }
 
@@ -61,13 +55,14 @@ type GenerationObservation struct {
 	finishOnce sync.Once
 	mu         sync.Mutex
 	stream     GenerationResult
-	// captureOutput reports whether completion content may be exported.
-	captureOutput bool
-	// recordStream reports whether streamed text and tool-call identities are
-	// accumulated in streamedText and streamedCalls for the output.
-	recordStream  bool
-	streamedText  strings.Builder
-	streamedCalls []generationToolCall
+	// captureOutput reports whether completion content may be exported. Only
+	// then do delivered text and tool-call identities accumulate in
+	// deliveredText and deliveredCalls.
+	captureOutput  bool
+	delivered      bool
+	deliveredCount int
+	deliveredText  strings.Builder
+	deliveredCalls []generationToolCall
 }
 
 // StartGenerationObservation starts a provider-neutral generation span. Call
@@ -107,26 +102,29 @@ func StartGenerationObservation(ctx context.Context, req AIRequest, config Gener
 	return ctx, &GenerationObservation{
 		ctx: ctx, config: config, span: span, startedAt: startedAt, clock: clock,
 		captureOutput: captureOutput,
-		recordStream:  captureOutput && !config.StreamOutputInResult,
 	}
 }
 
 // generationMessage is the content-capture view of one message: its role and
-// text, the identities of the tool calls an assistant message makes, and the
-// call a tool message answers. Tool arguments and results are tool content,
-// governed by their own capture kinds and recorded on tool spans. Reasoning,
-// media, and opaque provider state are never included.
+// text, the identities of the tool calls it makes, and the calls its tool
+// results answer. Tool arguments and results are tool content, governed by
+// their own capture kinds and recorded on tool spans. Reasoning, media, and
+// opaque provider state are never included.
 type generationMessage struct {
-	Role       Role                 `json:"role"`
-	Content    string               `json:"content,omitempty"`
-	ToolCalls  []generationToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string               `json:"tool_call_id,omitempty"`
-	Name       string               `json:"name,omitempty"`
+	Role        Role                   `json:"role"`
+	Content     string                 `json:"content,omitempty"`
+	ToolCalls   []generationToolCall   `json:"tool_calls,omitempty"`
+	ToolResults []generationToolResult `json:"tool_results,omitempty"`
 }
 
 type generationToolCall struct {
 	ID   string `json:"id,omitempty"`
 	Name string `json:"name"`
+}
+
+type generationToolResult struct {
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	Name       string `json:"name,omitempty"`
 }
 
 func newGenerationMessage(message Message) generationMessage {
@@ -138,9 +136,8 @@ func newGenerationMessage(message Message) generationMessage {
 		switch {
 		case part.ToolCall != nil:
 			out.ToolCalls = append(out.ToolCalls, generationToolCall{ID: part.ToolCall.ID, Name: part.ToolCall.Name})
-		case part.ToolResult != nil && out.ToolCallID == "":
-			out.ToolCallID = part.ToolResult.ToolCallID
-			out.Name = part.ToolResult.Name
+		case part.ToolResult != nil:
+			out.ToolResults = append(out.ToolResults, generationToolResult{ToolCallID: part.ToolResult.ToolCallID, Name: part.ToolResult.Name})
 		}
 	}
 	return out
@@ -214,18 +211,10 @@ func (o *GenerationObservation) ObserveToken(token Token) {
 		if token.Text() != "" {
 			o.FirstOutput()
 		}
-		if token.Type() == TokenTypeText && o.recordStream {
-			o.mu.Lock()
-			o.streamedText.WriteString(token.Text())
-			o.mu.Unlock()
-		}
 	case TokenTypeToolCall:
 		o.FirstOutput()
 		o.mu.Lock()
 		o.stream.ToolCallCount++
-		if call := token.ToolCall(); call != nil && o.recordStream {
-			o.streamedCalls = append(o.streamedCalls, generationToolCall{ID: call.ID, Name: call.Name})
-		}
 		o.mu.Unlock()
 	case TokenTypePart:
 		if token.Part != nil {
@@ -254,6 +243,35 @@ func (o *GenerationObservation) ObserveToken(token Token) {
 	}
 }
 
+// Delivered records a token the provider delivered to its caller, after any
+// text-encoded tool-call detection. Streaming providers call it once
+// SendToken succeeds, so the generation's output and tool-call count describe
+// what the caller received. Once Delivered was called, its tool-call count
+// replaces the one ObserveToken counts.
+func (o *GenerationObservation) Delivered(token Token) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.delivered = true
+	switch token.Type() {
+	case TokenTypeText:
+		if o.captureOutput {
+			o.deliveredText.WriteString(token.Text())
+		}
+	case TokenTypeToolCall:
+		call := token.ToolCall()
+		if call == nil {
+			return
+		}
+		o.deliveredCount++
+		if o.captureOutput {
+			o.deliveredCalls = append(o.deliveredCalls, generationToolCall{ID: call.ID, Name: call.Name})
+		}
+	}
+}
+
 // Finish records final metadata and generation metrics, then ends the
 // generation span. It is idempotent.
 func (o *GenerationObservation) Finish(result GenerationResult) {
@@ -266,15 +284,19 @@ func (o *GenerationObservation) Finish(result GenerationResult) {
 		// excluded by the clock.
 		duration := o.clock.Since(o.startedAt)
 		o.mu.Lock()
-		result = mergeGenerationResults(o.stream, result)
+		stream := o.stream
+		if o.delivered {
+			stream.ToolCallCount = o.deliveredCount
+		}
+		result = mergeGenerationResults(stream, result)
 		var output *generationMessage
 		switch {
 		case !o.captureOutput:
 		case result.Output != nil:
 			message := newGenerationMessage(*result.Output)
 			output = &message
-		case o.recordStream:
-			output = &generationMessage{Content: o.streamedText.String(), ToolCalls: o.streamedCalls}
+		case o.delivered:
+			output = &generationMessage{Content: o.deliveredText.String(), ToolCalls: o.deliveredCalls}
 		}
 		o.mu.Unlock()
 		o.span.SetAttributes(generationResultAttributes(result)...)

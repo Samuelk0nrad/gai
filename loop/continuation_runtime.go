@@ -44,6 +44,8 @@ func (r *runExecution) prepareContinuation() error {
 		}
 		r.owner.PromptBuilder = builder
 		r.owner.Iterations = d.state.Iterations()
+		// The run's output spans the iterations accepted before it resumed.
+		r.state.recordOutput(r.owner.Iterations...)
 		r.state.retryCount = d.state.RetryCount
 		if d.state.Phase == PhaseGenerating {
 			for _, usage := range d.state.Usage {

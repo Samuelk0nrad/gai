@@ -163,14 +163,18 @@ spans that can be a trace's root also carry content:
 | `chat {model}` generation | The request messages as a JSON array of `{"role", "content"}` objects | The response as one `{"role":"assistant", "content"}` object |
 | `loop.run` | The run's user input text | The assistant text of every accepted iteration |
 
-On generation spans, assistant messages list their tool calls as `tool_calls`
-with only `id` and `name`, and tool messages carry only `tool_call_id` and
-`name`: tool arguments and results stay on tool spans under their own capture
-kinds. Reasoning and media are never included. A streaming generation exports
-the text and tool calls its caller received. Where a provider detects
-text-encoded tool calls, as Mistral and Anthropic streams do, those calls appear
-as `tool_calls` entries, not as completion text. Size, truncation, and redaction metadata is
-recorded under `gai.gen_ai.input.*` and `gai.gen_ai.output.*` on generation
-spans, and under `loop.input.*` and `loop.output.*` on the run span. All content
-is set before the span ends, because Langfuse does not merge attributes from a
-span exported more than once.
+On generation spans, messages list their tool calls as `tool_calls` with only
+`id` and `name`, and the tool results they carry as `tool_results` with only
+`tool_call_id` and `name`: tool arguments and results stay on tool spans under
+their own capture kinds. Reasoning and media are never included. A streaming
+generation exports the text and tool calls its caller received, and its
+`gai.gen_ai.response.tool_call_count` counts those tool calls. Where a provider
+detects text-encoded tool calls, as Mistral and Anthropic streams do, those
+calls appear as `tool_calls` entries, not as completion text. On the run span,
+the assistant text of separate messages is joined by a blank line, and a
+resumed durable run includes the iterations accepted before it paused.
+
+Size, truncation, and redaction metadata is recorded under `gai.gen_ai.input.*`
+and `gai.gen_ai.output.*` on generation spans, and under `loop.input.*` and
+`loop.output.*` on the run span. All content is set before the span ends,
+because Langfuse does not merge attributes from a span exported more than once.

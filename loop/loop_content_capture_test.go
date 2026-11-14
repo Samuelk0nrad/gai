@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/internal/obstest"
 	"github.com/Samuelk0nrad/gai/loop"
+	"github.com/Samuelk0nrad/gai/modelinput"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -21,7 +23,7 @@ func runContentCaptureLoop(t *testing.T, recorder *tracetest.SpanRecorder, ctx c
 	t.Helper()
 	model := &scriptedStreamModel{sequences: [][]ai.Token{
 		{
-			{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "Let me check the secret. "}},
+			{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "Let me check the secret."}},
 			{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-1", Type: "function", Name: "echo", Args: json.RawMessage(`{"text":"tool secret"}`)}}},
 		},
 		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "The secret answer."}}},
@@ -66,7 +68,7 @@ func TestLoopRunSpanCapturesInputAndOutput(t *testing.T) {
 	if got, want := attrs["langfuse.observation.input"].AsString(), "User [redacted] question"; got != want {
 		t.Fatalf("langfuse.observation.input = %q, want %q", got, want)
 	}
-	if got, want := attrs["langfuse.observation.output"].AsString(), "Let me check the [redacted]. The [redacted] answer."; got != want {
+	if got, want := attrs["langfuse.observation.output"].AsString(), "Let me check the [redacted].\n\nThe [redacted] answer."; got != want {
 		t.Fatalf("langfuse.observation.output = %q, want %q", got, want)
 	}
 	if !attrs["loop.input.redaction_applied"].AsBool() || !attrs["loop.output.redaction_applied"].AsBool() {
@@ -134,5 +136,63 @@ func TestLoopRunSpanOmitsContentByDefault(t *testing.T) {
 		if strings.Contains(value.String(), "secret") {
 			t.Fatalf("attribute %q exported content: %q", key, value.String())
 		}
+	}
+}
+
+// TestLoopRunSpanOutputIncludesIterationsBeforeResume checks that a resumed
+// durable run exports the assistant text of the iterations accepted before it
+// paused, not only the ones it ran itself.
+func TestLoopRunSpanOutputIncludesIterationsBeforeResume(t *testing.T) {
+	recorder := obstest.Install(t)
+	ctx := gai.WithContentCapturePolicy(context.Background(), gai.ContentCapturePolicy{Completion: gai.CaptureEnabled})
+	builder := modelinput.New(modelinput.Definition{PromptInput: modelinput.PromptInput{User: ai.TextParts("question")}})
+	var saved loop.Continuation
+	var pause atomic.Bool
+	first := loop.New(&scriptedStreamModel{sequences: [][]ai.Token{{
+		{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "Before the pause."}},
+		{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-1", Type: "function", Name: "echo", Args: json.RawMessage(`{"text":"x"}`)}}},
+	}}}, []loop.Tool{loop.NewEchoTool()}, builder, nil)
+	first.Continuation = &loop.ContinuationControl{
+		RunID: "run", ExecutionID: "execution", StageID: "primary",
+		Commit: func(_ context.Context, c loop.Continuation) error {
+			saved = c.Clone()
+			if c.NextIteration > 1 {
+				pause.Store(true)
+			}
+			return nil
+		},
+		PauseRequested: pause.Load,
+	}
+	var last loop.Event
+	for event := range first.Run(ctx) {
+		last = event
+	}
+	if last.Type != loop.EventPaused {
+		t.Fatalf("first run ended with %s (%v), want paused", last.Type, last.Err)
+	}
+
+	second := loop.New(&scriptedStreamModel{sequences: [][]ai.Token{{
+		{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "After the resume."}},
+	}}}, []loop.Tool{loop.NewEchoTool()}, builder, nil)
+	second.Continuation = &loop.ContinuationControl{
+		RunID: "run", ExecutionID: "execution", StageID: "primary",
+		Initial: &saved,
+		Commit:  func(context.Context, loop.Continuation) error { return nil },
+	}
+	recorder.Reset()
+	if err := loopError(collectLoopEvents(t, second, ctx)); err != nil {
+		t.Fatalf("resumed run: %v", err)
+	}
+	var run sdktrace.ReadOnlySpan
+	for _, span := range recorder.Ended() {
+		if span.Name() == "loop.run" {
+			run = span
+		}
+	}
+	if run == nil {
+		t.Fatal("loop.run span was not recorded")
+	}
+	if got, want := obstest.Attributes(run)["langfuse.observation.output"].AsString(), "Before the pause.\n\nAfter the resume."; got != want {
+		t.Fatalf("langfuse.observation.output = %q, want %q", got, want)
 	}
 }

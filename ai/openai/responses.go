@@ -78,6 +78,7 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 		}
 		observation.ObserveToken(token)
 		if ai.SendToken(ctx, out, token) {
+			observation.Delivered(token)
 			return true
 		}
 		streamErr = ctx.Err()

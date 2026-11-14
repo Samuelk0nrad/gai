@@ -110,6 +110,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		emit := func(token ai.Token) bool {
 			observation.ObserveToken(token)
 			if ai.SendToken(ctx, out, token) {
+				observation.Delivered(token)
 				return true
 			}
 			if streamErr == nil {

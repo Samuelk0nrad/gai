@@ -157,6 +157,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			}
 			observation.ObserveToken(token)
 			if ai.SendToken(ctx, out, token) {
+				observation.Delivered(token)
 				return true
 			}
 			streamErr = ctx.Err()

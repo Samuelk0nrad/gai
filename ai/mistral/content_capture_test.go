@@ -63,4 +63,7 @@ func TestModelGenerateStreamCapturesDetectedOutput(t *testing.T) {
 	if !strings.HasPrefix(output, `{"role":"assistant","content":"Calling a tool.\n\n"`) {
 		t.Fatalf("output text = %s", output)
 	}
+	if got := attrs["gai.gen_ai.response.tool_call_count"].AsInt64(); got != 1 {
+		t.Fatalf("tool_call_count = %d, want the detected call counted", got)
+	}
 }

@@ -135,278 +135,343 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Obs
 	out := make(chan Token, 8)
 
 	go func() {
-		ctx, observer := newToolCallStreamObserver(ctx, debug)
 		defer close(out)
-
-		var pending []Token
-		result := toolCallStreamResult{}
-		canceled := false
-		defer func() {
-			// Cancellation observable at terminal finalization takes precedence
-			// over a concurrently closed input channel.
-			if canceled || ctx.Err() != nil {
-				observer.Canceled(ctx, result)
-				return
-			}
-			observer.Finished(ctx, result)
-		}()
-
-		// JSON tracking state
-		seenNonWS := false
-		newLines := 0
-		isJSONCandidate := false
-		objDepth := 0
-		arrDepth := 0
-		inString := false
-		escape := false
-
-		resetTracking := func() {
-			seenNonWS = false
-			newLines = 0
-			isJSONCandidate = false
-			objDepth = 0
-			arrDepth = 0
-			inString = false
-			escape = false
-		}
-
-		flushPending := func() bool {
-			for _, t := range pending {
-				if !SendToken(ctx, out, t) {
-					canceled = true
-					return false
-				}
-				result.outputTokenEvents++
-			}
-			resetTracking()
-			pending = nil
-			return true
-		}
-
-		flushBeforeCandidate := func(current []byte, idx int) (int, bool) {
-			carryUsage := 0
-			if idx > 0 {
-				pending[len(pending)-1].Part.Text = string(current[:idx])
-			} else {
-				carryUsage = pending[len(pending)-1].TokenUsage
-				pending = pending[:len(pending)-1]
-			}
-			if len(bytes.TrimSpace(joinTokenText(pending))) == 0 {
-				carryUsage += sumTokenUsage(pending)
-				resetTracking()
-				pending = nil
-				return carryUsage, true
-			}
-			return carryUsage, flushPending()
-		}
-
-		maybeToolCall := func(last string) (handled bool, keepGoing bool) {
-			if !isJSONCandidate {
-				return false, true
-			}
-			if inString || objDepth != 0 || arrDepth != 0 {
-				observer.CandidateRejected(&result, fmt.Sprintf("inString=%v objDepth=%d arrDepth=%d", inString, objDepth, arrDepth), joinTokenText(pending))
-				return false, true
-			}
-
-			payload := []byte(last)
-			if len(pending) > 0 {
-				payload = append(joinTokenText(pending[:len(pending)-1]), payload...)
-			}
-			if tc, ok := parseToolCall(payload); ok {
-				detected := observer.snapshotDetected(tc)
-				if !SendToken(ctx, out, Token{
-					Part:       &ContentPart{Kind: ContentToolCall, ToolCall: tc},
-					TokenUsage: sumTokenUsage(pending),
-				}) {
-					canceled = true
-					return false, false
-				}
-				result.outputTokenEvents++
-				observer.Detected(&result, detected)
-				resetTracking()
-			} else {
-				observer.CandidateRejected(&result, "parse_failed", payload)
-				// Replay only the balanced candidate; the remaining suffix is
-				// handled separately without duplicating text or usage.
-				pending[len(pending)-1].Part.Text = last
-				if !flushPending() {
-					return false, false
-				}
-			}
-
-			pending = nil
-			return true, true
-		}
+		var detector *ToolCallDetector
+		detector = NewToolCallDetector(ctx, debug, func(token Token) bool {
+			return SendToken(detector.ctx, out, token)
+		})
+		defer detector.Close()
 
 		for {
-			var t Token
-			var ok bool
 			select {
-			case <-ctx.Done():
-				if isJSONCandidate {
-					pendingPayload := joinTokenText(pending)
-					observer.Pending(&result, pendingPayload)
-					result.eofPending = true
-					observer.CandidateRejected(&result, "stream_canceled", pendingPayload)
-				}
-				canceled = true
+			case <-detector.ctx.Done():
+				detector.cancel()
 				return
-			case t, ok = <-in:
+			case t, ok := <-in:
 				if !ok {
-					goto streamDone
-				}
-			}
-			result.inputTokenEvents++
-			if err := t.Validate(); err != nil {
-				if isJSONCandidate {
-					observer.CandidateRejected(&result, "invalid_event", joinTokenText(pending))
-				}
-				if !flushPending() {
 					return
 				}
-				if !SendToken(ctx, out, Token{Err: err}) {
-					canceled = true
-				}
-				return
-			}
-			// Only unsigned text participates in the text tool protocol. Other
-			// canonical parts and execution metadata pass through intact.
-			t = t.Clone()
-			if t.Part == nil || t.Part.Kind != ContentText || len(t.Part.Extensions) > 0 {
-				if t.Type() == TokenTypeCompletion && isJSONCandidate {
-					pendingPayload := joinTokenText(pending)
-					observer.Pending(&result, pendingPayload)
-					result.eofPending = true
-					observer.CandidateRejected(&result, "end_of_stream", pendingPayload)
-				} else if t.Type() == TokenTypeErr && isJSONCandidate {
-					observer.CandidateRejected(&result, "stream_error", joinTokenText(pending))
-				} else if isJSONCandidate {
-					observer.CandidateRejected(&result, "interrupted", joinTokenText(pending))
-				}
-				pending = append(pending, t)
-				if !flushPending() {
+				if !detector.Push(t) {
 					return
 				}
-				continue
-			}
-
-			remaining := []byte(t.Part.Text)
-			remainingUsage := t.TokenUsage
-			if len(remaining) == 0 {
-				pending = append(pending, t)
-			}
-			for len(remaining) > 0 {
-				pending = append(pending, Token{Part: &ContentPart{Kind: ContentText, Text: string(remaining)}, TokenUsage: remainingUsage})
-				remainingUsage = 0
-
-				var tokenStr strings.Builder
-				handledCandidate := false
-				for idx, b := range remaining {
-					tokenStr.WriteByte(b)
-
-					if !seenNonWS && !isJSONCandidate {
-						if isWS(b) {
-							continue
-						}
-						seenNonWS = true
-						if b == '{' {
-							isJSONCandidate = true
-							objDepth = 1
-						}
-						continue
-					}
-
-					if !isJSONCandidate {
-						if b == '\n' {
-							newLines++
-						}
-						if newLines >= 2 && b == '{' {
-							candidateUsage, ok := flushBeforeCandidate(remaining, idx)
-							if !ok {
-								return
-							}
-							pending = append(pending, Token{Part: &ContentPart{Kind: ContentText, Text: string(remaining[idx:])}, TokenUsage: candidateUsage})
-							tokenStr.Reset()
-							tokenStr.WriteByte(b)
-							isJSONCandidate = true
-							objDepth = 1
-							seenNonWS = true
-							newLines = 0
-						}
-						continue
-					}
-
-					if inString {
-						if escape {
-							escape = false
-							continue
-						}
-						if b == '\\' {
-							escape = true
-							continue
-						}
-						if b == '"' {
-							inString = false
-						}
-						continue
-					}
-
-					switch b {
-					case '"':
-						inString = true
-					case '{':
-						objDepth++
-					case '}':
-						objDepth--
-					case '[':
-						arrDepth++
-					case ']':
-						arrDepth--
-					}
-
-					// If JSON candidate is balanced at this byte, decide now.
-					if isJSONCandidate && !inString && objDepth == 0 && arrDepth == 0 {
-						handled, keepGoing := maybeToolCall(tokenStr.String())
-						if !keepGoing {
-							return
-						}
-						if handled {
-							handledCandidate = true
-							if idx+1 < len(remaining) {
-								remaining = append([]byte(nil), remaining[idx+1:]...)
-								seenNonWS = false
-							} else {
-								remaining = nil
-							}
-							break
-						}
-					}
-				}
-
-				if !handledCandidate {
-					break
-				}
-			}
-		}
-
-	streamDone:
-		// End of stream: an unresolved JSON candidate is rejected, then all
-		// buffered tokens are replayed unchanged.
-		if len(pending) > 0 {
-			pendingPayload := joinTokenText(pending)
-			observer.Pending(&result, pendingPayload)
-			if isJSONCandidate {
-				result.eofPending = true
-				observer.CandidateRejected(&result, "end_of_stream", pendingPayload)
-			}
-			if !flushPending() {
-				return
 			}
 		}
 	}()
 
 	return out
+}
+
+// ToolCallDetector detects text-encoded tool calls in tokens pushed to it, in
+// the pushing goroutine. Providers use it to detect calls inline, so the
+// output they deliver, and observe, is the detected stream.
+// DetectToolCallsInStream runs the same detection on its own goroutine.
+type ToolCallDetector struct {
+	ctx      context.Context
+	observer *toolCallStreamObserver
+	send     func(Token) bool
+	pending  []Token
+	result   toolCallStreamResult
+	canceled bool
+	stopped  bool
+	closed   bool
+	err      error
+
+	// JSON tracking state
+	seenNonWS       bool
+	newLines        int
+	isJSONCandidate bool
+	objDepth        int
+	arrDepth        int
+	inString        bool
+	escape          bool
+}
+
+// NewToolCallDetector starts a detection observation under ctx and returns a
+// detector that passes its output to send. send reports whether the token was
+// delivered; once it returns false, detection stops.
+func NewToolCallDetector(ctx context.Context, debug gai.ObservationSink, send func(Token) bool) *ToolCallDetector {
+	ctx, observer := newToolCallStreamObserver(ctx, debug)
+	return &ToolCallDetector{ctx: ctx, observer: observer, send: send}
+}
+
+// Push processes one input token and passes any resulting tokens to send. It
+// returns false when detection has stopped: a token could not be delivered or
+// an invalid token ended the stream. Further pushes are ignored.
+func (d *ToolCallDetector) Push(t Token) bool {
+	if d.stopped || d.closed {
+		return false
+	}
+	if !d.push(t) {
+		d.stopped = true
+		return false
+	}
+	return true
+}
+
+// Err returns the validation error that stopped detection, if any.
+func (d *ToolCallDetector) Err() error { return d.err }
+
+// Close ends the input. Unless detection was canceled, buffered tokens are
+// replayed and an unfinished candidate is rejected. It then finishes the
+// detection observation. It is safe to call more than once.
+func (d *ToolCallDetector) Close() {
+	if d.closed {
+		return
+	}
+	d.closed = true
+	if !d.stopped {
+		d.end()
+	}
+	// Cancellation observable at terminal finalization takes precedence over
+	// a concurrently closed input.
+	if d.canceled || d.ctx.Err() != nil {
+		d.observer.Canceled(d.ctx, d.result)
+		return
+	}
+	d.observer.Finished(d.ctx, d.result)
+}
+
+// cancel records that the context ended before the input did: the buffered
+// candidate is rejected and nothing more is delivered.
+func (d *ToolCallDetector) cancel() {
+	if d.isJSONCandidate {
+		pendingPayload := joinTokenText(d.pending)
+		d.observer.Pending(&d.result, pendingPayload)
+		d.result.eofPending = true
+		d.observer.CandidateRejected(&d.result, "stream_canceled", pendingPayload)
+	}
+	d.canceled = true
+	d.stopped = true
+}
+
+func (d *ToolCallDetector) deliver(t Token) bool {
+	if !d.send(t) {
+		d.canceled = true
+		return false
+	}
+	d.result.outputTokenEvents++
+	return true
+}
+
+func (d *ToolCallDetector) resetTracking() {
+	d.seenNonWS = false
+	d.newLines = 0
+	d.isJSONCandidate = false
+	d.objDepth = 0
+	d.arrDepth = 0
+	d.inString = false
+	d.escape = false
+}
+
+func (d *ToolCallDetector) flushPending() bool {
+	for _, t := range d.pending {
+		if !d.deliver(t) {
+			return false
+		}
+	}
+	d.resetTracking()
+	d.pending = nil
+	return true
+}
+
+func (d *ToolCallDetector) flushBeforeCandidate(current []byte, idx int) (int, bool) {
+	carryUsage := 0
+	if idx > 0 {
+		d.pending[len(d.pending)-1].Part.Text = string(current[:idx])
+	} else {
+		carryUsage = d.pending[len(d.pending)-1].TokenUsage
+		d.pending = d.pending[:len(d.pending)-1]
+	}
+	if len(bytes.TrimSpace(joinTokenText(d.pending))) == 0 {
+		carryUsage += sumTokenUsage(d.pending)
+		d.resetTracking()
+		d.pending = nil
+		return carryUsage, true
+	}
+	return carryUsage, d.flushPending()
+}
+
+func (d *ToolCallDetector) maybeToolCall(last string) (handled bool, keepGoing bool) {
+	if !d.isJSONCandidate {
+		return false, true
+	}
+	if d.inString || d.objDepth != 0 || d.arrDepth != 0 {
+		d.observer.CandidateRejected(&d.result, fmt.Sprintf("inString=%v objDepth=%d arrDepth=%d", d.inString, d.objDepth, d.arrDepth), joinTokenText(d.pending))
+		return false, true
+	}
+
+	payload := []byte(last)
+	if len(d.pending) > 0 {
+		payload = append(joinTokenText(d.pending[:len(d.pending)-1]), payload...)
+	}
+	if tc, ok := parseToolCall(payload); ok {
+		detected := d.observer.snapshotDetected(tc)
+		if !d.deliver(Token{
+			Part:       &ContentPart{Kind: ContentToolCall, ToolCall: tc},
+			TokenUsage: sumTokenUsage(d.pending),
+		}) {
+			return false, false
+		}
+		d.observer.Detected(&d.result, detected)
+		d.resetTracking()
+	} else {
+		d.observer.CandidateRejected(&d.result, "parse_failed", payload)
+		// Replay only the balanced candidate; the remaining suffix is
+		// handled separately without duplicating text or usage.
+		d.pending[len(d.pending)-1].Part.Text = last
+		if !d.flushPending() {
+			return false, false
+		}
+	}
+
+	d.pending = nil
+	return true, true
+}
+
+// push processes one token and reports whether detection continues.
+func (d *ToolCallDetector) push(t Token) bool {
+	d.result.inputTokenEvents++
+	if err := t.Validate(); err != nil {
+		if d.isJSONCandidate {
+			d.observer.CandidateRejected(&d.result, "invalid_event", joinTokenText(d.pending))
+		}
+		if !d.flushPending() {
+			return false
+		}
+		d.err = err
+		d.deliver(Token{Err: err})
+		return false
+	}
+	// Only unsigned text participates in the text tool protocol. Other
+	// canonical parts and execution metadata pass through intact.
+	t = t.Clone()
+	if t.Part == nil || t.Part.Kind != ContentText || len(t.Part.Extensions) > 0 {
+		if t.Type() == TokenTypeCompletion && d.isJSONCandidate {
+			pendingPayload := joinTokenText(d.pending)
+			d.observer.Pending(&d.result, pendingPayload)
+			d.result.eofPending = true
+			d.observer.CandidateRejected(&d.result, "end_of_stream", pendingPayload)
+		} else if t.Type() == TokenTypeErr && d.isJSONCandidate {
+			d.observer.CandidateRejected(&d.result, "stream_error", joinTokenText(d.pending))
+		} else if d.isJSONCandidate {
+			d.observer.CandidateRejected(&d.result, "interrupted", joinTokenText(d.pending))
+		}
+		d.pending = append(d.pending, t)
+		return d.flushPending()
+	}
+
+	remaining := []byte(t.Part.Text)
+	remainingUsage := t.TokenUsage
+	if len(remaining) == 0 {
+		d.pending = append(d.pending, t)
+	}
+	for len(remaining) > 0 {
+		d.pending = append(d.pending, Token{Part: &ContentPart{Kind: ContentText, Text: string(remaining)}, TokenUsage: remainingUsage})
+		remainingUsage = 0
+
+		var tokenStr strings.Builder
+		handledCandidate := false
+		for idx, b := range remaining {
+			tokenStr.WriteByte(b)
+
+			if !d.seenNonWS && !d.isJSONCandidate {
+				if isWS(b) {
+					continue
+				}
+				d.seenNonWS = true
+				if b == '{' {
+					d.isJSONCandidate = true
+					d.objDepth = 1
+				}
+				continue
+			}
+
+			if !d.isJSONCandidate {
+				if b == '\n' {
+					d.newLines++
+				}
+				if d.newLines >= 2 && b == '{' {
+					candidateUsage, ok := d.flushBeforeCandidate(remaining, idx)
+					if !ok {
+						return false
+					}
+					d.pending = append(d.pending, Token{Part: &ContentPart{Kind: ContentText, Text: string(remaining[idx:])}, TokenUsage: candidateUsage})
+					tokenStr.Reset()
+					tokenStr.WriteByte(b)
+					d.isJSONCandidate = true
+					d.objDepth = 1
+					d.seenNonWS = true
+					d.newLines = 0
+				}
+				continue
+			}
+
+			if d.inString {
+				if d.escape {
+					d.escape = false
+					continue
+				}
+				if b == '\\' {
+					d.escape = true
+					continue
+				}
+				if b == '"' {
+					d.inString = false
+				}
+				continue
+			}
+
+			switch b {
+			case '"':
+				d.inString = true
+			case '{':
+				d.objDepth++
+			case '}':
+				d.objDepth--
+			case '[':
+				d.arrDepth++
+			case ']':
+				d.arrDepth--
+			}
+
+			// If JSON candidate is balanced at this byte, decide now.
+			if d.isJSONCandidate && !d.inString && d.objDepth == 0 && d.arrDepth == 0 {
+				handled, keepGoing := d.maybeToolCall(tokenStr.String())
+				if !keepGoing {
+					return false
+				}
+				if handled {
+					handledCandidate = true
+					if idx+1 < len(remaining) {
+						remaining = append([]byte(nil), remaining[idx+1:]...)
+						d.seenNonWS = false
+					} else {
+						remaining = nil
+					}
+					break
+				}
+			}
+		}
+
+		if !handledCandidate {
+			break
+		}
+	}
+	return true
+}
+
+// end handles the end of input: an unresolved JSON candidate is rejected,
+// then all buffered tokens are replayed unchanged.
+func (d *ToolCallDetector) end() {
+	if len(d.pending) > 0 {
+		pendingPayload := joinTokenText(d.pending)
+		d.observer.Pending(&d.result, pendingPayload)
+		if d.isJSONCandidate {
+			d.result.eofPending = true
+			d.observer.CandidateRejected(&d.result, "end_of_stream", pendingPayload)
+		}
+		d.flushPending()
+	}
 }
 
 func joinTokenText(tokens []Token) []byte {
