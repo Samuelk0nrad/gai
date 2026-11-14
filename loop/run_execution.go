@@ -217,6 +217,7 @@ func (r *runExecution) prepareValidatedRun() bool {
 	// Retain the input until an iteration is accepted. A rejected required-tool
 	// response consumes an iteration slot but must not lose conversation input.
 	r.userMessage = userMessageForIteration(r.owner.PromptBuilder, 0)
+	r.state.recordInput(r.owner.PromptBuilder.Input().User)
 	return true
 }
 
@@ -567,6 +568,7 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 	}
 	// Persistence deliberately follows IterationDone emission.
 	r.owner.Iterations = append(r.owner.Iterations, attempt.iteration)
+	r.state.recordOutput(attempt.iteration)
 	if attempt.iteration.RequestBudget != nil && attempt.iteration.UsageReported && attempt.iteration.Usage.InputTokens >= 0 {
 		r.checkpoint = &requestCheckpoint{
 			request: attempt.request, model: attempt.model, modelName: attempt.modelName,

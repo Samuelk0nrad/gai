@@ -943,6 +943,9 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	generationResult := ai.GenerationResult{}
 	defer func() {
 		generationResult.Err = err
+		if response != nil {
+			generationResult.Output = &response.Message
+		}
 		observation.Finish(generationResult)
 	}()
 

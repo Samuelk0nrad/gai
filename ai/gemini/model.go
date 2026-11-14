@@ -381,6 +381,9 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	defer func() {
 		generationResult.HTTPStatus = geminiHTTPStatus(err)
 		generationResult.Err = err
+		if response != nil {
+			generationResult.Output = &response.Message
+		}
 		observation.Finish(generationResult)
 	}()
 	result, err := client.Models.GenerateContent(

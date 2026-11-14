@@ -8,6 +8,7 @@ import (
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/internal/appclock"
+	"github.com/Samuelk0nrad/gai/internal/observe"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -33,6 +34,12 @@ type GenerationResult struct {
 	ToolCallCount int
 	HTTPStatus    int
 	Err           error
+	// Output is the generated assistant message, when the provider returned
+	// one. It is exported on the span only as far as the context's
+	// ContentCapturePolicy allows completion capture. Streaming providers may
+	// leave it nil; the observation then uses the tokens passed to
+	// ObserveToken.
+	Output *Message
 }
 
 // GenerationObservation owns the one semantic generation span associated with
@@ -48,6 +55,10 @@ type GenerationObservation struct {
 	finishOnce sync.Once
 	mu         sync.Mutex
 	stream     GenerationResult
+	// captureOutput reports whether completion content may be exported. Only
+	// then are streamed text and tool calls accumulated in streamed.
+	captureOutput bool
+	streamed      Message
 }
 
 // StartGenerationObservation starts a provider-neutral generation span. Call
@@ -75,8 +86,73 @@ func StartGenerationObservation(ctx context.Context, req AIRequest, config Gener
 	// Sinks, redactors, and token sends under the returned context pause the
 	// clock, so inference duration excludes application time.
 	ctx, clock := appclock.With(ctx)
+	// Capture the prompt before timing starts, so encoding and redaction do
+	// not count toward inference duration.
+	if captured, ok := captureGenerationContent(ctx, gai.ContentKindPrompt, generationInputMessages(req.Messages)); ok {
+		span.SetAttributes(observe.CapturedContentAttributes("gai.gen_ai.input", captured, "langfuse.observation.input")...)
+	}
 	startedAt := time.Now()
-	return ctx, &GenerationObservation{ctx: ctx, config: config, span: span, startedAt: startedAt, clock: clock}
+	return ctx, &GenerationObservation{
+		ctx: ctx, config: config, span: span, startedAt: startedAt, clock: clock,
+		captureOutput: gai.ObservationContentEnabled(ctx, nil, gai.ContentKindCompletion),
+	}
+}
+
+// generationMessage is the content-capture view of one message: its role and
+// text, the identities of the tool calls an assistant message makes, and the
+// call a tool message answers. Tool arguments and results are tool content,
+// governed by their own capture kinds and recorded on tool spans. Reasoning,
+// media, and opaque provider state are never included.
+type generationMessage struct {
+	Role       Role                 `json:"role"`
+	Content    string               `json:"content,omitempty"`
+	ToolCalls  []generationToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string               `json:"tool_call_id,omitempty"`
+	Name       string               `json:"name,omitempty"`
+}
+
+type generationToolCall struct {
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name"`
+}
+
+func newGenerationMessage(message Message) generationMessage {
+	out := generationMessage{Role: message.Role}
+	if message.Role != RoleTool {
+		out.Content = message.Text()
+	}
+	for _, part := range message.Parts {
+		switch {
+		case part.ToolCall != nil:
+			out.ToolCalls = append(out.ToolCalls, generationToolCall{ID: part.ToolCall.ID, Name: part.ToolCall.Name})
+		case part.ToolResult != nil && out.ToolCallID == "":
+			out.ToolCallID = part.ToolResult.ToolCallID
+			out.Name = part.ToolResult.Name
+		}
+	}
+	return out
+}
+
+func generationInputMessages(messages []Message) []generationMessage {
+	out := make([]generationMessage, 0, len(messages))
+	for _, message := range messages {
+		out = append(out, newGenerationMessage(message))
+	}
+	return out
+}
+
+// captureGenerationContent encodes value as JSON and applies the context's
+// ContentCapturePolicy for kind. Nothing is encoded when the span is not
+// recording or the policy does not enable kind.
+func captureGenerationContent(ctx context.Context, kind gai.ContentKind, value any) (gai.CapturedContent, bool) {
+	if !gai.ObservationContentEnabled(ctx, nil, kind) {
+		return gai.CapturedContent{}, false
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return gai.CapturedContent{}, false
+	}
+	return gai.CaptureContent(ctx, kind, raw)
 }
 
 // generationPromptLength counts selected system/user text without retaining
@@ -128,10 +204,18 @@ func (o *GenerationObservation) ObserveToken(token Token) {
 		if token.Text() != "" {
 			o.FirstOutput()
 		}
+		if token.Type() == TokenTypeText && o.captureOutput {
+			o.mu.Lock()
+			o.streamed.AppendToken(token)
+			o.mu.Unlock()
+		}
 	case TokenTypeToolCall:
 		o.FirstOutput()
 		o.mu.Lock()
 		o.stream.ToolCallCount++
+		if o.captureOutput {
+			o.streamed.AppendToken(token)
+		}
 		o.mu.Unlock()
 	case TokenTypePart:
 		if token.Part != nil {
@@ -173,8 +257,16 @@ func (o *GenerationObservation) Finish(result GenerationResult) {
 		duration := o.clock.Since(o.startedAt)
 		o.mu.Lock()
 		result = mergeGenerationResults(o.stream, result)
+		output := result.Output
+		if output == nil && len(o.streamed.Parts) > 0 {
+			streamed := o.streamed
+			output = &streamed
+		}
 		o.mu.Unlock()
 		o.span.SetAttributes(generationResultAttributes(result)...)
+		// Set every attribute before the span ends: Langfuse does not merge
+		// attributes from a span exported more than once.
+		o.setOutput(output)
 		// Record metrics before running the application sink, which may panic.
 		recordGenerationMetrics(o.ctx, o.config, result, duration)
 		gai.EmitObservation(o.ctx, o.config.Sink, gai.Observation{
@@ -185,6 +277,22 @@ func (o *GenerationObservation) Finish(result GenerationResult) {
 		})
 		gai.EndSpan(o.span, result.Err)
 	})
+}
+
+// setOutput exports the completion under the context's ContentCapturePolicy.
+// A response with neither text nor tool calls exports nothing.
+func (o *GenerationObservation) setOutput(output *Message) {
+	if !o.captureOutput || output == nil {
+		return
+	}
+	message := newGenerationMessage(*output)
+	message.Role = RoleAssistant
+	if message.Content == "" && len(message.ToolCalls) == 0 {
+		return
+	}
+	if captured, ok := captureGenerationContent(o.ctx, gai.ContentKindCompletion, message); ok {
+		o.span.SetAttributes(observe.CapturedContentAttributes("gai.gen_ai.output", captured, "langfuse.observation.output")...)
+	}
 }
 
 func generationResultFields(config GenerationConfig, result GenerationResult) map[string]any {

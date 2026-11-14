@@ -647,6 +647,9 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	defer func() {
 		generationResult.Err = err
 		generationResult.HTTPStatus = anthropicHTTPStatus(err)
+		if response != nil {
+			generationResult.Output = &response.Message
+		}
 		observation.Finish(generationResult)
 	}()
 	options, _ := m.requestOptions(req, payload)

@@ -22,6 +22,9 @@ func (m *Model) generateResponses(ctx context.Context, req ai.AIRequest) (result
 	defer func() {
 		generationResult.Err = err
 		generationResult.HTTPStatus = openAIHTTPStatus(err)
+		if result != nil {
+			generationResult.Output = &result.Message
+		}
 		observation.Finish(generationResult)
 	}()
 	response, err := m.client(false).Responses.New(ctx, params)
