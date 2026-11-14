@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Samuelk0nrad/gai"
+	"github.com/Samuelk0nrad/gai/internal/appclock"
 )
 
 // ToolCall describes a model request to invoke a function tool.
@@ -175,6 +176,9 @@ type ToolCallDetector struct {
 	stopped  bool
 	closed   bool
 	err      error
+	// clockCtx carries the generation clock that detection pauses, so its
+	// work and observations count as application time, not inference time.
+	clockCtx context.Context
 
 	// JSON tracking state
 	seenNonWS       bool
@@ -194,6 +198,21 @@ func NewToolCallDetector(ctx context.Context, debug gai.ObservationSink, send fu
 	return &ToolCallDetector{ctx: ctx, observer: observer, send: send}
 }
 
+// PauseIn makes later Push and Close calls pause the generation clock in
+// ctx, the context StartGenerationObservation returned. Detection and its
+// observation sink calls are then excluded from inference duration, as token
+// sends already are.
+func (d *ToolCallDetector) PauseIn(ctx context.Context) {
+	d.clockCtx = ctx
+}
+
+func (d *ToolCallDetector) pause() (resume func()) {
+	if d.clockCtx == nil {
+		return func() {}
+	}
+	return appclock.Pause(d.clockCtx)
+}
+
 // Push processes one input token and passes any resulting tokens to send. It
 // returns false when detection has stopped: a token could not be delivered or
 // an invalid token ended the stream. Further pushes are ignored.
@@ -201,6 +220,7 @@ func (d *ToolCallDetector) Push(t Token) bool {
 	if d.stopped || d.closed {
 		return false
 	}
+	defer d.pause()()
 	if !d.push(t) {
 		d.stopped = true
 		return false
@@ -219,6 +239,7 @@ func (d *ToolCallDetector) Close() {
 		return
 	}
 	d.closed = true
+	defer d.pause()()
 	if !d.stopped {
 		d.end()
 	}

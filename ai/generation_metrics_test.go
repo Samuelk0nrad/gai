@@ -270,3 +270,40 @@ func TestGenerationMetricsSurviveSinkPanic(t *testing.T) {
 		t.Fatalf("input token points = %#v, want 3", inputs)
 	}
 }
+
+// TestGenerationMetricsDurationExcludesToolCallDetection checks that inline
+// tool-call detection, including its slow observation sink calls, counts as
+// application time once the detector pauses the generation clock.
+func TestGenerationMetricsDurationExcludesToolCallDetection(t *testing.T) {
+	const callTime, appTime = 20 * time.Millisecond, 100 * time.Millisecond
+	reader := obstest.InstallMetrics(t)
+	sink := gai.ObservationSinkFunc(func(context.Context, gai.Observation) {
+		time.Sleep(appTime)
+	})
+	out := make(chan Token, 8)
+	detector := NewToolCallDetector(context.Background(), sink, func(token Token) bool {
+		out <- token
+		return true
+	})
+
+	ctx, observation := StartGenerationObservation(context.Background(), AIRequest{}, GenerationConfig{Provider: "mistral", Model: "mistral-test"})
+	detector.PauseIn(ctx)
+	time.Sleep(callTime)
+	if !detector.Push(Token{Part: &ContentPart{Kind: ContentText, Text: `{"type":"function","name":"echo","arguments":{}}`}}) {
+		t.Fatal("Push failed")
+	}
+	// Close emits the detection observation to the slow sink.
+	detector.Close()
+	observation.Finish(GenerationResult{})
+
+	if got := len(out); got != 1 {
+		t.Fatalf("detected tokens = %d, want 1", got)
+	}
+	durations := obstest.HistogramPoints[float64](t, obstest.CollectMetrics(t, reader), metricInferenceDuration)
+	if len(durations) != 1 || durations[0].Count != 1 {
+		t.Fatalf("duration points = %#v, want one generation", durations)
+	}
+	if got := durations[0].Sum; got < callTime.Seconds() || got >= appTime.Seconds() {
+		t.Fatalf("duration = %gs, want at least %gs and less than one %gs application delay", got, callTime.Seconds(), appTime.Seconds())
+	}
+}

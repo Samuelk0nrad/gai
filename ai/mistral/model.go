@@ -599,6 +599,8 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		generationCtx, startedObservation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "mistral", Model: m.name, Streaming: true, Sink: m.debug})
 		observation = startedObservation
 		ctx = generationCtx
+		// Detection and its sink calls are application time.
+		detector.PauseIn(generationCtx)
 		if gai.ObservationEnabled(ctx, m.debug) {
 			fields := map[string]any{"max_tokens": req.MaxTokens}
 			gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, observationPrompt(req))

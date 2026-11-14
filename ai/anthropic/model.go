@@ -846,6 +846,8 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		generationCtx, startedObservation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "anthropic", Model: m.name, Streaming: true, Sink: m.debug})
 		observation = startedObservation
 		ctx = generationCtx
+		// Detection and its sink calls are application time.
+		detector.PauseIn(generationCtx)
 		options, on := m.requestOptions(req, payload)
 		fallbacksOn = on
 		stream := client.Messages.NewStreaming(generationCtx, payload, options...)
