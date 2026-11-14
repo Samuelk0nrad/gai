@@ -159,6 +159,10 @@ GAI currently includes these adapters:
 | Mistral | `ai/mistral` |
 | OpenAI | `ai/openai` |
 
+The [Anthropic provider guide](docs/providers/anthropic.md) documents model
+facts, adaptive thinking and effort levels, prompt caching, refusals and
+server-side fallbacks, and mid-conversation system messages.
+
 The [Mistral provider guide](docs/providers/mistral.md) documents reasoning,
 image input, typed native options, and capability boundaries. Models with
 documented adjustable reasoning accept only the `none` and `high` efforts. For

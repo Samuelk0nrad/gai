@@ -150,7 +150,7 @@ func TestGenerateStreamRejectsOutputLimitBeforeTruncatedToolCall(t *testing.T) {
 }
 
 func TestNativeMessagesMapUserPayload(t *testing.T) {
-	messages, err := mapNativeMessages([]ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "initial request"}}}})
+	messages, err := mapNativeMessages([]ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "initial request"}}}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestNativeMessagesGroupAdjacentToolResults(t *testing.T) {
 	messages, err := mapNativeMessages([]ai.Message{
 		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call_1", Name: "search", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "first"}}}}}},
 		{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "call_2", Name: "lookup", Parts: []ai.ContentPart{{Kind: ai.ContentText, Text: "second"}}, IsError: true}}}},
-	})
+	}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func TestGenerateMapsBudgetThinkingForKnownBudgetOnlyModel(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"content":[],"usage":{}}`))
 	})
-	m.name = ClaudeFable5
+	m.name = ClaudeHaiku4_5
 
 	_, err := m.Generate(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hello")}, MaxTokens: 4096,
 		Reasoning: ai.ReasoningConfig{Enabled: true, BudgetTokens: 2000},

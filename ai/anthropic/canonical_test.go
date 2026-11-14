@@ -28,7 +28,7 @@ func TestCanonicalAnthropicRoundTripPreservesOrderedSignedReasoning(t *testing.T
 	if err := json.Unmarshal(stored, &restored); err != nil {
 		t.Fatal(err)
 	}
-	params, err := buildMessagesRequest(ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleSystem, "rules"), restored}}, ai.ModelDescriptor{Model: "test"})
+	params, err := buildMessagesRequest(ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleSystem, "rules"), restored}}, ai.ModelDescriptor{Model: "test"}, requestRules{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestCanonicalAnthropicRoundTripPreservesOrderedSignedReasoning(t *testing.T
 }
 
 func TestCanonicalAnthropicRejectsUnsignedReasoning(t *testing.T) {
-	_, err := mapNativeMessages([]ai.Message{{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentReasoning, Text: "private"}}}})
+	_, err := mapNativeMessages([]ai.Message{{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentReasoning, Text: "private"}}}}, false)
 	if !errors.Is(err, ai.ErrUnsupportedCapability) {
 		t.Fatalf("error = %v", err)
 	}
@@ -93,7 +93,7 @@ func TestCanonicalAnthropicStreamSignatureRoundTrip(t *testing.T) {
 	if len(restored.Parts) != 3 || restored.Parts[0].Text != "reason" || restored.Parts[1].Kind != ai.ContentReasoning || restored.Parts[1].Text != "" {
 		t.Fatalf("streamed message = %s", data)
 	}
-	mapped, err := mapNativeMessages([]ai.Message{restored})
+	mapped, err := mapNativeMessages([]ai.Message{restored}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
