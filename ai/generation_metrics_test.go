@@ -307,3 +307,30 @@ func TestGenerationMetricsDurationExcludesToolCallDetection(t *testing.T) {
 		t.Fatalf("duration = %gs, want at least %gs and less than one %gs application delay", got, callTime.Seconds(), appTime.Seconds())
 	}
 }
+
+// TestGenerationMetricsDurationKeepsCallAfterPromptRedaction checks that a
+// slow prompt redactor, which runs before timing starts, does not shorten the
+// measured inference duration.
+func TestGenerationMetricsDurationKeepsCallAfterPromptRedaction(t *testing.T) {
+	const callTime, appTime = 20 * time.Millisecond, 100 * time.Millisecond
+	reader := obstest.InstallMetrics(t)
+	ctx := gai.WithContentCapturePolicy(context.Background(), gai.ContentCapturePolicy{
+		Prompt: gai.CaptureEnabled,
+		Redact: func(_ context.Context, _ gai.ContentKind, value []byte) ([]byte, error) {
+			time.Sleep(appTime)
+			return value, nil
+		},
+	})
+
+	_, observation := StartGenerationObservation(ctx, AIRequest{Messages: []Message{TextMessage(RoleUser, "prompt")}}, GenerationConfig{Provider: "openai", Model: "gpt-test"})
+	time.Sleep(callTime)
+	observation.Finish(GenerationResult{})
+
+	durations := obstest.HistogramPoints[float64](t, obstest.CollectMetrics(t, reader), metricInferenceDuration)
+	if len(durations) != 1 || durations[0].Count != 1 {
+		t.Fatalf("duration points = %#v, want one generation", durations)
+	}
+	if got := durations[0].Sum; got < callTime.Seconds() || got >= appTime.Seconds() {
+		t.Fatalf("duration = %gs, want at least %gs and less than the %gs redaction", got, callTime.Seconds(), appTime.Seconds())
+	}
+}

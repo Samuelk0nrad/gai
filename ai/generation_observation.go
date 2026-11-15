@@ -87,16 +87,18 @@ func StartGenerationObservation(ctx context.Context, req AIRequest, config Gener
 		attrs = append(attrs, attribute.String("langfuse.observation.model.parameters", parameters))
 	}
 	ctx, span := gai.StartClientOperationSpan(ctx, generationTracerName, "chat "+config.Model, "gen_ai.operation.name", "chat", attrs...)
-	// Sinks, redactors, and token sends under the returned context pause the
-	// clock, so inference duration excludes application time.
-	ctx, clock := appclock.With(ctx)
 	// Capture the prompt before timing starts, so encoding and redaction do
-	// not count toward inference duration.
+	// not count toward inference duration. The clock is installed afterwards:
+	// it subtracts every pause it records, so a pause from before startedAt
+	// would shorten the measured window.
 	if gai.ObservationContentEnabled(ctx, nil, gai.ContentKindPrompt) {
 		if captured, ok := captureGenerationContent(ctx, gai.ContentKindPrompt, generationInputMessages(req.Messages)); ok {
 			span.SetAttributes(observe.CapturedContentAttributes("gai.gen_ai.input", captured, "langfuse.observation.input")...)
 		}
 	}
+	// Sinks, redactors, and token sends under the returned context pause the
+	// clock, so inference duration excludes application time.
+	ctx, clock := appclock.With(ctx)
 	captureOutput := gai.ObservationContentEnabled(ctx, nil, gai.ContentKindCompletion)
 	startedAt := time.Now()
 	return ctx, &GenerationObservation{

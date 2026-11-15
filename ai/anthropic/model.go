@@ -787,7 +787,11 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			return true
 		})
 		defer func() {
-			detector.Close()
+			// A failed final flush means the context ended before the
+			// buffered tokens were delivered.
+			if !detector.Close() && streamErr == nil {
+				streamErr = ctx.Err()
+			}
 			generationResult.Err = streamErr
 			generationResult.HTTPStatus = anthropicHTTPStatus(streamErr)
 			observation.Finish(generationResult)

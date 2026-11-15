@@ -233,23 +233,27 @@ func (d *ToolCallDetector) Err() error { return d.err }
 
 // Close ends the input. Unless detection was canceled, buffered tokens are
 // replayed and an unfinished candidate is rejected. It then finishes the
-// detection observation. It is safe to call more than once.
-func (d *ToolCallDetector) Close() {
+// detection observation. It reports false when a replayed token could not be
+// delivered, which happens only once the context has ended. It is safe to call
+// more than once; later calls return true.
+func (d *ToolCallDetector) Close() (delivered bool) {
 	if d.closed {
-		return
+		return true
 	}
 	d.closed = true
 	defer d.pause()()
+	delivered = true
 	if !d.stopped {
-		d.end()
+		delivered = d.end()
 	}
 	// Cancellation observable at terminal finalization takes precedence over
 	// a concurrently closed input.
 	if d.canceled || d.ctx.Err() != nil {
 		d.observer.Canceled(d.ctx, d.result)
-		return
+		return delivered
 	}
 	d.observer.Finished(d.ctx, d.result)
+	return delivered
 }
 
 // cancel records that the context ended before the input did: the buffered
@@ -483,7 +487,7 @@ func (d *ToolCallDetector) push(t Token) bool {
 
 // end handles the end of input: an unresolved JSON candidate is rejected,
 // then all buffered tokens are replayed unchanged.
-func (d *ToolCallDetector) end() {
+func (d *ToolCallDetector) end() bool {
 	if len(d.pending) > 0 {
 		pendingPayload := joinTokenText(d.pending)
 		d.observer.Pending(&d.result, pendingPayload)
@@ -491,8 +495,9 @@ func (d *ToolCallDetector) end() {
 			d.result.eofPending = true
 			d.observer.CandidateRejected(&d.result, "end_of_stream", pendingPayload)
 		}
-		d.flushPending()
+		return d.flushPending()
 	}
+	return true
 }
 
 func joinTokenText(tokens []Token) []byte {
