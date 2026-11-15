@@ -314,9 +314,14 @@ func TestGenerationMetricsDurationExcludesToolCallDetection(t *testing.T) {
 func TestGenerationMetricsDurationKeepsCallAfterPromptRedaction(t *testing.T) {
 	const callTime, appTime = 20 * time.Millisecond, 100 * time.Millisecond
 	reader := obstest.InstallMetrics(t)
+	// Prompt capture runs only under a recording span.
+	_, restore := installGenerationSpanRecorder(t)
+	defer restore()
+	redacted := false
 	ctx := gai.WithContentCapturePolicy(context.Background(), gai.ContentCapturePolicy{
 		Prompt: gai.CaptureEnabled,
 		Redact: func(_ context.Context, _ gai.ContentKind, value []byte) ([]byte, error) {
+			redacted = true
 			time.Sleep(appTime)
 			return value, nil
 		},
@@ -326,6 +331,9 @@ func TestGenerationMetricsDurationKeepsCallAfterPromptRedaction(t *testing.T) {
 	time.Sleep(callTime)
 	observation.Finish(GenerationResult{})
 
+	if !redacted {
+		t.Fatal("the prompt redactor did not run")
+	}
 	durations := obstest.HistogramPoints[float64](t, obstest.CollectMetrics(t, reader), metricInferenceDuration)
 	if len(durations) != 1 || durations[0].Count != 1 {
 		t.Fatalf("duration points = %#v, want one generation", durations)
