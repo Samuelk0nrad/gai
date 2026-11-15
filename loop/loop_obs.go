@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/observe"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -60,6 +62,10 @@ type loopRunState struct {
 	paused     bool
 	retryCount int
 	stats      loopRunStats
+	// captureOutput reports whether completion content may be exported on the
+	// run span. Only then is accepted assistant text accumulated in output.
+	captureOutput bool
+	output        strings.Builder
 }
 
 type loopRunStats struct {
@@ -122,7 +128,50 @@ func newLoopRunState(ctx context.Context, l *Loop) (context.Context, *loopRunSta
 		attribute.Int("loop.tool_count", toolCount),
 		attribute.String("ai.model", modelName),
 	)
-	return ctx, &loopRunState{obs: &loopObserver{span: span}, ctx: ctx, sink: sink, modelName: modelName, startedAt: time.Now()}
+	return ctx, &loopRunState{
+		obs: &loopObserver{span: span}, ctx: ctx, sink: sink, modelName: modelName, startedAt: time.Now(),
+		captureOutput: gai.ObservationContentEnabled(ctx, nil, gai.ContentKindCompletion),
+	}
+}
+
+// recordInput exports the run's user input on the run span under the
+// context's ContentCapturePolicy. Langfuse reads a trace's input from its root
+// observation, which is this span for an agent run.
+func (s *loopRunState) recordInput(user []ai.ContentPart) {
+	if s == nil || s.obs == nil || s.obs.span == nil || len(user) == 0 {
+		return
+	}
+	if !gai.ObservationContentEnabled(s.ctx, nil, gai.ContentKindPrompt) {
+		return
+	}
+	text := (ai.Message{Parts: user}).Text()
+	if captured, ok := gai.CaptureContent(s.ctx, gai.ContentKindPrompt, []byte(text)); ok {
+		s.obs.span.SetAttributes(observe.CapturedContentAttributes("loop.input", captured, "langfuse.observation.input")...)
+	}
+}
+
+// recordOutput accumulates the assistant text of accepted iterations, which
+// finish exports as the run's output. Separate assistant messages are joined
+// by a blank line.
+func (s *loopRunState) recordOutput(iterations ...Iteration) {
+	if s == nil || !s.captureOutput {
+		return
+	}
+	for _, iteration := range iterations {
+		for _, message := range iteration.Conversation {
+			if message.Role != ai.RoleAssistant {
+				continue
+			}
+			text := message.Text()
+			if text == "" {
+				continue
+			}
+			if s.output.Len() > 0 {
+				s.output.WriteString("\n\n")
+			}
+			s.output.WriteString(text)
+		}
+	}
 }
 
 // startIteration starts an iteration span and records the latest iteration
@@ -198,6 +247,13 @@ func (s *loopRunState) finish() {
 	}
 	outcome, errorType := runOutcome(s.err, s.cancelErr, s.paused)
 	recordRunMetrics(s.ctx, s.modelName, outcome, errorType, s.stats.IterationCount, time.Since(s.startedAt))
+	// Set every attribute before the span ends: Langfuse does not merge
+	// attributes from a span exported more than once.
+	if s.captureOutput && s.output.Len() > 0 && s.obs.span != nil {
+		if captured, ok := gai.CaptureContent(s.ctx, gai.ContentKindCompletion, []byte(s.output.String())); ok {
+			s.obs.span.SetAttributes(observe.CapturedContentAttributes("loop.output", captured, "langfuse.observation.output")...)
+		}
+	}
 	s.obs.finish(s.err, s.cancelErr, s.stats)
 }
 
@@ -545,15 +601,5 @@ func toolResult(response *ToolResult) (outcome string, output string, spanErr er
 }
 
 func setCapturedToolContent(span trace.Span, prefix string, captured gai.CapturedContent, aliases ...string) {
-	attrs := []attribute.KeyValue{
-		attribute.String(prefix, string(captured.Value)),
-		attribute.Int(prefix+".original_bytes", captured.OriginalBytes),
-		attribute.Int(prefix+".captured_bytes", captured.CapturedBytes),
-		attribute.Bool(prefix+".truncated", captured.Truncated),
-		attribute.Bool(prefix+".redaction_applied", captured.RedactionApplied),
-	}
-	for _, alias := range aliases {
-		attrs = append(attrs, attribute.String(alias, string(captured.Value)))
-	}
-	span.SetAttributes(attrs...)
+	span.SetAttributes(observe.CapturedContentAttributes(prefix, captured, append([]string{prefix}, aliases...)...)...)
 }

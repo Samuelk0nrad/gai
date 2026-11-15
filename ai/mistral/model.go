@@ -498,22 +498,39 @@ func (a *mistralToolCallAccumulator) ready(final bool) []ai.ToolCall {
 }
 
 func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.Token {
-	raw := make(chan ai.Token, 1)
+	out := make(chan ai.Token, 8)
 
 	go func() {
 		ctx := ctx
 		var streamErr error
 		var observation *ai.GenerationObservation
 		generationResult := ai.GenerationResult{}
-		defer close(raw)
+		// Text-encoded tool calls are detected in this goroutine, so the
+		// generation observes the tokens its caller receives.
+		detector := ai.NewToolCallDetector(ctx, m.debug, func(token ai.Token) bool {
+			if !ai.SendToken(ctx, out, token) {
+				return false
+			}
+			observation.Delivered(token)
+			return true
+		})
 		defer func() {
+			// A failed final flush means the context ended before the
+			// buffered tokens were delivered.
+			if !detector.Close() && streamErr == nil {
+				streamErr = ctx.Err()
+			}
 			generationResult.Err = streamErr
 			observation.Finish(generationResult)
+			close(out)
 		}()
 		emit := func(token ai.Token) bool {
 			observation.ObserveToken(token)
-			if ai.SendToken(ctx, raw, token) {
+			if detector.Push(token) {
 				return true
+			}
+			if streamErr == nil {
+				streamErr = detector.Err()
 			}
 			if streamErr == nil {
 				streamErr = ctx.Err()
@@ -586,6 +603,8 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		generationCtx, startedObservation := ai.StartGenerationObservation(ctx, req, ai.GenerationConfig{Provider: "mistral", Model: m.name, Streaming: true, Sink: m.debug})
 		observation = startedObservation
 		ctx = generationCtx
+		// Detection and its sink calls are application time.
+		detector.PauseIn(generationCtx)
 		if gai.ObservationEnabled(ctx, m.debug) {
 			fields := map[string]any{"max_tokens": req.MaxTokens}
 			gai.AddObservationContent(ctx, m.debug, fields, "prompt", gai.ContentKindPrompt, observationPrompt(req))
@@ -881,7 +900,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		}
 	}()
 
-	return ai.DetectToolCallsInStream(ctx, raw, m.debug)
+	return out
 }
 
 // streamContentParts prepares delta parts for ai.Message.AppendToken. Empty
@@ -943,6 +962,9 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	generationResult := ai.GenerationResult{}
 	defer func() {
 		generationResult.Err = err
+		if response != nil {
+			generationResult.Output = &response.Message
+		}
 		observation.Finish(generationResult)
 	}()
 

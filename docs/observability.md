@@ -96,9 +96,10 @@ stream ends or is canceled. They use the same `gen_ai.*` contract for requested
 and resolved models, finish reasons, request IDs, reported token usage, and
 provider HTTP status. On failure, `error.type` is the same bounded class the
 inference metrics use, such as `rate_limited` or `timeout`. Langfuse generation type, model parameters, usage
-details, and completion-start time are included where known. Prompts,
-completions, reasoning, tool arguments, and raw provider payloads are not
-attached to these spans.
+details, and completion-start time are included where known. Prompts and
+completions are attached only under a content capture policy (see
+[Content capture](#content-capture)); reasoning, tool arguments, tool results,
+and raw provider payloads are never attached to these spans.
 
 The older `ai.provider`, `ai.model`, `ai.max_tokens`, `ai.input_tokens`,
 `ai.output_tokens`, `ai.reasoning_tokens`, and `ai.tool_call_count` attributes
@@ -128,11 +129,14 @@ Direct `CallTool` invocations retain ordinary Go panic behavior.
 
 ## Content capture
 
-Tool arguments and results are absent by default. Enable them independently
-with the same request-scoped capture policy used for other sensitive content:
+Prompts, completions, tool arguments, and tool results are absent from spans by
+default. Enable each kind independently with the request-scoped capture policy
+used for other sensitive content:
 
 ```go
 ctx = gai.WithContentCapturePolicy(ctx, gai.ContentCapturePolicy{
+  Prompt:     gai.CaptureEnabled,
+  Completion: gai.CaptureEnabled,
   ToolInput:  gai.CaptureEnabled,
   ToolOutput: gai.CaptureEnabled,
   MaxBytes:   4096,
@@ -150,3 +154,27 @@ remain during migration and carry the redaction, truncation, and byte-count
 metadata. Content is captured once and reused for every applicable alias.
 Valid JSON remains serialized JSON; invalid JSON is retained as bounded UTF-8
 text. Redactor errors and panics fail closed.
+
+Langfuse v4 reads a trace's input and output from its root observation, so the
+spans that can be a trace's root also carry content:
+
+| Span | `Prompt` enables `langfuse.observation.input` | `Completion` enables `langfuse.observation.output` |
+| --- | --- | --- |
+| `chat {model}` generation | The request messages as a JSON array of `{"role", "content"}` objects | The response as one `{"role":"assistant", "content"}` object |
+| `loop.run` | The run's user input text | The assistant text of every accepted iteration |
+
+On generation spans, messages list their tool calls as `tool_calls` with only
+`id` and `name`, and the tool results they carry as `tool_results` with only
+`tool_call_id` and `name`: tool arguments and results stay on tool spans under
+their own capture kinds. Reasoning and media are never included. A streaming
+generation exports the text and tool calls its caller received, and its
+`gai.gen_ai.response.tool_call_count` counts those tool calls. Where a provider
+detects text-encoded tool calls, as Mistral and Anthropic streams do, those
+calls appear as `tool_calls` entries, not as completion text. On the run span,
+the assistant text of separate messages is joined by a blank line, and a
+resumed durable run includes the iterations accepted before it paused.
+
+Size, truncation, and redaction metadata is recorded under `gai.gen_ai.input.*`
+and `gai.gen_ai.output.*` on generation spans, and under `loop.input.*` and
+`loop.output.*` on the run span. All content is set before the span ends,
+because Langfuse does not merge attributes from a span exported more than once.

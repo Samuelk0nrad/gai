@@ -110,6 +110,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		emit := func(token ai.Token) bool {
 			observation.ObserveToken(token)
 			if ai.SendToken(ctx, out, token) {
+				observation.Delivered(token)
 				return true
 			}
 			if streamErr == nil {
@@ -381,6 +382,9 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	defer func() {
 		generationResult.HTTPStatus = geminiHTTPStatus(err)
 		generationResult.Err = err
+		if response != nil {
+			generationResult.Output = &response.Message
+		}
 		observation.Finish(generationResult)
 	}()
 	result, err := client.Models.GenerateContent(

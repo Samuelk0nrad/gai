@@ -71,6 +71,9 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (result *ai.AIRe
 	defer func() {
 		generationResult.Err = err
 		generationResult.HTTPStatus = openAIHTTPStatus(err)
+		if result != nil {
+			generationResult.Output = &result.Message
+		}
 		observation.Finish(generationResult)
 	}()
 	response, err := m.client(false).Chat.Completions.New(ctx, params)
@@ -154,6 +157,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			}
 			observation.ObserveToken(token)
 			if ai.SendToken(ctx, out, token) {
+				observation.Delivered(token)
 				return true
 			}
 			streamErr = ctx.Err()
