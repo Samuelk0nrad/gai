@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/internal/streamtext"
@@ -76,20 +77,38 @@ func streamedServerToolUse(start string, input string) json.RawMessage {
 }
 
 // hostedBlock returns the raw server tool block an extension part keeps for
-// replay, or nil when the part holds none.
-func hostedBlock(extensions []ai.Extension) json.RawMessage {
+// replay, or nil when the part holds none. A hosted extension that cannot be
+// replayed is an error, so its call or result is never sent alone.
+func hostedBlock(extensions []ai.Extension) (json.RawMessage, error) {
 	for _, ext := range extensions {
 		if ext.Namespace != extensionNamespace {
 			continue
 		}
-		if ext.Type == hostedToolResultExtension && json.Valid(ext.Data) {
-			return append(json.RawMessage(nil), ext.Data...)
-		}
-		if call, ok := ai.DecodeHostedToolCall(ext); ok && len(call.Raw) > 0 {
-			return call.Raw
+		switch ext.Type {
+		case hostedToolResultExtension:
+			if !json.Valid(ext.Data) {
+				return nil, fmt.Errorf("decode Anthropic hosted tool result: invalid JSON")
+			}
+			return append(json.RawMessage(nil), ext.Data...), nil
+		case ai.ExtensionHostedToolCall:
+			call, ok := ai.DecodeHostedToolCall(ext)
+			if !ok || len(call.Raw) == 0 {
+				return nil, fmt.Errorf("decode Anthropic hosted tool call: no server_tool_use block")
+			}
+			return call.Raw, nil
 		}
 	}
-	return nil
+	return nil, nil
+}
+
+// hasHostedBlock reports whether a part holds a hosted server tool block.
+func hasHostedBlock(extensions []ai.Extension) bool {
+	for _, ext := range extensions {
+		if ext.Namespace == extensionNamespace && (ext.Type == hostedToolResultExtension || ext.Type == ai.ExtensionHostedToolCall) {
+			return true
+		}
+	}
+	return false
 }
 
 // textCitations maps the citations of one text block. Anthropic cites a
@@ -144,15 +163,41 @@ func placeCitations(run *streamtext.Run, token ai.Token) ai.Token {
 const maxPauseContinuations = 10
 
 // continuePausedTurn returns the request messages that continue a paused
-// turn: its content is added to the trailing assistant message, or sent as
-// a new assistant message.
-func continuePausedTurn(messages []antropic.MessageParam, content []antropic.ContentBlockParamUnion) []antropic.MessageParam {
+// turn. content is everything the turn produced so far, across every paused
+// request. When it holds a fallback block, the declined attempt's state before
+// it is left out, as dropPreFallbackState does on replay, because the API
+// rejects it. The content is added to a trailing assistant message, or sent
+// as a new assistant message.
+func continuePausedTurn(messages []antropic.MessageParam, content []antropic.ContentBlockUnion) []antropic.MessageParam {
+	last := -1
+	for i, block := range content {
+		if block.Type == fallbackExtension {
+			last = i
+		}
+	}
+	params := make([]antropic.ContentBlockParamUnion, 0, len(content))
+	for i, block := range content {
+		if i < last && isAttemptBlock(block.Type) {
+			continue
+		}
+		params = append(params, block.ToParam())
+	}
 	out := append([]antropic.MessageParam(nil), messages...)
 	if n := len(out); n > 0 && out[n-1].Role == antropic.MessageParamRoleAssistant {
 		last := out[n-1]
-		last.Content = append(append([]antropic.ContentBlockParamUnion(nil), last.Content...), content...)
+		last.Content = append(append([]antropic.ContentBlockParamUnion(nil), last.Content...), params...)
 		out[n-1] = last
 		return out
 	}
-	return append(out, antropic.MessageParam{Role: antropic.MessageParamRoleAssistant, Content: content})
+	return append(out, antropic.MessageParam{Role: antropic.MessageParamRoleAssistant, Content: params})
+}
+
+// isAttemptBlock reports whether a response block of this type belongs to an
+// attempt that a later fallback block declines. It matches isAttemptState.
+func isAttemptBlock(blockType string) bool {
+	switch blockType {
+	case "thinking", "redacted_thinking", "tool_use", "server_tool_use":
+		return true
+	}
+	return serverToolResultBlocks[blockType]
 }

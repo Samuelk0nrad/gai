@@ -343,8 +343,7 @@ func mapResponsesMessages(messages []ai.Message) (responses.ResponseInputParam, 
 						if err := appendReasoning(ext.Data); err != nil {
 							return nil, err
 						}
-					} else if call, ok := ai.DecodeHostedToolCall(ext); ok && ext.Namespace == extensionNamespace && len(call.Raw) > 0 {
-						item, err := hostedToolInput(call)
+					} else if item, ok, err := hostedToolExtensionInput(ext); ok {
 						if err != nil {
 							return nil, err
 						}

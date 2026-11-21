@@ -566,3 +566,20 @@ func TestCompactionSummarizesTurnsWithOptionalProviderData(t *testing.T) {
 		t.Fatalf("summary prompt = %q", prompt)
 	}
 }
+
+// Reasoning items and signatures are replay state, so a reasoning turn with a
+// hosted search still compacts.
+func TestCompactionSummarizesReasoningTurns(t *testing.T) {
+	state := oldHistory()
+	state.Turns[0].Messages = []modelinput.StoredMessage{{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{
+		{Kind: ai.ContentExtension, Extensions: []ai.Extension{{Namespace: "openai", Type: "responses_reasoning", Data: json.RawMessage(`[{"type":"reasoning"}]`), Required: true}}},
+		{Kind: ai.ContentReasoning, Text: "thinking", Extensions: []ai.Extension{{Namespace: "anthropic", Type: "thinking_signature", Data: json.RawMessage(`"sig"`), Required: true}}},
+		ai.HostedToolCallPart("openai", ai.HostedToolCall{Kind: ai.HostedToolWebSearch, Raw: json.RawMessage(`{"type":"web_search_call"}`)}),
+		{Kind: ai.ContentText, Text: "cited answer"},
+	}}}}
+	store := &sharedHistoryStore{state: state}
+	result, err := newCompactor(t, store, summaryModel()).Compact(t.Context(), 1)
+	if err != nil || !result.Changed {
+		t.Fatalf("result = %+v, error = %v", result, err)
+	}
+}

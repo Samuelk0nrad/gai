@@ -57,8 +57,9 @@ search entry point that Google asks apps to display.
 
 Each provider replays only its own items, in their original order among
 reasoning, text and tool calls. None of these extensions is required, so
-other providers skip them, and history compaction leaves them out of the
-summary prompt. `ai.RenderMessages` still rejects them, as it rejects any
+other providers skip them. History compaction leaves them out of the summary
+prompt, together with the reasoning items, signatures and fallback blocks
+that the adapters keep for replay. `ai.RenderMessages` still rejects them, as it rejects any
 extension.
 
 ## Turning them on
@@ -87,6 +88,11 @@ caller sees one generation: the parts of every request in order, one
 completion with the final stop reason, and usage summed over the requests.
 A turn that is still paused after the last continuation fails with an
 `ai.TerminalError` whose reason is `pause_turn`.
+
+`AIResponse.Raw`, `Completion.Raw` and the request ID describe the last
+request only. The paused requests' content is in the message, but not in
+`Raw`. When the paused turn switched models with a fallback block, the
+declined attempt's reasoning and tool blocks are not sent back, as on replay.
 
 ## Gemini grounding in streams
 

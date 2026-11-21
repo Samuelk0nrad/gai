@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/openai/openai-go/responses"
 )
 
 const (
@@ -262,4 +263,43 @@ func TestResponsesStreamShiftsCitationsAfterUnannotatedContent(t *testing.T) {
 			t.Fatalf("part %d %q: citation covers %q (text %q), want %q", i, part.Text, got, c.Text, want)
 		}
 	}
+}
+
+// mcp_list_tools lists a server's tools without calling one, so it is
+// replayed but not counted as a hosted tool call.
+func TestResponsesKeepsMCPListToolsWithoutCountingIt(t *testing.T) {
+	listTools := `{"id":"mcpl_1","type":"mcp_list_tools","server_label":"docs","tools":[]}`
+	mcpCall := `{"id":"mcp_1","type":"mcp_call","server_label":"docs","name":"search","arguments":"{}","output":"ok"}`
+	response, err := responseFromResponsesJSON(t, `{"id":"resp_1","status":"completed","output":[`+listTools+`,`+mcpCall+`]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := response.Message.HostedToolCalls()
+	if len(calls) != 1 || calls[0].Name != "mcp_call" || calls[0].Kind != ai.HostedToolMCP {
+		t.Fatalf("calls = %#v", calls)
+	}
+	input, err := mapResponsesMessages([]ai.Message{ai.TextMessage(ai.RoleUser, "x"), response.Message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(input)
+	if !strings.Contains(string(raw), `"type":"mcp_list_tools"`) || !strings.Contains(string(raw), `"type":"mcp_call"`) {
+		t.Fatalf("replayed input = %s", raw)
+	}
+}
+
+func TestResponsesRejectsHostedCallWithoutItem(t *testing.T) {
+	part := ai.HostedToolCallPart(extensionNamespace, ai.HostedToolCall{Kind: ai.HostedToolWebSearch})
+	if _, err := mapResponsesMessages([]ai.Message{{Role: ai.RoleAssistant, Parts: []ai.ContentPart{part}}}); err == nil {
+		t.Fatal("hosted call without its item was dropped silently")
+	}
+}
+
+func responseFromResponsesJSON(t *testing.T, raw string) (*ai.AIResponse, error) {
+	t.Helper()
+	var response responses.Response
+	if err := json.Unmarshal([]byte(raw), &response); err != nil {
+		t.Fatal(err)
+	}
+	return responseFromResponses(&response)
 }

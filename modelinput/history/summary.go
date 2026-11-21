@@ -162,11 +162,12 @@ func summaryTurnCount(turnCount int, amount float32) int {
 
 func writeTurn(ctx context.Context, builder *strings.Builder, turn *modelinput.Turn) error {
 	var messages []ai.Message
-	// The summary prompt needs only the visible content. Optional provider
-	// data, such as hosted tool calls and citations, has no text form and
-	// would make RenderMessages reject the turn. Required state still does.
+	// The summary prompt needs only the visible content. Provider state, such
+	// as reasoning items, signatures, hosted tool calls and citations, has no
+	// text form and would make RenderMessages reject the turn. Unknown
+	// required state still does.
 	add := func(message ai.Message) {
-		if text, ok := message.WithoutOptionalExtensions(); ok {
+		if text, ok := message.WithoutProviderState(); ok {
 			messages = append(messages, text)
 		}
 	}

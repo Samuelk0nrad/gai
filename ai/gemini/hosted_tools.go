@@ -75,9 +75,15 @@ func hostedPartInput(extensions []ai.Extension) (*genai.Part, error) {
 			continue
 		}
 		var raw json.RawMessage
-		if ext.Type == hostedToolResultExtension {
+		switch ext.Type {
+		case hostedToolResultExtension:
 			raw = ext.Data
-		} else if call, ok := ai.DecodeHostedToolCall(ext); ok {
+		case ai.ExtensionHostedToolCall:
+			call, ok := ai.DecodeHostedToolCall(ext)
+			if !ok {
+				return nil, fmt.Errorf("decode Gemini hosted tool call: invalid data")
+			}
+			// Calls known only from grounding metadata have no part.
 			raw = call.Raw
 		}
 		if len(raw) == 0 {
@@ -106,10 +112,11 @@ func groundingPart(metadata *genai.GroundingMetadata, searchCallsReturned bool) 
 	}
 	var extensions []ai.Extension
 	if !searchCallsReturned {
-		for _, query := range metadata.WebSearchQueries {
+		// Queries are counted once, as a merged stream counts them.
+		for _, query := range appendNew(nil, metadata.WebSearchQueries) {
 			extensions = append(extensions, ai.HostedToolCallPart(extensionNamespace, ai.HostedToolCall{Kind: ai.HostedToolWebSearch, Name: "google_search", Status: "completed", Query: query}).Extensions...)
 		}
-		for _, query := range metadata.ImageSearchQueries {
+		for _, query := range appendNew(nil, metadata.ImageSearchQueries) {
 			extensions = append(extensions, ai.HostedToolCallPart(extensionNamespace, ai.HostedToolCall{Kind: ai.HostedToolWebSearch, Name: "google_image_search", Status: "completed", Query: query}).Extensions...)
 		}
 	}

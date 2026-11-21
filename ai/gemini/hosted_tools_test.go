@@ -235,3 +235,14 @@ func TestHostedPartWithRequiredSiblingIsRejected(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+// Generate and GenerateStream count repeated queries the same way.
+func TestGenerateCountsRepeatedGroundingQueriesOnce(t *testing.T) {
+	message, err := mapCanonicalResponseJSON(t, `{"candidates":[{"content":{"role":"model","parts":[{"text":"x"}]},"groundingMetadata":{"webSearchQueries":["x","x"]}}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := message.HostedToolCalls(); len(calls) != 1 {
+		t.Fatalf("calls = %#v", calls)
+	}
+}

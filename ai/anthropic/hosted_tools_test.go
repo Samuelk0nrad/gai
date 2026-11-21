@@ -267,11 +267,60 @@ func TestGenerateStopsContinuingPausedTurnAtLimit(t *testing.T) {
 	}
 }
 
+func responseBlocks(t *testing.T, raw string) []antropic.ContentBlockUnion {
+	t.Helper()
+	var message antropic.Message
+	if err := json.Unmarshal([]byte(`{"id":"m","type":"message","role":"assistant","content":[`+raw+`]}`), &message); err != nil {
+		t.Fatal(err)
+	}
+	return message.Content
+}
+
+func blockTypes(t *testing.T, blocks []antropic.ContentBlockParamUnion) string {
+	t.Helper()
+	var types []string
+	for _, block := range blocks {
+		var head struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(mustJSON(t, block)), &head); err != nil {
+			t.Fatal(err)
+		}
+		types = append(types, head.Type)
+	}
+	return strings.Join(types, ",")
+}
+
 func TestContinuePausedTurnExtendsTrailingAssistant(t *testing.T) {
 	messages := []antropic.MessageParam{antropic.NewUserMessage(antropic.NewTextBlock("q")), antropic.NewAssistantMessage(antropic.NewTextBlock("a"))}
-	out := continuePausedTurn(messages, []antropic.ContentBlockParamUnion{antropic.NewTextBlock("b")})
+	out := continuePausedTurn(messages, responseBlocks(t, `{"type":"text","text":"b"}`))
 	if len(out) != 2 || len(out[1].Content) != 2 || len(messages[1].Content) != 1 {
 		t.Fatalf("out = %#v, source = %#v", out, messages)
+	}
+}
+
+// A paused turn that switched models with a fallback block must not send the
+// declined attempt's state back.
+func TestContinuePausedTurnDropsDeclinedAttempt(t *testing.T) {
+	content := responseBlocks(t, `{"type":"thinking","thinking":"t","signature":"s"},`+serverToolUseBlock+`,`+searchResultBlock+`,{"type":"text","text":"kept"},{"type":"fallback","from":{"model":"a"},"to":{"model":"b"}},`+serverToolUseBlock)
+	out := continuePausedTurn([]antropic.MessageParam{antropic.NewUserMessage(antropic.NewTextBlock("q"))}, content)
+	if got := blockTypes(t, out[1].Content); got != "text,fallback,server_tool_use" {
+		t.Fatalf("continued blocks = %s", got)
+	}
+}
+
+func TestUnreplayableHostedItemsAreRejected(t *testing.T) {
+	call := serverToolUsePart(json.RawMessage(serverToolUseBlock))
+	for name, part := range map[string]ai.ContentPart{
+		"corrupt result":     {Kind: ai.ContentExtension, Extensions: []ai.Extension{{Namespace: extensionNamespace, Type: hostedToolResultExtension, Data: json.RawMessage(`"truncated`)}}},
+		"call without block": ai.HostedToolCallPart(extensionNamespace, ai.HostedToolCall{Kind: ai.HostedToolWebSearch}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := mapNativeMessages([]ai.Message{ai.TextMessage(ai.RoleUser, "x"), {Role: ai.RoleAssistant, Parts: []ai.ContentPart{call, part}}}, false)
+			if err == nil {
+				t.Fatal("unreplayable hosted item was dropped silently")
+			}
+		})
 	}
 }
 

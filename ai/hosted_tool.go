@@ -154,16 +154,30 @@ func (m Message) Citations() []Citation {
 	return out
 }
 
-// WithoutOptionalExtensions returns a copy of m without optional
-// extensions: extensions that are not Required are removed, and so are
-// extension parts left with none. Required provider state is kept, so text
-// renderers still reject it. ok is false when no part is left. Use it to show
-// a message as text, such as in a summary prompt; never replay the result in
-// place of m.
-func (m Message) WithoutOptionalExtensions() (Message, bool) {
-	out := Message{Role: m.Role, Extensions: requiredExtensions(m.Extensions)}
+// replayState lists the required extensions that GAI's provider adapters
+// keep only so the same provider can continue a conversation: OpenAI
+// reasoning items, Anthropic thinking signatures, redacted thinking and
+// fallback blocks, and Google thought signatures. They hold no content a
+// reader needs.
+var replayState = map[[2]string]bool{
+	{"openai", "responses_reasoning"}:   true,
+	{"anthropic", "thinking_signature"}: true,
+	{"anthropic", "redacted_thinking"}:  true,
+	{"anthropic", "fallback"}:           true,
+	{"google", "thought_signature"}:     true,
+}
+
+// WithoutProviderState returns a copy of m without provider state: optional
+// extensions, the replay state GAI's provider adapters keep (reasoning items,
+// thinking and thought signatures, fallback blocks), and extension parts left
+// with no extensions. Reasoning text stays. Any other required extension is
+// kept, so text renderers still reject it. ok is false when no part is left.
+// Use it to show a message as text, such as in a summary prompt; never replay
+// the result in place of m.
+func (m Message) WithoutProviderState() (Message, bool) {
+	out := Message{Role: m.Role, Extensions: keptExtensions(m.Extensions)}
 	for _, part := range CloneParts(m.Parts) {
-		part = withoutOptionalExtensions(part)
+		part = withoutProviderState(part)
 		if part.Kind == ContentExtension && len(part.Extensions) == 0 {
 			continue
 		}
@@ -172,15 +186,15 @@ func (m Message) WithoutOptionalExtensions() (Message, bool) {
 	return out, len(out.Parts) > 0
 }
 
-func withoutOptionalExtensions(part ContentPart) ContentPart {
-	part.Extensions = requiredExtensions(part.Extensions)
+func withoutProviderState(part ContentPart) ContentPart {
+	part.Extensions = keptExtensions(part.Extensions)
 	if part.ToolCall != nil {
-		part.ToolCall.Extensions = requiredExtensions(part.ToolCall.Extensions)
+		part.ToolCall.Extensions = keptExtensions(part.ToolCall.Extensions)
 	}
 	if part.ToolResult != nil {
 		kept := part.ToolResult.Parts[:0]
 		for _, child := range part.ToolResult.Parts {
-			child = withoutOptionalExtensions(child)
+			child = withoutProviderState(child)
 			if child.Kind == ContentExtension && len(child.Extensions) == 0 {
 				continue
 			}
@@ -191,10 +205,12 @@ func withoutOptionalExtensions(part ContentPart) ContentPart {
 	return part
 }
 
-func requiredExtensions(extensions []Extension) []Extension {
+// keptExtensions returns the required extensions that are not known replay
+// state.
+func keptExtensions(extensions []Extension) []Extension {
 	var kept []Extension
 	for _, ext := range extensions {
-		if ext.Required {
+		if ext.Required && !replayState[[2]string{ext.Namespace, ext.Type}] {
 			kept = append(kept, ext)
 		}
 	}

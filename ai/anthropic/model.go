@@ -362,7 +362,11 @@ func mapNativeMessages(messages []ai.Message, midConversationSystem bool) ([]ant
 				}
 				blocks = append(blocks, antropic.NewToolResultBlock(r.ToolCallID, content.String(), r.IsError))
 			case ai.ContentExtension:
-				if raw := hostedBlock(part.Extensions); raw != nil {
+				raw, err := hostedBlock(part.Extensions)
+				if err != nil {
+					return nil, err
+				}
+				if raw != nil {
 					// Hosted tool extensions are optional, so any required
 					// extension beside one is state this part cannot replay.
 					if err := unsupportedExtensions(part.Extensions); err != nil {
@@ -450,11 +454,12 @@ func validateSystemPlacement(messages []antropic.MessageParam) error {
 
 const fallbackExtension = "fallback"
 
-// dropPreFallbackState removes the reasoning, redacted reasoning and tool
-// calls that precede the last fallback block. They belong to the declined
-// attempt: the API rejects them on replay, and a tool call before the switch
-// was never part of the answer the fallback model produced. Text and the
-// fallback blocks stay in place.
+// dropPreFallbackState removes the reasoning, redacted reasoning, tool calls
+// and hosted server tool blocks (server_tool_use and its results) that
+// precede the last fallback block. They belong to the declined attempt: the
+// API rejects them on replay, and a tool call before the switch was never
+// part of the answer the fallback model produced. Text and the fallback
+// blocks stay in place.
 func dropPreFallbackState(parts []ai.ContentPart) []ai.ContentPart {
 	last := -1
 	for i, part := range parts {
@@ -494,7 +499,7 @@ func isAttemptState(part ai.ContentPart) bool {
 	case ai.ContentReasoning, ai.ContentToolCall:
 		return true
 	case ai.ContentExtension:
-		return hasAnthropicExtension(part.Extensions, "redacted_thinking") || hostedBlock(part.Extensions) != nil
+		return hasAnthropicExtension(part.Extensions, "redacted_thinking") || hasHostedBlock(part.Extensions)
 	default:
 		return false
 	}
@@ -665,11 +670,13 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	options, _ := m.requestOptions(req, payload)
 	// A long server tool turn can stop with pause_turn. The paused turn is
 	// sent back and continued; the result combines every request's content
-	// and usage.
+	// and usage. Raw, the request ID and the stop details are the last
+	// request's.
 	var message *antropic.Message
 	var content []antropic.ContentBlockUnion
 	var usage ai.Usage
 	usageReported := false
+	base := payload.Messages
 	for continuation := 0; ; continuation++ {
 		message, err = client.Messages.New(ctx, payload, options...)
 		if err != nil {
@@ -686,7 +693,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		if message.StopReason != antropic.StopReasonPauseTurn || continuation == maxPauseContinuations {
 			break
 		}
-		payload.Messages = continuePausedTurn(payload.Messages, message.ToParam().Content)
+		payload.Messages = continuePausedTurn(base, content)
 	}
 	semantic, err := mapCanonicalMessageContent(content)
 	text, thinking, calls := semantic.Text(), semantic.Reasoning(), semantic.ToolCalls()
@@ -913,9 +920,16 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		// requests; completion.Usage holds the current request's.
 		var prior ai.Usage
 		var blocks map[int64]*streamBlock
+		base := payload.Messages
+		var pausedContent []antropic.ContentBlockUnion
+		// Each request's stream is closed before the next one starts, and the
+		// last one when the generation ends.
+		closeStream := func() error { return nil }
+		defer func() { _ = closeStream() }()
 		for continuation := 0; ; continuation++ {
+			_ = closeStream()
 			stream := client.Messages.NewStreaming(generationCtx, payload, options...)
-			defer stream.Close()
+			closeStream = stream.Close
 			blocks = map[int64]*streamBlock{}
 			var turn antropic.Message
 			var turnErr error
@@ -1107,7 +1121,8 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			}
 			prior.Add(completion.Usage)
 			completion.Usage = ai.Usage{}
-			payload.Messages = continuePausedTurn(payload.Messages, turn.ToParam().Content)
+			pausedContent = append(pausedContent, turn.Content...)
+			payload.Messages = continuePausedTurn(base, pausedContent)
 		}
 		// A stream that ends cleanly without message_delta still delivers the
 		// parts held back for a possible fallback.

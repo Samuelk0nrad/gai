@@ -10,39 +10,47 @@ import (
 	"github.com/openai/openai-go/responses"
 )
 
-const extensionNamespace = "openai"
+const (
+	extensionNamespace = "openai"
+	// hostedToolItemExtension keeps a hosted tool output item that is not a
+	// call, such as mcp_list_tools, for replay only.
+	hostedToolItemExtension = "hosted_tool_item"
+)
 
 // hostedToolItem describes a hosted tool output item type that the Responses
 // API accepts back as input: its normalized kind and its input variant. The
 // item JSON is replayed unchanged, so fields this SDK version does not model
 // are kept too.
 type hostedToolItem struct {
-	kind  string
+	kind string
+	// call is false for items that do not run a tool, such as mcp_list_tools.
+	// They are replayed but not listed as hosted tool calls.
+	call  bool
 	input func(json.RawMessage) responses.ResponseInputItemUnionParam
 }
 
 var hostedToolItems = map[string]hostedToolItem{
-	"web_search_call": {ai.HostedToolWebSearch, func(raw json.RawMessage) responses.ResponseInputItemUnionParam {
+	"web_search_call": {ai.HostedToolWebSearch, true, func(raw json.RawMessage) responses.ResponseInputItemUnionParam {
 		item := param.Override[responses.ResponseFunctionWebSearchParam](raw)
 		return responses.ResponseInputItemUnionParam{OfWebSearchCall: &item}
 	}},
-	"file_search_call": {ai.HostedToolFileSearch, func(raw json.RawMessage) responses.ResponseInputItemUnionParam {
+	"file_search_call": {ai.HostedToolFileSearch, true, func(raw json.RawMessage) responses.ResponseInputItemUnionParam {
 		item := param.Override[responses.ResponseFileSearchToolCallParam](raw)
 		return responses.ResponseInputItemUnionParam{OfFileSearchCall: &item}
 	}},
-	"code_interpreter_call": {ai.HostedToolCodeExecution, func(raw json.RawMessage) responses.ResponseInputItemUnionParam {
+	"code_interpreter_call": {ai.HostedToolCodeExecution, true, func(raw json.RawMessage) responses.ResponseInputItemUnionParam {
 		item := param.Override[responses.ResponseCodeInterpreterToolCallParam](raw)
 		return responses.ResponseInputItemUnionParam{OfCodeInterpreterCall: &item}
 	}},
-	"image_generation_call": {ai.HostedToolImageGeneration, func(raw json.RawMessage) responses.ResponseInputItemUnionParam {
+	"image_generation_call": {ai.HostedToolImageGeneration, true, func(raw json.RawMessage) responses.ResponseInputItemUnionParam {
 		item := param.Override[responses.ResponseInputItemImageGenerationCallParam](raw)
 		return responses.ResponseInputItemUnionParam{OfImageGenerationCall: &item}
 	}},
-	"mcp_call": {ai.HostedToolMCP, func(raw json.RawMessage) responses.ResponseInputItemUnionParam {
+	"mcp_call": {ai.HostedToolMCP, true, func(raw json.RawMessage) responses.ResponseInputItemUnionParam {
 		item := param.Override[responses.ResponseInputItemMcpCallParam](raw)
 		return responses.ResponseInputItemUnionParam{OfMcpCall: &item}
 	}},
-	"mcp_list_tools": {ai.HostedToolMCP, func(raw json.RawMessage) responses.ResponseInputItemUnionParam {
+	"mcp_list_tools": {ai.HostedToolMCP, false, func(raw json.RawMessage) responses.ResponseInputItemUnionParam {
 		item := param.Override[responses.ResponseInputItemMcpListToolsParam](raw)
 		return responses.ResponseInputItemUnionParam{OfMcpListTools: &item}
 	}},
@@ -53,8 +61,8 @@ func isHostedToolItem(itemType string) bool {
 	return ok
 }
 
-// hostedToolPart keeps one hosted tool output item as an ordered
-// ai.HostedToolCall extension part.
+// hostedToolPart keeps one hosted tool output item as an ordered extension
+// part: an ai.HostedToolCall for a call, or a replay-only item otherwise.
 func hostedToolPart(raw json.RawMessage) ai.ContentPart {
 	var item struct {
 		ID     string `json:"id"`
@@ -66,24 +74,48 @@ func hostedToolPart(raw json.RawMessage) ai.ContentPart {
 		} `json:"action"`
 	}
 	_ = json.Unmarshal(raw, &item)
+	if !hostedToolItems[item.Type].call {
+		return ai.ContentPart{Kind: ai.ContentExtension, Extensions: []ai.Extension{{Namespace: extensionNamespace, Type: hostedToolItemExtension, Data: append(json.RawMessage(nil), raw...)}}}
+	}
 	return ai.HostedToolCallPart(extensionNamespace, ai.HostedToolCall{
 		ID: item.ID, Kind: hostedToolItems[item.Type].kind, Name: item.Type, Status: item.Status,
 		Query: item.Action.Query, URL: item.Action.URL, Raw: append(json.RawMessage(nil), raw...),
 	})
 }
 
-func hostedToolInput(call ai.HostedToolCall) (responses.ResponseInputItemUnionParam, error) {
+// hostedToolExtensionInput returns the input item that a hosted tool
+// extension replays. ok is false for any other extension.
+func hostedToolExtensionInput(ext ai.Extension) (item responses.ResponseInputItemUnionParam, ok bool, err error) {
+	if ext.Namespace != extensionNamespace {
+		return item, false, nil
+	}
+	switch ext.Type {
+	case hostedToolItemExtension:
+		item, err = hostedToolInput(ext.Data)
+		return item, true, err
+	case ai.ExtensionHostedToolCall:
+		call, decoded := ai.DecodeHostedToolCall(ext)
+		if !decoded || len(call.Raw) == 0 {
+			return item, true, fmt.Errorf("decode OpenAI hosted tool call: no output item")
+		}
+		item, err = hostedToolInput(call.Raw)
+		return item, true, err
+	}
+	return item, false, nil
+}
+
+func hostedToolInput(raw json.RawMessage) (responses.ResponseInputItemUnionParam, error) {
 	var head struct {
 		Type string `json:"type"`
 	}
-	if err := json.Unmarshal(call.Raw, &head); err != nil {
+	if err := json.Unmarshal(raw, &head); err != nil {
 		return responses.ResponseInputItemUnionParam{}, fmt.Errorf("decode OpenAI hosted tool item: %w", err)
 	}
 	item, ok := hostedToolItems[head.Type]
 	if !ok {
 		return responses.ResponseInputItemUnionParam{}, fmt.Errorf("%w: OpenAI hosted tool item %q", ai.ErrUnsupportedCapability, head.Type)
 	}
-	return item.input(append(json.RawMessage(nil), call.Raw...)), nil
+	return item.input(append(json.RawMessage(nil), raw...)), nil
 }
 
 // annotationCitations maps output_text annotations to citations on text,
