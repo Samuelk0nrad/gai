@@ -955,6 +955,10 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					if event.Message.JSON.Usage.Valid() {
 						completion.UsageReported = true
 						completion.Usage.InputTokens = int(event.Message.Usage.InputTokens + event.Message.Usage.CacheCreationInputTokens + event.Message.Usage.CacheReadInputTokens)
+						// message_start can already report output tokens. A
+						// message_delta replaces them with its cumulative count, but
+						// a request that fails before one still reports them.
+						completion.Usage.OutputTokens = int(event.Message.Usage.OutputTokens)
 						completion.Usage.CachedTokens = int(event.Message.Usage.CacheReadInputTokens)
 						completion.Usage.CacheCreationTokens = int(event.Message.Usage.CacheCreationInputTokens)
 					}

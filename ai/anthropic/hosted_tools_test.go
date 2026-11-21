@@ -321,6 +321,38 @@ func TestGenerateStreamReportsPausedUsageWhenContinuationFails(t *testing.T) {
 	}
 }
 
+// A continuation that fails after its message_start still reports the usage
+// that message_start carried, output tokens included.
+func TestGenerateStreamReportsContinuationStartUsageWhenItFails(t *testing.T) {
+	requests := 0
+	m := testModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			_, _ = w.Write([]byte(pausedStream))
+			return
+		}
+		_, _ = w.Write([]byte(sse("message_start", `{"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":20,"output_tokens":1}}}`) +
+			sse("content_block_delta", `{"type":"content_block_delta","index":7,"delta":{"type":"text_delta","text":"x"}}`)))
+	})
+	var completions []ai.Completion
+	var streamErr error
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "news")}}) {
+		if token.Completion != nil {
+			completions = append(completions, *token.Completion)
+		}
+		if token.Err != nil {
+			streamErr = token.Err
+		}
+	}
+	if streamErr == nil {
+		t.Fatal("missing continuation error")
+	}
+	if len(completions) != 1 || completions[0].Usage.InputTokens != 30 || completions[0].Usage.OutputTokens != 4 || completions[0].InitialInputTokens != 10 {
+		t.Fatalf("completions = %+v", completions)
+	}
+}
+
 func TestGenerateRecordsPausedUsageWhenContinuationFails(t *testing.T) {
 	var finished *gai.Observation
 	requests := 0
