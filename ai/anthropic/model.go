@@ -680,6 +680,10 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	for continuation := 0; ; continuation++ {
 		message, err = client.Messages.New(ctx, payload, options...)
 		if err != nil {
+			// The paused requests before this one were billed.
+			if usageReported {
+				generationResult.Usage = &usage
+			}
 			return nil, localError(err)
 		}
 		content = append(content, message.Content...)
@@ -695,6 +699,9 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		}
 		payload.Messages = continuePausedTurn(base, content)
 	}
+	if usageReported {
+		generationResult.Usage = &usage
+	}
 	semantic, err := mapCanonicalMessageContent(content)
 	text, thinking, calls := semantic.Text(), semantic.Reasoning(), semantic.ToolCalls()
 	if err != nil {
@@ -705,9 +712,6 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 	generationResult.RequestID = message.ID
 	generationResult.FinishReason = string(message.StopReason)
 	generationResult.ToolCallCount = len(calls)
-	if usageReported {
-		generationResult.Usage = &usage
-	}
 	if err := anthropicTerminalError(string(message.StopReason), message.StopDetails); err != nil {
 		return nil, err
 	}
@@ -918,7 +922,12 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		// sent back and continued in a new request, and its parts keep
 		// streaming as one generation. prior holds the usage of the paused
 		// requests; completion.Usage holds the current request's.
+		// initialInput is the first request's input, which a budget
+		// checkpoint needs, and withheld is set while a paused request's
+		// usage waits for the final completion.
 		var prior ai.Usage
+		initialInput := 0
+		withheld := false
 		var blocks map[int64]*streamBlock
 		base := payload.Messages
 		var pausedContent []antropic.ContentBlockUnion
@@ -970,13 +979,14 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					completion.Raw = append(completion.Raw[:0], []byte(event.RawJSON())...)
 					if completion.FinishReason == string(antropic.StopReasonPauseTurn) && continuation < maxPauseContinuations {
 						// The completion is reported once, after the last request.
-						paused = true
+						paused, withheld = true, true
+						if continuation == 0 {
+							initialInput = completion.Usage.InputTokens
+						}
 						continue
 					}
-					snapshot := completion
-					snapshot.Usage = prior
-					snapshot.Usage.Add(completion.Usage)
-					snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
+					snapshot := combinedCompletion(completion, prior, initialInput)
+					withheld = false
 					if !emit(ai.Token{Completion: &snapshot}) {
 						return
 					}
@@ -1136,11 +1146,34 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				streamErr = pendingToolErr
 			}
 		}
+		if streamErr != nil && withheld {
+			// A later request failed after paused ones were billed. Their
+			// usage, and any the failed request reported, comes before the
+			// error. The paused request's stop reason and payload do not
+			// describe this outcome.
+			snapshot := combinedCompletion(completion, prior, initialInput)
+			snapshot.FinishReason, snapshot.Raw = "", nil
+			err := streamErr
+			emit(ai.Token{Completion: &snapshot})
+			streamErr = err
+		}
 		if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
 			emit(ai.Token{Err: streamErr})
 		}
 	}()
 	return out
+}
+
+// combinedCompletion reports a generation that may span several requests:
+// prior is the usage of the paused requests before the current one, and
+// initialInput the first request's input when there were any.
+func combinedCompletion(current ai.Completion, prior ai.Usage, initialInput int) ai.Completion {
+	snapshot := current
+	snapshot.Usage = prior
+	snapshot.Usage.Add(current.Usage)
+	snapshot.InitialInputTokens = initialInput
+	snapshot.Raw = append(json.RawMessage(nil), current.Raw...)
+	return snapshot
 }
 
 type streamBlock struct {

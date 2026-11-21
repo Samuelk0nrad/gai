@@ -148,6 +148,10 @@ An accepted response with `Completion.UsageReported` replaces the complete
 request's estimate with its reported `Usage.InputTokens`. Explicit zero is valid;
 missing usage is not zero. Custom models must set `UsageReported: true` when
 reporting usage. Metadata-only completion updates do not erase earlier usage.
+When a model combines several provider requests into one generation, such as
+a continued Anthropic `pause_turn`, `Usage` is their sum and
+`Completion.InitialInputTokens` is the first request's input; the checkpoint
+uses the latter.
 
 The active execution keeps a detached request checkpoint. When its messages are
 an unchanged prefix and the model identity/name, counter algorithm, schemas,

@@ -89,6 +89,12 @@ completion with the final stop reason, and usage summed over the requests.
 A turn that is still paused after the last continuation fails with an
 `ai.TerminalError` whose reason is `pause_turn`.
 
+`Completion.InitialInputTokens` holds the first request's input. That is the
+size of the caller's request, which the summed `Usage.InputTokens` no longer
+shows, and request budgets use it as their checkpoint. If a continuation
+fails, a stream sends a completion with the usage so far before the error,
+and `Generate` records that usage on its generation observation.
+
 `AIResponse.Raw`, `Completion.Raw` and the request ID describe the last
 request only. The paused requests' content is in the message, but not in
 `Raw`. When the paused turn switched models with a fallback block, the
@@ -97,6 +103,8 @@ declined attempt's reasoning and tool blocks are not sent back, as on replay.
 ## Gemini grounding in streams
 
 Gemini normally sends grounding metadata with the final stream chunk. When
-several chunks carry it, GAI merges them: search queries, sources (by URI)
-and supported segments are each kept once. So a query that the model really
+several chunks carry it, GAI merges them: search queries, sources and
+supported segments are each kept once. Web and maps sources are matched by
+URI. Other sources, such as retrieved passages, are matched by their whole
+content, because several passages can come from one document. So a query that the model really
 ran twice in one turn is counted once.

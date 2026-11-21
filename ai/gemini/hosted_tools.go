@@ -182,9 +182,10 @@ func isSearchCall(part *genai.Part) bool {
 // mergeGrounding adds the grounding metadata of one stream chunk to the
 // metadata gathered so far. A chunk may repeat earlier metadata or carry only
 // new data, so queries, sources and supports are merged without duplicates:
-// queries by text, sources by URI (or content), and supports by segment and
-// sources. Support source indices are renumbered into the merged sources.
-// Other fields take the latest value.
+// queries by text, web and maps sources by URI, other sources by their whole
+// content (several retrieved passages can share one document URI), and
+// supports by segment and sources. Support source indices are renumbered into
+// the merged sources. Other fields take the latest value.
 func mergeGrounding(dst, src *genai.GroundingMetadata) *genai.GroundingMetadata {
 	if src == nil {
 		return dst
@@ -257,8 +258,6 @@ func groundingChunkKey(chunk *genai.GroundingChunk) string {
 		return ""
 	case chunk.Web != nil && chunk.Web.URI != "":
 		return "web:" + chunk.Web.URI
-	case chunk.RetrievedContext != nil && chunk.RetrievedContext.URI != "":
-		return "retrieved:" + chunk.RetrievedContext.URI
 	case chunk.Maps != nil && chunk.Maps.URI != "":
 		return "maps:" + chunk.Maps.URI
 	}
