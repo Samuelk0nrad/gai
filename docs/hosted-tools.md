@@ -78,10 +78,19 @@ Anthropic takes server tools through `anthropic.WithMessageParams`, and
 Gemini through `gemini.WithGenerateContentConfig`, for example by appending
 `&genai.Tool{GoogleSearch: &genai.GoogleSearch{}}` to `config.Tools`.
 
-## Limits
+## Paused Anthropic turns
 
-- Anthropic can end a long server tool turn with `stop_reason: "pause_turn"`.
-  GAI reports it as an `ai.TerminalError`; continuing a paused turn is not
-  supported yet.
-- In a Gemini stream, GAI keeps the grounding metadata of the last chunk that
-  carries it.
+Anthropic can stop a long server tool turn with `stop_reason: "pause_turn"`.
+The Anthropic adapter then sends the paused turn back and continues it in a
+new request, in `Generate` and in streams, up to 10 times per generation. The
+caller sees one generation: the parts of every request in order, one
+completion with the final stop reason, and usage summed over the requests.
+A turn that is still paused after the last continuation fails with an
+`ai.TerminalError` whose reason is `pause_turn`.
+
+## Gemini grounding in streams
+
+Gemini normally sends grounding metadata with the final stream chunk. When
+several chunks carry it, GAI merges them: search queries, sources (by URI)
+and supported segments are each kept once. So a query that the model really
+ran twice in one turn is counted once.

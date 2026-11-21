@@ -2,11 +2,13 @@ package anthropic
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/Samuelk0nrad/gai/ai"
+	antropic "github.com/anthropics/anthropic-sdk-go"
 )
 
 const (
@@ -159,4 +161,116 @@ func mustJSON(t *testing.T, value any) string {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+func TestGenerateContinuesPausedTurn(t *testing.T) {
+	var bodies []map[string]any
+	m := testModel(t, func(w http.ResponseWriter, r *http.Request) {
+		bodies = append(bodies, decodeRequest(t, r))
+		w.Header().Set("Content-Type", "application/json")
+		if len(bodies) == 1 {
+			_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","stop_reason":"pause_turn","usage":{"input_tokens":10,"output_tokens":3},"content":[` + serverToolUseBlock + `,` + searchResultBlock + `]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"msg_2","type":"message","role":"assistant","model":"claude-test","stop_reason":"end_turn","usage":{"input_tokens":20,"output_tokens":5},"content":[{"type":"text","text":"Go 1.26 is out.","citations":[` + searchCitation + `]}]}`))
+	})
+	response, err := m.Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "news")}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	assertSearchAndCitation(t, response.Message)
+	if response.FinishReason != "end_turn" || response.InputTokens != 30 || response.OutputTokens != 8 {
+		t.Fatalf("response = %+v", response)
+	}
+	assertPausedTurnSentBack(t, bodies)
+}
+
+func assertPausedTurnSentBack(t *testing.T, bodies []map[string]any) {
+	t.Helper()
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2", len(bodies))
+	}
+	messages := bodies[1]["messages"].([]any)
+	if len(messages) != 2 || object(t, messages[1])["role"] != "assistant" {
+		t.Fatalf("continuation messages = %#v", messages)
+	}
+	var types []string
+	for _, block := range object(t, messages[1])["content"].([]any) {
+		types = append(types, object(t, block)["type"].(string))
+	}
+	if strings.Join(types, ",") != "server_tool_use,web_search_tool_result" {
+		t.Fatalf("continued turn blocks = %v", types)
+	}
+	blocks := object(t, messages[1])["content"].([]any)
+	if input := object(t, object(t, blocks[0])["input"]); input["query"] != "go 1.26 release" {
+		t.Fatalf("continued server_tool_use input = %#v", input)
+	}
+	if !strings.Contains(mustJSON(t, blocks[1]), "opaque-result") {
+		t.Fatalf("continued result lost its encrypted content: %s", mustJSON(t, blocks[1]))
+	}
+}
+
+func TestGenerateStreamContinuesPausedTurn(t *testing.T) {
+	var bodies []map[string]any
+	m := testModel(t, func(w http.ResponseWriter, r *http.Request) {
+		bodies = append(bodies, decodeRequest(t, r))
+		w.Header().Set("Content-Type", "text/event-stream")
+		var b strings.Builder
+		if len(bodies) == 1 {
+			b.WriteString(sse("message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}`))
+			b.WriteString(sse("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}}`))
+			b.WriteString(sse("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"go 1.26 release\"}"}}`))
+			b.WriteString(sse("content_block_stop", `{"type":"content_block_stop","index":0}`))
+			b.WriteString(sse("content_block_start", `{"type":"content_block_start","index":1,"content_block":`+searchResultBlock+`}`))
+			b.WriteString(sse("content_block_stop", `{"type":"content_block_stop","index":1}`))
+			b.WriteString(sse("message_delta", `{"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":3}}`))
+		} else {
+			b.WriteString(sse("message_start", `{"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":20,"output_tokens":0}}}`))
+			b.WriteString(sse("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"","citations":[]}}`))
+			b.WriteString(sse("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":`+searchCitation+`}}`))
+			b.WriteString(sse("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Go 1.26 is out."}}`))
+			b.WriteString(sse("content_block_stop", `{"type":"content_block_stop","index":0}`))
+			b.WriteString(sse("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`))
+		}
+		b.WriteString(sse("message_stop", `{"type":"message_stop"}`))
+		_, _ = w.Write([]byte(b.String()))
+	})
+	message := ai.Message{Role: ai.RoleAssistant}
+	var completions []ai.Completion
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "news")}}) {
+		if token.Err != nil {
+			t.Fatalf("stream error: %v", token.Err)
+		}
+		if token.Completion != nil {
+			completions = append(completions, *token.Completion)
+		}
+		message.AppendToken(token)
+	}
+	assertSearchAndCitation(t, message)
+	if len(completions) != 1 || completions[0].FinishReason != "end_turn" || completions[0].RequestID != "msg_2" || completions[0].Usage.InputTokens != 30 || completions[0].Usage.OutputTokens != 8 {
+		t.Fatalf("completions = %+v", completions)
+	}
+	assertPausedTurnSentBack(t, bodies)
+}
+
+func TestGenerateStopsContinuingPausedTurnAtLimit(t *testing.T) {
+	requests := 0
+	m := testModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg","type":"message","role":"assistant","model":"claude-test","stop_reason":"pause_turn","usage":{"input_tokens":1,"output_tokens":1},"content":[` + serverToolUseBlock + `,` + searchResultBlock + `]}`))
+	})
+	_, err := m.Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "news")}})
+	var terminal *ai.TerminalError
+	if !errors.As(err, &terminal) || terminal.Reason != "pause_turn" || requests != maxPauseContinuations+1 {
+		t.Fatalf("error = %v, requests = %d", err, requests)
+	}
+}
+
+func TestContinuePausedTurnExtendsTrailingAssistant(t *testing.T) {
+	messages := []antropic.MessageParam{antropic.NewUserMessage(antropic.NewTextBlock("q")), antropic.NewAssistantMessage(antropic.NewTextBlock("a"))}
+	out := continuePausedTurn(messages, []antropic.ContentBlockParamUnion{antropic.NewTextBlock("b")})
+	if len(out) != 2 || len(out[1].Content) != 2 || len(messages[1].Content) != 1 {
+		t.Fatalf("out = %#v, source = %#v", out, messages)
+	}
 }

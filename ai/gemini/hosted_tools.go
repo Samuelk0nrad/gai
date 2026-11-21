@@ -3,6 +3,7 @@ package gemini
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/Samuelk0nrad/gai/ai"
 	"google.golang.org/genai"
@@ -169,4 +170,100 @@ func groundingCitations(metadata *genai.GroundingMetadata) []ai.Citation {
 
 func isSearchCall(part *genai.Part) bool {
 	return part.ToolCall != nil && hostedToolKind(part.ToolCall.ToolType) == ai.HostedToolWebSearch
+}
+
+// mergeGrounding adds the grounding metadata of one stream chunk to the
+// metadata gathered so far. A chunk may repeat earlier metadata or carry only
+// new data, so queries, sources and supports are merged without duplicates:
+// queries by text, sources by URI (or content), and supports by segment and
+// sources. Support source indices are renumbered into the merged sources.
+// Other fields take the latest value.
+func mergeGrounding(dst, src *genai.GroundingMetadata) *genai.GroundingMetadata {
+	if src == nil {
+		return dst
+	}
+	if dst == nil {
+		dst = &genai.GroundingMetadata{}
+	}
+	dst.WebSearchQueries = appendNew(dst.WebSearchQueries, src.WebSearchQueries)
+	dst.ImageSearchQueries = appendNew(dst.ImageSearchQueries, src.ImageSearchQueries)
+	dst.RetrievalQueries = appendNew(dst.RetrievalQueries, src.RetrievalQueries)
+	chunkIndex := map[string]int32{}
+	for i, chunk := range dst.GroundingChunks {
+		chunkIndex[groundingChunkKey(chunk)] = int32(i)
+	}
+	remap := make([]int32, len(src.GroundingChunks))
+	for i, chunk := range src.GroundingChunks {
+		key := groundingChunkKey(chunk)
+		index, ok := chunkIndex[key]
+		if !ok {
+			index = int32(len(dst.GroundingChunks))
+			dst.GroundingChunks = append(dst.GroundingChunks, chunk)
+			chunkIndex[key] = index
+		}
+		remap[i] = index
+	}
+	supports := map[string]bool{}
+	for _, support := range dst.GroundingSupports {
+		supports[groundingSupportKey(support)] = true
+	}
+	for _, support := range src.GroundingSupports {
+		if support == nil {
+			continue
+		}
+		merged := *support
+		merged.GroundingChunkIndices = nil
+		for _, index := range support.GroundingChunkIndices {
+			if index >= 0 && int(index) < len(remap) {
+				merged.GroundingChunkIndices = append(merged.GroundingChunkIndices, remap[index])
+			}
+		}
+		if key := groundingSupportKey(&merged); !supports[key] {
+			supports[key] = true
+			dst.GroundingSupports = append(dst.GroundingSupports, &merged)
+		}
+	}
+	if src.SearchEntryPoint != nil {
+		dst.SearchEntryPoint = src.SearchEntryPoint
+	}
+	if src.RetrievalMetadata != nil {
+		dst.RetrievalMetadata = src.RetrievalMetadata
+	}
+	if src.GoogleMapsWidgetContextToken != "" {
+		dst.GoogleMapsWidgetContextToken = src.GoogleMapsWidgetContextToken
+	}
+	return dst
+}
+
+func appendNew(dst, src []string) []string {
+	for _, value := range src {
+		if !slices.Contains(dst, value) {
+			dst = append(dst, value)
+		}
+	}
+	return dst
+}
+
+func groundingChunkKey(chunk *genai.GroundingChunk) string {
+	switch {
+	case chunk == nil:
+		return ""
+	case chunk.Web != nil && chunk.Web.URI != "":
+		return "web:" + chunk.Web.URI
+	case chunk.RetrievedContext != nil && chunk.RetrievedContext.URI != "":
+		return "retrieved:" + chunk.RetrievedContext.URI
+	case chunk.Maps != nil && chunk.Maps.URI != "":
+		return "maps:" + chunk.Maps.URI
+	}
+	raw, _ := json.Marshal(chunk)
+	return "json:" + string(raw)
+}
+
+func groundingSupportKey(support *genai.GroundingSupport) string {
+	key := struct {
+		Segment *genai.Segment `json:"s"`
+		Chunks  []int32        `json:"c"`
+	}{support.Segment, support.GroundingChunkIndices}
+	raw, _ := json.Marshal(key)
+	return string(raw)
 }

@@ -658,27 +658,42 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		observation.Finish(generationResult)
 	}()
 	options, _ := m.requestOptions(req, payload)
-	message, err := client.Messages.New(ctx, payload, options...)
-	if err != nil {
-		return nil, localError(err)
+	// A long server tool turn can stop with pause_turn. The paused turn is
+	// sent back and continued; the result combines every request's content
+	// and usage.
+	var message *antropic.Message
+	var content []antropic.ContentBlockUnion
+	var usage ai.Usage
+	usageReported := false
+	for continuation := 0; ; continuation++ {
+		message, err = client.Messages.New(ctx, payload, options...)
+		if err != nil {
+			return nil, localError(err)
+		}
+		content = append(content, message.Content...)
+		usage.Add(ai.Usage{
+			InputTokens:     int(message.Usage.InputTokens + message.Usage.CacheCreationInputTokens + message.Usage.CacheReadInputTokens),
+			OutputTokens:    int(message.Usage.OutputTokens),
+			ReasoningTokens: int(message.Usage.OutputTokensDetails.ThinkingTokens),
+			CachedTokens:    int(message.Usage.CacheReadInputTokens), CacheCreationTokens: int(message.Usage.CacheCreationInputTokens),
+		})
+		usageReported = usageReported || message.JSON.Usage.Valid()
+		if message.StopReason != antropic.StopReasonPauseTurn || continuation == maxPauseContinuations {
+			break
+		}
+		payload.Messages = continuePausedTurn(payload.Messages, message.ToParam().Content)
 	}
-	semantic, err := mapCanonicalMessageContent(message.Content)
+	semantic, err := mapCanonicalMessageContent(content)
 	text, thinking, calls := semantic.Text(), semantic.Reasoning(), semantic.ToolCalls()
 	if err != nil {
 		return nil, err
 	}
-	input := int(message.Usage.InputTokens + message.Usage.CacheCreationInputTokens + message.Usage.CacheReadInputTokens)
-	output := int(message.Usage.OutputTokens)
-	usage := ai.Usage{
-		InputTokens: input, OutputTokens: output,
-		ReasoningTokens: int(message.Usage.OutputTokensDetails.ThinkingTokens),
-		CachedTokens:    int(message.Usage.CacheReadInputTokens), CacheCreationTokens: int(message.Usage.CacheCreationInputTokens),
-	}
+	input, output := usage.InputTokens, usage.OutputTokens
 	generationResult.ResponseModel = string(message.Model)
 	generationResult.RequestID = message.ID
 	generationResult.FinishReason = string(message.StopReason)
 	generationResult.ToolCallCount = len(calls)
-	if message.JSON.Usage.Valid() {
+	if usageReported {
 		generationResult.Usage = &usage
 	}
 	if err := anthropicTerminalError(string(message.StopReason), message.StopDetails); err != nil {
@@ -884,179 +899,210 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		detector.PauseIn(generationCtx)
 		options, on := m.requestOptions(req, payload)
 		fallbacksOn = on
-		stream := client.Messages.NewStreaming(generationCtx, payload, options...)
-		defer stream.Close()
-		blocks := map[int64]*streamBlock{}
 		var pendingToolErr error
 		completion := ai.Completion{Provider: "anthropic"}
 		var stopDetails antropic.RefusalStopDetails
-		for stream.Next() {
-			event := stream.Current()
-			switch event.Type {
-			case "message_start":
-				completion.RequestID = event.Message.ID
-				completion.Model = string(event.Message.Model)
-				if event.Message.JSON.Usage.Valid() {
+		// A long server tool turn can stop with pause_turn. The paused turn is
+		// sent back and continued in a new request, and its parts keep
+		// streaming as one generation. prior holds the usage of the paused
+		// requests; completion.Usage holds the current request's.
+		var prior ai.Usage
+		var blocks map[int64]*streamBlock
+		for continuation := 0; ; continuation++ {
+			stream := client.Messages.NewStreaming(generationCtx, payload, options...)
+			defer stream.Close()
+			blocks = map[int64]*streamBlock{}
+			var turn antropic.Message
+			var turnErr error
+			paused := false
+			for stream.Next() {
+				event := stream.Current()
+				if err := turn.Accumulate(event); err != nil && turnErr == nil {
+					turnErr = err
+				}
+				switch event.Type {
+				case "message_start":
+					completion.RequestID = event.Message.ID
+					completion.Model = string(event.Message.Model)
+					if event.Message.JSON.Usage.Valid() {
+						completion.UsageReported = true
+						completion.Usage.InputTokens = int(event.Message.Usage.InputTokens + event.Message.Usage.CacheCreationInputTokens + event.Message.Usage.CacheReadInputTokens)
+						completion.Usage.CachedTokens = int(event.Message.Usage.CacheReadInputTokens)
+						completion.Usage.CacheCreationTokens = int(event.Message.Usage.CacheCreationInputTokens)
+					}
+				case "message_delta":
 					completion.UsageReported = true
-					completion.Usage.InputTokens = int(event.Message.Usage.InputTokens + event.Message.Usage.CacheCreationInputTokens + event.Message.Usage.CacheReadInputTokens)
-					completion.Usage.CachedTokens = int(event.Message.Usage.CacheReadInputTokens)
-					completion.Usage.CacheCreationTokens = int(event.Message.Usage.CacheCreationInputTokens)
-				}
-			case "message_delta":
-				completion.UsageReported = true
-				if input := int(event.Usage.InputTokens + event.Usage.CacheCreationInputTokens + event.Usage.CacheReadInputTokens); input != 0 {
-					completion.Usage.InputTokens = input
-				}
-				completion.Usage.OutputTokens = int(event.Usage.OutputTokens)
-				completion.Usage.ReasoningTokens = int(event.Usage.OutputTokensDetails.ThinkingTokens)
-				if event.Usage.CacheReadInputTokens != 0 {
-					completion.Usage.CachedTokens = int(event.Usage.CacheReadInputTokens)
-				}
-				if event.Usage.CacheCreationInputTokens != 0 {
-					completion.Usage.CacheCreationTokens = int(event.Usage.CacheCreationInputTokens)
-				}
-				completion.FinishReason = string(event.Delta.StopReason)
-				stopDetails = event.Delta.StopDetails
-				if !release(false) {
-					return
-				}
-				completion.Raw = append(completion.Raw[:0], []byte(event.RawJSON())...)
-				snapshot := completion
-				snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
-				if !emit(ai.Token{Completion: &snapshot}) {
-					return
-				}
-			case "content_block_start":
-				blocks[event.Index] = &streamBlock{typ: event.ContentBlock.Type, id: event.ContentBlock.ID, name: event.ContentBlock.Name}
-				block := blocks[event.Index]
-				block.signature.WriteString(event.ContentBlock.Signature)
-				switch event.ContentBlock.Type {
-				case "text":
-					block.text.WriteString(event.ContentBlock.Text)
-					if event.ContentBlock.Text != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.ContentBlock.Text}}) {
+					if input := int(event.Usage.InputTokens + event.Usage.CacheCreationInputTokens + event.Usage.CacheReadInputTokens); input != 0 {
+						completion.Usage.InputTokens = input
+					}
+					completion.Usage.OutputTokens = int(event.Usage.OutputTokens)
+					completion.Usage.ReasoningTokens = int(event.Usage.OutputTokensDetails.ThinkingTokens)
+					if event.Usage.CacheReadInputTokens != 0 {
+						completion.Usage.CachedTokens = int(event.Usage.CacheReadInputTokens)
+					}
+					if event.Usage.CacheCreationInputTokens != 0 {
+						completion.Usage.CacheCreationTokens = int(event.Usage.CacheCreationInputTokens)
+					}
+					completion.FinishReason = string(event.Delta.StopReason)
+					stopDetails = event.Delta.StopDetails
+					if !release(false) {
 						return
 					}
-				case "thinking":
-					if event.ContentBlock.Thinking != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: event.ContentBlock.Thinking}}) {
+					completion.Raw = append(completion.Raw[:0], []byte(event.RawJSON())...)
+					if completion.FinishReason == string(antropic.StopReasonPauseTurn) && continuation < maxPauseContinuations {
+						// The completion is reported once, after the last request.
+						paused = true
+						continue
+					}
+					snapshot := completion
+					snapshot.Usage = prior
+					snapshot.Usage.Add(completion.Usage)
+					snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
+					if !emit(ai.Token{Completion: &snapshot}) {
 						return
 					}
-				case "redacted_thinking":
-					part := ai.ContentPart{Kind: ai.ContentExtension, Extensions: anthropicExtensions("redacted_thinking", event.ContentBlock.Data)}
-					if !emitPart(ai.Token{Part: &part}) {
-						return
-					}
-				case "tool_use":
-					holding = holding || fallbacksOn
-				case "server_tool_use":
-					block.start = event.ContentBlock.RawJSON()
-				case fallbackExtension:
-					// The declined attempt's tool calls never reach the caller,
-					// and its stream-level tool errors no longer apply.
-					raw := event.ContentBlock.RawJSON()
-					if !json.Valid([]byte(raw)) {
-						streamErr = errors.New("anthropic stream fallback block is invalid JSON")
-						break
-					}
-					pendingToolErr = nil
-					if !release(true) {
-						return
-					}
-					if model := fallbackTarget(raw); model != "" {
-						completion.Model = model
-					}
-					part := fallbackPart(raw)
-					if !emit(ai.Token{Part: &part}) {
-						return
-					}
-				default:
-					if serverToolResultBlocks[event.ContentBlock.Type] {
-						raw := streamtext.RawObject(event.ContentBlock.RawJSON())
-						if raw == nil {
-							streamErr = fmt.Errorf("anthropic stream %s block is invalid JSON", event.ContentBlock.Type)
-							break
+				case "content_block_start":
+					blocks[event.Index] = &streamBlock{typ: event.ContentBlock.Type, id: event.ContentBlock.ID, name: event.ContentBlock.Name}
+					block := blocks[event.Index]
+					block.signature.WriteString(event.ContentBlock.Signature)
+					switch event.ContentBlock.Type {
+					case "text":
+						block.text.WriteString(event.ContentBlock.Text)
+						if event.ContentBlock.Text != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.ContentBlock.Text}}) {
+							return
 						}
-						part := serverToolResultPart(raw)
+					case "thinking":
+						if event.ContentBlock.Thinking != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: event.ContentBlock.Thinking}}) {
+							return
+						}
+					case "redacted_thinking":
+						part := ai.ContentPart{Kind: ai.ContentExtension, Extensions: anthropicExtensions("redacted_thinking", event.ContentBlock.Data)}
 						if !emitPart(ai.Token{Part: &part}) {
 							return
 						}
+					case "tool_use":
+						holding = holding || fallbacksOn
+					case "server_tool_use":
+						block.start = event.ContentBlock.RawJSON()
+					case fallbackExtension:
+						// The declined attempt's tool calls never reach the caller,
+						// and its stream-level tool errors no longer apply.
+						raw := event.ContentBlock.RawJSON()
+						if !json.Valid([]byte(raw)) {
+							streamErr = errors.New("anthropic stream fallback block is invalid JSON")
+							break
+						}
+						pendingToolErr = nil
+						if !release(true) {
+							return
+						}
+						if model := fallbackTarget(raw); model != "" {
+							completion.Model = model
+						}
+						part := fallbackPart(raw)
+						if !emit(ai.Token{Part: &part}) {
+							return
+						}
+					default:
+						if serverToolResultBlocks[event.ContentBlock.Type] {
+							raw := streamtext.RawObject(event.ContentBlock.RawJSON())
+							if raw == nil {
+								streamErr = fmt.Errorf("anthropic stream %s block is invalid JSON", event.ContentBlock.Type)
+								break
+							}
+							part := serverToolResultPart(raw)
+							if !emitPart(ai.Token{Part: &part}) {
+								return
+							}
+							break
+						}
+						streamErr = fmt.Errorf("%w: Anthropic stream content %q", ai.ErrUnsupportedCapability, event.ContentBlock.Type)
+					}
+				case "content_block_delta":
+					block := blocks[event.Index]
+					if block == nil {
+						streamErr = fmt.Errorf("anthropic stream delta for unknown block %d", event.Index)
 						break
 					}
-					streamErr = fmt.Errorf("%w: Anthropic stream content %q", ai.ErrUnsupportedCapability, event.ContentBlock.Type)
-				}
-			case "content_block_delta":
-				block := blocks[event.Index]
-				if block == nil {
-					streamErr = fmt.Errorf("anthropic stream delta for unknown block %d", event.Index)
-					break
-				}
-				switch event.Delta.Type {
-				case "text_delta":
-					block.text.WriteString(event.Delta.Text)
-					if event.Delta.Text != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.Delta.Text}}) {
-						return
-					}
-				case "thinking_delta":
-					if event.Delta.Thinking != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: event.Delta.Thinking}}) {
-						return
-					}
-				case "signature_delta":
-					block.signature.WriteString(event.Delta.Signature)
-				case "input_json_delta":
-					block.input.WriteString(event.Delta.PartialJSON)
-				case "citations_delta":
-					if raw := streamtext.RawObject(event.Delta.Citation.RawJSON()); raw != nil {
-						block.citations = append(block.citations, raw)
-					}
-				}
-			case "content_block_stop":
-				block := blocks[event.Index]
-				if block == nil {
-					streamErr = fmt.Errorf("anthropic stream stop for unknown block %d", event.Index)
-					break
-				}
-				delete(blocks, event.Index)
-				if block.typ == "thinking" && block.signature.Len() > 0 {
-					part := ai.ContentPart{Kind: ai.ContentReasoning, Extensions: anthropicExtensions("thinking_signature", block.signature.String())}
-					if !emitPart(ai.Token{Part: &part}) {
-						return
-					}
-				}
-				if block.typ == "text" && len(block.citations) > 0 {
-					// The citations attach to the text part the block's deltas
-					// built; delivery shifts them onto its text.
-					part := ai.ContentPart{Kind: ai.ContentText, Extensions: ai.CitationsExtension(extensionNamespace, textCitations(block.citations, block.text.String()))}
-					if !emitPart(ai.Token{Part: &part}) {
-						return
-					}
-				}
-				if block.typ == "server_tool_use" {
-					part := serverToolUsePart(streamedServerToolUse(block.start, block.input.String()))
-					if !emitPart(ai.Token{Part: &part}) {
-						return
-					}
-				}
-				if block.typ == "tool_use" {
-					call, callErr := streamToolCall(block)
-					if callErr != nil {
-						if pendingToolErr == nil {
-							pendingToolErr = callErr
+					switch event.Delta.Type {
+					case "text_delta":
+						block.text.WriteString(event.Delta.Text)
+						if event.Delta.Text != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.Delta.Text}}) {
+							return
 						}
-						continue
+					case "thinking_delta":
+						if event.Delta.Thinking != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentReasoning, Text: event.Delta.Thinking}}) {
+							return
+						}
+					case "signature_delta":
+						block.signature.WriteString(event.Delta.Signature)
+					case "input_json_delta":
+						block.input.WriteString(event.Delta.PartialJSON)
+					case "citations_delta":
+						if raw := streamtext.RawObject(event.Delta.Citation.RawJSON()); raw != nil {
+							block.citations = append(block.citations, raw)
+						}
 					}
-					if !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: call}}) {
-						return
+				case "content_block_stop":
+					block := blocks[event.Index]
+					if block == nil {
+						streamErr = fmt.Errorf("anthropic stream stop for unknown block %d", event.Index)
+						break
 					}
+					delete(blocks, event.Index)
+					if block.typ == "thinking" && block.signature.Len() > 0 {
+						part := ai.ContentPart{Kind: ai.ContentReasoning, Extensions: anthropicExtensions("thinking_signature", block.signature.String())}
+						if !emitPart(ai.Token{Part: &part}) {
+							return
+						}
+					}
+					if block.typ == "text" && len(block.citations) > 0 {
+						// The citations attach to the text part the block's deltas
+						// built; delivery shifts them onto its text.
+						part := ai.ContentPart{Kind: ai.ContentText, Extensions: ai.CitationsExtension(extensionNamespace, textCitations(block.citations, block.text.String()))}
+						if !emitPart(ai.Token{Part: &part}) {
+							return
+						}
+					}
+					if block.typ == "server_tool_use" {
+						part := serverToolUsePart(streamedServerToolUse(block.start, block.input.String()))
+						if !emitPart(ai.Token{Part: &part}) {
+							return
+						}
+					}
+					if block.typ == "tool_use" {
+						call, callErr := streamToolCall(block)
+						if callErr != nil {
+							if pendingToolErr == nil {
+								pendingToolErr = callErr
+							}
+							continue
+						}
+						if !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: call}}) {
+							return
+						}
+					}
+				}
+				if streamErr != nil {
+					break
 				}
 			}
-			if streamErr != nil {
+			if streamErr == nil {
+				streamErr = classifyProviderError(stream.Err())
+			}
+			if streamErr == nil && len(blocks) != 0 {
+				streamErr = fmt.Errorf("anthropic stream ended with %d open content block(s)", len(blocks))
+			}
+			if streamErr != nil || !paused {
 				break
 			}
-		}
-		if streamErr == nil {
-			streamErr = classifyProviderError(stream.Err())
-		}
-		if streamErr == nil && len(blocks) != 0 {
-			streamErr = fmt.Errorf("anthropic stream ended with %d open content block(s)", len(blocks))
+			if turnErr != nil {
+				streamErr = fmt.Errorf("anthropic stream: rebuild paused turn: %w", turnErr)
+				break
+			}
+			prior.Add(completion.Usage)
+			completion.Usage = ai.Usage{}
+			payload.Messages = continuePausedTurn(payload.Messages, turn.ToParam().Content)
 		}
 		// A stream that ends cleanly without message_delta still delivers the
 		// parts held back for a possible fallback.

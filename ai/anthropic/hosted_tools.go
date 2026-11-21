@@ -5,6 +5,7 @@ import (
 
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/internal/streamtext"
+	antropic "github.com/anthropics/anthropic-sdk-go"
 )
 
 const (
@@ -135,4 +136,23 @@ func placeCitations(run *streamtext.Run, token ai.Token) ai.Token {
 		return placed
 	}
 	return token
+}
+
+// maxPauseContinuations bounds how often one generation continues a turn
+// that the API paused with pause_turn. A turn still paused after that fails
+// with an ai.TerminalError.
+const maxPauseContinuations = 10
+
+// continuePausedTurn returns the request messages that continue a paused
+// turn: its content is added to the trailing assistant message, or sent as
+// a new assistant message.
+func continuePausedTurn(messages []antropic.MessageParam, content []antropic.ContentBlockParamUnion) []antropic.MessageParam {
+	out := append([]antropic.MessageParam(nil), messages...)
+	if n := len(out); n > 0 && out[n-1].Role == antropic.MessageParamRoleAssistant {
+		last := out[n-1]
+		last.Content = append(append([]antropic.ContentBlockParamUnion(nil), last.Content...), content...)
+		out[n-1] = last
+		return out
+	}
+	return append(out, antropic.MessageParam{Role: antropic.MessageParamRoleAssistant, Content: content})
 }

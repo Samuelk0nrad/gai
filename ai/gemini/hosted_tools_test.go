@@ -183,3 +183,42 @@ func mapCanonicalResponseJSON(t *testing.T, raw string) (ai.Message, error) {
 	}
 	return mapCanonicalResponse(&response)
 }
+
+func groundingChunk(t *testing.T, raw string) string {
+	t.Helper()
+	return "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\".\"}]}," + raw + "}]}\n\n"
+}
+
+func TestGenerateStreamMergesGroundingAcrossChunks(t *testing.T) {
+	first := `"groundingMetadata":{"webSearchQueries":["a"],"groundingChunks":[{"web":{"uri":"https://a.test","title":"A"}}],"groundingSupports":[{"segment":{"text":"one"},"groundingChunkIndices":[0]}]}`
+	// Repeats the first chunk's data and adds one query, source and support.
+	// The new support refers to its source by this chunk's own index.
+	second := `"groundingMetadata":{"webSearchQueries":["a","b"],"groundingChunks":[{"web":{"uri":"https://b.test","title":"B"}},{"web":{"uri":"https://a.test","title":"A"}}],"groundingSupports":[{"segment":{"text":"one"},"groundingChunkIndices":[1]},{"segment":{"text":"two"},"groundingChunkIndices":[0]}]}`
+	// Carries only new data.
+	third := `"groundingMetadata":{"webSearchQueries":["c"],"groundingChunks":[{"web":{"uri":"https://c.test","title":"C"}}],"groundingSupports":[{"segment":{"text":"three"},"groundingChunkIndices":[0]}]}`
+	model := hostedTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(groundingChunk(t, first) + groundingChunk(t, second) + groundingChunk(t, `"finishReason":"STOP",`+third)))
+	})
+	message := ai.Message{Role: ai.RoleAssistant}
+	for token := range model.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "news")}}) {
+		if token.Err != nil {
+			t.Fatalf("stream error: %v", token.Err)
+		}
+		message.AppendToken(token)
+	}
+	var queries []string
+	for _, call := range message.HostedToolCalls() {
+		queries = append(queries, call.Query)
+	}
+	if strings.Join(queries, ",") != "a,b,c" {
+		t.Fatalf("queries = %v", queries)
+	}
+	var citations []string
+	for _, citation := range message.Citations() {
+		citations = append(citations, citation.Text+"="+citation.URL)
+	}
+	if strings.Join(citations, " ") != "one=https://a.test two=https://b.test three=https://c.test" {
+		t.Fatalf("citations = %v", citations)
+	}
+}

@@ -234,9 +234,9 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			}
 
 			if len(resp.Candidates) > 0 && resp.Candidates[0] != nil && resp.Candidates[0].GroundingMetadata != nil {
-				// Grounding metadata normally comes with the final chunk. If
-				// several chunks carry it, the last one is kept.
-				grounding = resp.Candidates[0].GroundingMetadata
+				// Grounding metadata normally comes with the final chunk.
+				// When several chunks carry it, it is merged.
+				grounding = mergeGrounding(grounding, resp.Candidates[0].GroundingMetadata)
 			}
 			if len(resp.Candidates) == 0 || resp.Candidates[0] == nil || resp.Candidates[0].Content == nil {
 				continue
