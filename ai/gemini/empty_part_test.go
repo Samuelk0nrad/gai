@@ -87,20 +87,18 @@ func TestUnsupportedPartPayloadsRemainErrors(t *testing.T) {
 		part *genai.Part
 	}{
 		{"media_resolution", &genai.Part{MediaResolution: &genai.PartMediaResolution{Level: genai.PartMediaResolutionLevelMediaResolutionHigh}}},
-		{"code_result", &genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Output: "output"}}},
-		{"executable_code", &genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}}},
 		{"file", &genai.Part{FileData: &genai.FileData{FileURI: "gs://bucket/image.png", MIMEType: "image/png"}}},
 		{"function_response", &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "call_1", Name: "lookup", Response: map[string]any{"output": "result"}}}},
 		{"inline_data", &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1, 2, 3}}}},
 		{"video_metadata", &genai.Part{VideoMetadata: &genai.VideoMetadata{EndOffset: time.Second}}},
-		{"server_tool_call", &genai.Part{ToolCall: &genai.ToolCall{ID: "server_call"}}},
-		{"server_tool_response", &genai.Part{ToolResponse: &genai.ToolResponse{ID: "server_call", Response: map[string]any{"output": "result"}}}},
 		{"part_metadata", &genai.Part{PartMetadata: map[string]any{"source": "document"}}},
 		{"audio_transcription", &genai.Part{AudioTranscription: &genai.Transcription{Text: "transcript"}}},
 		{"media_processing", &genai.Part{MediaProcessing: genai.MediaProcessingAgentic}},
 		{"thought_without_content", &genai.Part{Thought: true}},
 		{"text_with_inline_data", &genai.Part{Text: "caption", InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}}},
 		{"function_call_with_file", &genai.Part{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "lookup", Args: map[string]any{}}, FileData: &genai.FileData{FileURI: "gs://bucket/image.png", MIMEType: "image/png"}}},
+		{"server_tool_call_with_text", &genai.Part{Text: "x", ToolCall: &genai.ToolCall{ID: "server_call"}}},
+		{"code_with_file", &genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}, FileData: &genai.FileData{FileURI: "gs://bucket/image.png", MIMEType: "image/png"}}},
 		{"signature_with_transcription", &genai.Part{ThoughtSignature: []byte("signature"), AudioTranscription: &genai.Transcription{Text: "transcript"}}},
 	}
 	for _, test := range cases {
