@@ -274,3 +274,12 @@ func TestContinuePausedTurnExtendsTrailingAssistant(t *testing.T) {
 		t.Fatalf("out = %#v, source = %#v", out, messages)
 	}
 }
+
+func TestHostedPartWithRequiredSiblingIsRejected(t *testing.T) {
+	part := serverToolUsePart(json.RawMessage(serverToolUseBlock))
+	part.Extensions = append(part.Extensions, ai.Extension{Namespace: "other", Type: "state", Data: json.RawMessage(`"s"`), Required: true})
+	_, err := mapNativeMessages([]ai.Message{ai.TextMessage(ai.RoleUser, "x"), {Role: ai.RoleAssistant, Parts: []ai.ContentPart{part}}}, false)
+	if !errors.Is(err, ai.ErrUnsupportedCapability) {
+		t.Fatalf("error = %v", err)
+	}
+}

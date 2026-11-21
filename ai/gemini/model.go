@@ -547,6 +547,11 @@ func nativeContents(req ai.AIRequest) ([]*genai.Content, error) {
 					return nil, err
 				}
 				if hosted != nil {
+					// Hosted tool extensions are optional, so any required
+					// extension beside one is state this part cannot replay.
+					if err := rejectRequiredGeminiExtensions(part.Extensions); err != nil {
+						return nil, err
+					}
 					parts = append(parts, hosted)
 					continue
 				}

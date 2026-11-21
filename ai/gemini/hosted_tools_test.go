@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -220,5 +221,17 @@ func TestGenerateStreamMergesGroundingAcrossChunks(t *testing.T) {
 	}
 	if strings.Join(citations, " ") != "one=https://a.test two=https://b.test three=https://c.test" {
 		t.Fatalf("citations = %v", citations)
+	}
+}
+
+func TestHostedPartWithRequiredSiblingIsRejected(t *testing.T) {
+	message, err := mapCanonicalResponseJSON(t, `{"candidates":[{"content":{"role":"model","parts":[`+serverCallPart+`]}}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message.Parts[0].Extensions = append(message.Parts[0].Extensions, ai.Extension{Namespace: "other", Type: "state", Data: json.RawMessage(`"s"`), Required: true})
+	_, err = nativeContents(ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "x"), message}})
+	if !errors.Is(err, ai.ErrUnsupportedCapability) {
+		t.Fatalf("error = %v", err)
 	}
 }

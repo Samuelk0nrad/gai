@@ -52,3 +52,13 @@ func TestSliceRunes(t *testing.T) {
 		}
 	}
 }
+
+func TestAttachCitationsDropsOffsetsWhenTextIsShort(t *testing.T) {
+	var run Run
+	run.Observe(text("abc"))
+	token, _ := run.AttachCitations("p", []ai.Citation{{URL: "u", Text: "abcdef", Start: 0, End: 6}}, 6)
+	c := token.Part.Citations()[0]
+	if c.Start != 0 || c.End != 0 || c.Text != "abcdef" {
+		t.Fatalf("citation = %#v", c)
+	}
+}

@@ -59,13 +59,16 @@ func (r *Run) AttachCitations(namespace string, citations []ai.Citation, span in
 	if len(citations) == 0 {
 		return ai.Token{}, false
 	}
+	// When the part holds less than the cited span, the cited text did not
+	// all reach it, for example because a text tool-call detector turned part
+	// of it into a tool call. The offsets would then point past the text, so
+	// they are dropped; Citation.Text still names the cited text.
 	shift := r.Len() - span
-	if shift < 0 {
-		shift = 0
-	}
 	shifted := make([]ai.Citation, len(citations))
 	for i, c := range citations {
-		if c.End > c.Start {
+		if shift < 0 || c.End > span {
+			c.Start, c.End = 0, 0
+		} else if c.End > c.Start {
 			c.Start += shift
 			c.End += shift
 		}

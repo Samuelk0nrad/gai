@@ -363,6 +363,11 @@ func mapNativeMessages(messages []ai.Message, midConversationSystem bool) ([]ant
 				blocks = append(blocks, antropic.NewToolResultBlock(r.ToolCallID, content.String(), r.IsError))
 			case ai.ContentExtension:
 				if raw := hostedBlock(part.Extensions); raw != nil {
+					// Hosted tool extensions are optional, so any required
+					// extension beside one is state this part cannot replay.
+					if err := unsupportedExtensions(part.Extensions); err != nil {
+						return nil, err
+					}
 					blocks = append(blocks, param.Override[antropic.ContentBlockParamUnion](raw))
 					continue
 				}
