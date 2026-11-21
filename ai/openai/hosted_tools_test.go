@@ -33,12 +33,12 @@ func responsesTestModel(t *testing.T, handler http.HandlerFunc) ai.Model {
 
 func assertWebSearchAndCitation(t *testing.T, message ai.Message) {
 	t.Helper()
-	calls := HostedToolCalls(message)
-	if len(calls) != 1 || calls[0].ID != "ws_1" || calls[0].Type != "web_search_call" || calls[0].Status != "completed" || calls[0].Action.Type != "search" || calls[0].Action.Query != "go 1.26 release" {
+	calls := message.HostedToolCalls()
+	if len(calls) != 1 || calls[0].Provider != "openai" || calls[0].ID != "ws_1" || calls[0].Kind != ai.HostedToolWebSearch || calls[0].Name != "web_search_call" || calls[0].Status != "completed" || calls[0].Query != "go 1.26 release" {
 		t.Fatalf("hosted tool calls = %#v", calls)
 	}
-	citations := Citations(message)
-	if len(citations) != 1 || citations[0].URL != "https://go.dev/doc/go1.26" || citations[0].Title != "Go 1.26 Release Notes" || citations[0].EndIndex != 15 {
+	citations := message.Citations()
+	if len(citations) != 1 || citations[0].URL != "https://go.dev/doc/go1.26" || citations[0].Title != "Go 1.26 Release Notes" || citations[0].Start != 0 || citations[0].End != 15 || citations[0].Text != "Go 1.26 is out." {
 		t.Fatalf("citations = %#v", citations)
 	}
 	if message.Text() != "Go 1.26 is out." {
@@ -59,7 +59,7 @@ func TestResponsesGenerateKeepsHostedToolItemsAndCitations(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 	parts := response.Message.Parts
-	if len(parts) != 3 || parts[0].Extensions[0].Type != "responses_reasoning" || parts[1].Extensions[0].Type != ExtensionHostedTool || parts[2].Kind != ai.ContentText {
+	if len(parts) != 3 || parts[0].Extensions[0].Type != "responses_reasoning" || parts[1].Extensions[0].Type != ai.ExtensionHostedToolCall || parts[2].Kind != ai.ContentText {
 		t.Fatalf("parts = %#v", parts)
 	}
 	assertWebSearchAndCitation(t, response.Message)
@@ -102,7 +102,7 @@ func TestResponsesStreamKeepsHostedToolItemsAndCitations(t *testing.T) {
 		}
 		message.AppendToken(token)
 	}
-	if len(message.Parts) != 3 || message.Parts[1].Extensions[0].Type != ExtensionHostedTool || message.Parts[2].Kind != ai.ContentText {
+	if len(message.Parts) != 3 || message.Parts[1].Extensions[0].Type != ai.ExtensionHostedToolCall || message.Parts[2].Kind != ai.ContentText {
 		t.Fatalf("parts = %#v", message.Parts)
 	}
 	assertWebSearchAndCitation(t, message)
@@ -160,7 +160,7 @@ func TestResponsesReplaysHostedToolItemsInOrder(t *testing.T) {
 				first = response.Message
 			}
 			call := first.ToolCalls()
-			if len(call) != 1 || len(HostedToolCalls(first)) != 1 {
+			if len(call) != 1 || len(first.HostedToolCalls()) != 1 {
 				t.Fatalf("first round = %#v", first.Parts)
 			}
 			// History round-trips through storage as JSON.
@@ -177,7 +177,7 @@ func TestResponsesReplaysHostedToolItemsInOrder(t *testing.T) {
 			if err != nil {
 				t.Fatalf("second Generate: %v", err)
 			}
-			if len(Citations(second.Message)) != 1 {
+			if len(second.Message.Citations()) != 1 {
 				t.Fatalf("second round citations = %#v", second.Message.Parts)
 			}
 			input := continuation["input"].([]any)
@@ -203,7 +203,7 @@ func TestResponsesReplaysHostedToolItemsInOrder(t *testing.T) {
 }
 
 func TestResponsesReplayRejectsUnknownHostedToolItem(t *testing.T) {
-	part := hostedToolExtension(json.RawMessage(`{"id":"x","type":"computer_call"}`))
+	part := ai.HostedToolCallPart("openai", ai.HostedToolCall{Kind: ai.HostedToolOther, Raw: json.RawMessage(`{"id":"x","type":"computer_call"}`)})
 	_, err := mapResponsesMessages([]ai.Message{{Role: ai.RoleAssistant, Parts: []ai.ContentPart{part}}})
 	if !errors.Is(err, ai.ErrUnsupportedCapability) {
 		t.Fatalf("error = %v", err)
@@ -212,10 +212,54 @@ func TestResponsesReplayRejectsUnknownHostedToolItem(t *testing.T) {
 
 func TestHostedToolAndCitationPartsAreOptionalForChatCompletions(t *testing.T) {
 	message := ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{
-		hostedToolExtension(json.RawMessage(webSearchItem)),
-		{Kind: ai.ContentText, Text: "Go 1.26 is out.", Extensions: annotationsExtension(`[{"type":"url_citation","url":"https://go.dev","title":"Go","start_index":0,"end_index":2}]`)},
+		hostedToolPart(json.RawMessage(webSearchItem)),
+		{Kind: ai.ContentText, Text: "Go 1.26 is out.", Extensions: annotationCitationsExtension(`[{"type":"url_citation","url":"https://go.dev","title":"Go","start_index":0,"end_index":2}]`, "Go 1.26 is out.")},
 	}}
 	if _, err := mapNativeMessages([]ai.Message{ai.TextMessage(ai.RoleUser, "news"), message}); err != nil {
 		t.Fatalf("chat mapping: %v", err)
+	}
+}
+
+func annotationCitationsExtension(raw, text string) []ai.Extension {
+	return ai.CitationsExtension(extensionNamespace, annotationCitations(raw, text))
+}
+
+// An unannotated output_text content merges with the next one in the caller's
+// text part, so the next content's citation offsets must be shifted.
+func TestResponsesStreamShiftsCitationsAfterUnannotatedContent(t *testing.T) {
+	m := responsesTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		var body strings.Builder
+		body.WriteString(sseEvent(`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"Intro "}`))
+		body.WriteString(sseEvent(`{"type":"response.content_part.done","item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"Intro ","annotations":[]}}`))
+		body.WriteString(sseEvent(`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":1,"delta":"Gö"}`))
+		body.WriteString(sseEvent(`{"type":"response.content_part.done","item_id":"msg_1","output_index":0,"content_index":1,"part":{"type":"output_text","text":"Gö","annotations":[{"type":"url_citation","url":"https://go.dev","title":"Go","start_index":0,"end_index":2}]}}`))
+		body.WriteString(sseEvent(`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":2,"delta":" and "}`))
+		body.WriteString(sseEvent(`{"type":"response.content_part.done","item_id":"msg_1","output_index":0,"content_index":2,"part":{"type":"output_text","text":" and ","annotations":[]}}`))
+		body.WriteString(sseEvent(`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":3,"delta":"more"}`))
+		body.WriteString(sseEvent(`{"type":"response.content_part.done","item_id":"msg_1","output_index":0,"content_index":3,"part":{"type":"output_text","text":"more","annotations":[{"type":"url_citation","url":"https://go.dev/more","title":"More","start_index":0,"end_index":4}]}}`))
+		body.WriteString(sseEvent(`{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[]}}`))
+		_, _ = w.Write([]byte(body.String()))
+	})
+	message := ai.Message{Role: ai.RoleAssistant}
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "x")}}) {
+		if token.Err != nil {
+			t.Fatalf("stream error: %v", token.Err)
+		}
+		message.AppendToken(token)
+	}
+	if len(message.Parts) != 2 {
+		t.Fatalf("parts = %#v", message.Parts)
+	}
+	for i, want := range []string{"Gö", "more"} {
+		part := message.Parts[i]
+		citations := part.Citations()
+		if len(citations) != 1 {
+			t.Fatalf("part %d citations = %#v", i, citations)
+		}
+		c := citations[0]
+		if got := string([]rune(part.Text)[c.Start:c.End]); got != want || c.Text != want {
+			t.Fatalf("part %d %q: citation covers %q (text %q), want %q", i, part.Text, got, c.Text, want)
+		}
 	}
 }

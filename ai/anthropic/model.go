@@ -12,6 +12,7 @@ import (
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/internal/modelcatalog"
+	"github.com/Samuelk0nrad/gai/internal/streamtext"
 	antropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
@@ -361,6 +362,10 @@ func mapNativeMessages(messages []ai.Message, midConversationSystem bool) ([]ant
 				}
 				blocks = append(blocks, antropic.NewToolResultBlock(r.ToolCallID, content.String(), r.IsError))
 			case ai.ContentExtension:
+				if raw := hostedBlock(part.Extensions); raw != nil {
+					blocks = append(blocks, param.Override[antropic.ContentBlockParamUnion](raw))
+					continue
+				}
 				if hasAnthropicExtension(part.Extensions, fallbackExtension) {
 					raw, err := anthropicRawExtension(part.Extensions, fallbackExtension)
 					if err != nil {
@@ -484,7 +489,7 @@ func isAttemptState(part ai.ContentPart) bool {
 	case ai.ContentReasoning, ai.ContentToolCall:
 		return true
 	case ai.ContentExtension:
-		return hasAnthropicExtension(part.Extensions, "redacted_thinking")
+		return hasAnthropicExtension(part.Extensions, "redacted_thinking") || hostedBlock(part.Extensions) != nil
 	default:
 		return false
 	}
@@ -699,7 +704,19 @@ func mapCanonicalMessageContent(blocks []antropic.ContentBlockUnion) (ai.Message
 	for i, block := range blocks {
 		switch block.Type {
 		case "text":
-			message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentText, Text: block.Text})
+			var citations []json.RawMessage
+			for _, citation := range block.Citations {
+				if raw := streamtext.RawObject(citation.RawJSON()); raw != nil {
+					citations = append(citations, raw)
+				}
+			}
+			message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentText, Text: block.Text, Extensions: ai.CitationsExtension(extensionNamespace, textCitations(citations, block.Text))})
+		case "server_tool_use":
+			raw := streamtext.RawObject(block.RawJSON())
+			if raw == nil {
+				return ai.Message{}, fmt.Errorf("content[%d]: server tool use block is invalid JSON", i)
+			}
+			message.Parts = append(message.Parts, serverToolUsePart(raw))
 		case "thinking":
 			message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentReasoning, Text: block.Thinking, Extensions: anthropicExtensions("thinking_signature", block.Signature)})
 		case "redacted_thinking":
@@ -733,6 +750,14 @@ func mapCanonicalMessageContent(blocks []antropic.ContentBlockUnion) (ai.Message
 			}
 			message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: id, Type: "function", Name: name, Args: append(json.RawMessage(nil), args...)}})
 		default:
+			if serverToolResultBlocks[block.Type] {
+				raw := streamtext.RawObject(block.RawJSON())
+				if raw == nil {
+					return ai.Message{}, fmt.Errorf("content[%d]: %s block is invalid JSON", i, block.Type)
+				}
+				message.Parts = append(message.Parts, serverToolResultPart(raw))
+				continue
+			}
 			return ai.Message{}, fmt.Errorf("%w: Anthropic output %q", ai.ErrUnsupportedCapability, block.Type)
 		}
 	}
@@ -779,7 +804,12 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		generationResult := ai.GenerationResult{}
 		// Text-encoded tool calls are detected in this goroutine, so the
 		// generation observes the tokens its caller receives.
+		// run follows the text part the caller builds from delivered tokens,
+		// so a cited text block's citations cover its text in that part.
+		var run streamtext.Run
 		detector := ai.NewToolCallDetector(ctx, m.debug, func(token ai.Token) bool {
+			token = placeCitations(&run, token)
+			run.Observe(token)
 			if !ai.SendToken(ctx, out, token) {
 				return false
 			}
@@ -902,6 +932,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				block.signature.WriteString(event.ContentBlock.Signature)
 				switch event.ContentBlock.Type {
 				case "text":
+					block.text.WriteString(event.ContentBlock.Text)
 					if event.ContentBlock.Text != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.ContentBlock.Text}}) {
 						return
 					}
@@ -916,6 +947,8 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					}
 				case "tool_use":
 					holding = holding || fallbacksOn
+				case "server_tool_use":
+					block.start = event.ContentBlock.RawJSON()
 				case fallbackExtension:
 					// The declined attempt's tool calls never reach the caller,
 					// and its stream-level tool errors no longer apply.
@@ -936,6 +969,18 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 						return
 					}
 				default:
+					if serverToolResultBlocks[event.ContentBlock.Type] {
+						raw := streamtext.RawObject(event.ContentBlock.RawJSON())
+						if raw == nil {
+							streamErr = fmt.Errorf("anthropic stream %s block is invalid JSON", event.ContentBlock.Type)
+							break
+						}
+						part := serverToolResultPart(raw)
+						if !emitPart(ai.Token{Part: &part}) {
+							return
+						}
+						break
+					}
 					streamErr = fmt.Errorf("%w: Anthropic stream content %q", ai.ErrUnsupportedCapability, event.ContentBlock.Type)
 				}
 			case "content_block_delta":
@@ -946,6 +991,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				}
 				switch event.Delta.Type {
 				case "text_delta":
+					block.text.WriteString(event.Delta.Text)
 					if event.Delta.Text != "" && !emitPart(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: event.Delta.Text}}) {
 						return
 					}
@@ -957,6 +1003,10 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					block.signature.WriteString(event.Delta.Signature)
 				case "input_json_delta":
 					block.input.WriteString(event.Delta.PartialJSON)
+				case "citations_delta":
+					if raw := streamtext.RawObject(event.Delta.Citation.RawJSON()); raw != nil {
+						block.citations = append(block.citations, raw)
+					}
 				}
 			case "content_block_stop":
 				block := blocks[event.Index]
@@ -967,6 +1017,20 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				delete(blocks, event.Index)
 				if block.typ == "thinking" && block.signature.Len() > 0 {
 					part := ai.ContentPart{Kind: ai.ContentReasoning, Extensions: anthropicExtensions("thinking_signature", block.signature.String())}
+					if !emitPart(ai.Token{Part: &part}) {
+						return
+					}
+				}
+				if block.typ == "text" && len(block.citations) > 0 {
+					// The citations attach to the text part the block's deltas
+					// built; delivery shifts them onto its text.
+					part := ai.ContentPart{Kind: ai.ContentText, Extensions: ai.CitationsExtension(extensionNamespace, textCitations(block.citations, block.text.String()))}
+					if !emitPart(ai.Token{Part: &part}) {
+						return
+					}
+				}
+				if block.typ == "server_tool_use" {
+					part := serverToolUsePart(streamedServerToolUse(block.start, block.input.String()))
 					if !emitPart(ai.Token{Part: &part}) {
 						return
 					}
@@ -1017,6 +1081,11 @@ type streamBlock struct {
 	typ, id, name string
 	input         strings.Builder
 	signature     strings.Builder
+	// text and citations collect a text block's content for its citations.
+	text      strings.Builder
+	citations []json.RawMessage
+	// start is the raw content_block_start block of a server_tool_use.
+	start string
 }
 
 func streamToolCall(block *streamBlock) (*ai.ToolCall, error) {

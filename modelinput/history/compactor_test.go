@@ -2,6 +2,7 @@ package history_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -540,5 +541,28 @@ func TestTombstoneRetainsRevisionIdentity(t *testing.T) {
 	rev, err := store.CompareAndSwapHistory(t.Context(), "session", result.Revision, oldHistory())
 	if err != nil || rev == result.Revision || rev == "" {
 		t.Fatalf("recreate = %q %v", rev, err)
+	}
+}
+
+// Optional provider data, such as hosted tool calls and citations, stays out
+// of the summary prompt instead of failing compaction.
+func TestCompactionSummarizesTurnsWithOptionalProviderData(t *testing.T) {
+	state := oldHistory()
+	state.Turns[0].Messages = []modelinput.StoredMessage{{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{
+		ai.HostedToolCallPart("openai", ai.HostedToolCall{Kind: ai.HostedToolWebSearch, Query: "q", Raw: json.RawMessage(`{"type":"web_search_call"}`)}),
+		{Kind: ai.ContentText, Text: "cited answer", Extensions: ai.CitationsExtension("openai", []ai.Citation{{URL: "https://example.test"}})},
+	}}}}
+	var prompt string
+	model := &historyModel{respond: func(_ context.Context, req ai.AIRequest) (string, error) {
+		prompt = req.Messages[len(req.Messages)-1].Text()
+		return "short summary", nil
+	}}
+	store := &sharedHistoryStore{state: state}
+	result, err := newCompactor(t, store, model).Compact(t.Context(), 1)
+	if err != nil || !result.Changed {
+		t.Fatalf("result = %+v, error = %v", result, err)
+	}
+	if !strings.Contains(prompt, "cited answer") || strings.Contains(prompt, "web_search_call") {
+		t.Fatalf("summary prompt = %q", prompt)
 	}
 }

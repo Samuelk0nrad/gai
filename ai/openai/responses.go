@@ -7,6 +7,7 @@ import (
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/streamtext"
 	"github.com/openai/openai-go/packages/param"
 	"github.com/openai/openai-go/responses"
 	"github.com/openai/openai-go/shared"
@@ -72,10 +73,14 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 		generationResult.HTTPStatus = openAIHTTPStatus(streamErr)
 		observation.Finish(generationResult)
 	}()
+	// run follows the text part the caller builds, so citations from a later
+	// output_text content keep offsets into the merged text.
+	var run streamtext.Run
 	emit := func(token ai.Token) bool {
 		if token.Type() == ai.TokenTypeErr && token.Err != nil {
 			streamErr = token.Err
 		}
+		run.Observe(token)
 		observation.ObserveToken(token)
 		if ai.SendToken(ctx, out, token) {
 			observation.Delivered(token)
@@ -126,7 +131,7 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 				continue
 			}
 			if isHostedToolItem(event.Item.Type) {
-				part := hostedToolExtension(json.RawMessage(event.Item.RawJSON()))
+				part := hostedToolPart(json.RawMessage(event.Item.RawJSON()))
 				if !emit(ai.Token{Part: &part}) {
 					return
 				}
@@ -148,15 +153,15 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 			}
 		case "response.content_part.done":
 			// The annotations arrive complete with their content part, after
-			// its text deltas. An empty text part with extensions attaches
-			// them to the text part those deltas built.
+			// its text deltas. An empty text token with extensions attaches
+			// them to the text part those deltas built, which may begin with
+			// the text of earlier contents.
 			if event.Part.Type != "output_text" {
 				continue
 			}
-			if extensions := annotationsExtension(event.Part.JSON.Annotations.Raw()); extensions != nil {
-				if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Extensions: extensions}}) {
-					return
-				}
+			citations := annotationCitations(event.Part.JSON.Annotations.Raw(), event.Part.Text)
+			if token, ok := run.AttachCitations(extensionNamespace, citations, ai.RuneLen(event.Part.Text)); ok && !emit(token) {
+				return
 			}
 		case "error":
 			err := fmt.Errorf("OpenAI Responses API: %s", event.Message)
@@ -334,12 +339,12 @@ func mapResponsesMessages(messages []ai.Message) (responses.ResponseInputParam, 
 				input = append(input, responses.ResponseInputItemParamOfMessage(text, role))
 			case ai.ContentExtension:
 				for _, ext := range part.Extensions {
-					if ext.Namespace == ExtensionNamespace && ext.Type == "responses_reasoning" {
+					if ext.Namespace == extensionNamespace && ext.Type == "responses_reasoning" {
 						if err := appendReasoning(ext.Data); err != nil {
 							return nil, err
 						}
-					} else if ext.Namespace == ExtensionNamespace && ext.Type == ExtensionHostedTool {
-						item, err := hostedToolInput(ext.Data)
+					} else if call, ok := ai.DecodeHostedToolCall(ext); ok && ext.Namespace == extensionNamespace && len(call.Raw) > 0 {
+						item, err := hostedToolInput(call)
 						if err != nil {
 							return nil, err
 						}
@@ -387,7 +392,7 @@ func responseFromResponses(response *responses.Response) (*ai.AIResponse, error)
 			for _, content := range output.Content {
 				switch content.Type {
 				case "output_text":
-					message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentText, Text: content.Text, Extensions: annotationsExtension(content.JSON.Annotations.Raw())})
+					message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentText, Text: content.Text, Extensions: ai.CitationsExtension(extensionNamespace, annotationCitations(content.JSON.Annotations.Raw(), content.Text))})
 				case "refusal":
 					message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentText, Text: content.Refusal})
 				default:
@@ -402,7 +407,7 @@ func responseFromResponses(response *responses.Response) (*ai.AIResponse, error)
 			message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: output.CallID, Type: "function", Name: output.Name, Args: args}})
 		default:
 			if isHostedToolItem(output.Type) {
-				message.Parts = append(message.Parts, hostedToolExtension(json.RawMessage(output.RawJSON())))
+				message.Parts = append(message.Parts, hostedToolPart(json.RawMessage(output.RawJSON())))
 				continue
 			}
 			return nil, fmt.Errorf("%w: OpenAI Responses output %q", ai.ErrUnsupportedCapability, output.Type)

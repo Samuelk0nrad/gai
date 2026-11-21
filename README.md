@@ -163,9 +163,10 @@ The [Anthropic provider guide](docs/providers/anthropic.md) documents model
 facts, adaptive thinking and effort levels, prompt caching, refusals and
 server-side fallbacks, and mid-conversation system messages.
 
-The [OpenAI provider guide](docs/providers/openai.md) documents how the
-Responses transport keeps hosted tool items, such as web search, and their
-citations across rounds.
+The [OpenAI provider guide](docs/providers/openai.md) documents hosted tools
+on the Responses transport. [Hosted tools and citations](docs/hosted-tools.md)
+documents how OpenAI, Anthropic and Gemini keep server-run tool calls, such as
+web search, and their citations across rounds.
 
 The [Mistral provider guide](docs/providers/mistral.md) documents reasoning,
 image input, typed native options, and capability boundaries. Models with

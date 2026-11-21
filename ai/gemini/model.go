@@ -92,6 +92,8 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 		generationResult := ai.GenerationResult{}
 		completion := ai.Completion{Provider: "gemini"}
 		hasCompletion := false
+		var grounding *genai.GroundingMetadata
+		searchCallsReturned := false
 		defer close(out)
 		defer func() {
 			if hasCompletion {
@@ -231,12 +233,30 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				completion.Raw = append(completion.Raw[:0], raw...)
 			}
 
+			if len(resp.Candidates) > 0 && resp.Candidates[0] != nil && resp.Candidates[0].GroundingMetadata != nil {
+				// Grounding metadata normally comes with the final chunk. If
+				// several chunks carry it, the last one is kept.
+				grounding = resp.Candidates[0].GroundingMetadata
+			}
 			if len(resp.Candidates) == 0 || resp.Candidates[0] == nil || resp.Candidates[0].Content == nil {
 				continue
 			}
 
 			for _, part := range resp.Candidates[0].Content.Parts {
 				if part == nil || isEmptyGeminiPart(part) {
+					continue
+				}
+				if isHostedPart(part) {
+					hosted, err := hostedPart(part)
+					if err != nil {
+						streamErr = err
+						emit(ai.Token{Err: streamErr})
+						return
+					}
+					searchCallsReturned = searchCallsReturned || isSearchCall(part)
+					if !emit(ai.Token{Part: &hosted}) {
+						return
+					}
 					continue
 				}
 				if hasUnsupportedGeminiPartPayload(part) {
@@ -320,6 +340,9 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					return
 				}
 			}
+		}
+		if part, ok := groundingPart(grounding, searchCallsReturned); ok && !emit(ai.Token{Part: &part}) {
+			return
 		}
 		if hasCompletion {
 			snapshot := completion
@@ -518,6 +541,16 @@ func nativeContents(req ai.AIRequest) ([]*genai.Content, error) {
 		}
 		parts := make([]*genai.Part, 0, len(m.Parts))
 		for _, part := range m.Parts {
+			if part.Kind == ai.ContentExtension {
+				hosted, err := hostedPartInput(part.Extensions)
+				if err != nil {
+					return nil, err
+				}
+				if hosted != nil {
+					parts = append(parts, hosted)
+					continue
+				}
+			}
 			var signature []byte
 			if part.Kind == ai.ContentToolResult {
 				// Continuity signatures have no representation on function results.
@@ -786,9 +819,19 @@ func mapGenerateContentThinkingConfig(reasoning ai.ReasoningConfig) *genai.Think
 
 func mapCanonicalResponse(result *genai.GenerateContentResponse) (ai.Message, error) {
 	message := ai.Message{Role: ai.RoleAssistant}
+	searchCallsReturned := false
 	if result != nil && len(result.Candidates) > 0 && result.Candidates[0] != nil && result.Candidates[0].Content != nil {
 		for _, part := range result.Candidates[0].Content.Parts {
 			if part == nil || isEmptyGeminiPart(part) {
+				continue
+			}
+			if isHostedPart(part) {
+				hosted, err := hostedPart(part)
+				if err != nil {
+					return ai.Message{}, err
+				}
+				searchCallsReturned = searchCallsReturned || isSearchCall(part)
+				message.Parts = append(message.Parts, hosted)
 				continue
 			}
 			if hasUnsupportedGeminiPartPayload(part) {
@@ -813,6 +856,11 @@ func mapCanonicalResponse(result *genai.GenerateContentResponse) (ai.Message, er
 			default:
 				return ai.Message{}, fmt.Errorf("%w: Gemini output part", ai.ErrUnsupportedCapability)
 			}
+		}
+	}
+	if result != nil && len(result.Candidates) > 0 && result.Candidates[0] != nil {
+		if part, ok := groundingPart(result.Candidates[0].GroundingMetadata, searchCallsReturned); ok {
+			message.Parts = append(message.Parts, part)
 		}
 	}
 	if len(message.Parts) == 0 {
