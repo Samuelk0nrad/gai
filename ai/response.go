@@ -58,7 +58,15 @@ func (u *Usage) Add(other Usage) {
 // It describes the provider outcome but does not guarantee that generation
 // succeeded; callers must continue consuming the stream for a following error.
 type Completion struct {
+	// Usage is the billed usage. When a provider adapter sends several
+	// requests for one generation, it is summed over them.
 	Usage Usage
+	// InitialInputTokens is the input of the first provider request when a
+	// generation spanned several requests, such as a continued Anthropic
+	// pause_turn. It counts the caller's request as sent, which the summed
+	// Usage.InputTokens no longer does. Zero means one request, so
+	// Usage.InputTokens is that request's input.
+	InitialInputTokens int
 	// UsageReported distinguishes an absent provider usage block from a
 	// provider-reported usage block whose counters are all zero.
 	UsageReported bool

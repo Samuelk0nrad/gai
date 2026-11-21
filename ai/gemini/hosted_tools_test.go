@@ -224,6 +224,24 @@ func TestGenerateStreamMergesGroundingAcrossChunks(t *testing.T) {
 	}
 }
 
+// Several retrieved passages can come from one document. Each support keeps
+// the passage it cites.
+func TestMergeGroundingKeepsPassagesOfOneDocument(t *testing.T) {
+	var metadata genai.GroundingMetadata
+	if err := json.Unmarshal([]byte(`{"groundingChunks":[{"retrievedContext":{"uri":"gs://docs/a.pdf","text":"first passage"}},{"retrievedContext":{"uri":"gs://docs/a.pdf","text":"second passage"}}],"groundingSupports":[{"segment":{"text":"one"},"groundingChunkIndices":[0]},{"segment":{"text":"two"},"groundingChunkIndices":[1]}]}`), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	merged := mergeGrounding(nil, &metadata)
+	merged = mergeGrounding(merged, &metadata)
+	var citations []string
+	for _, citation := range groundingCitations(merged) {
+		citations = append(citations, citation.Text+"="+citation.Source)
+	}
+	if strings.Join(citations, ",") != "one=first passage,two=second passage" {
+		t.Fatalf("citations = %v", citations)
+	}
+}
+
 func TestHostedPartWithRequiredSiblingIsRejected(t *testing.T) {
 	message, err := mapCanonicalResponseJSON(t, `{"candidates":[{"content":{"role":"model","parts":[`+serverCallPart+`]}}]}`)
 	if err != nil {

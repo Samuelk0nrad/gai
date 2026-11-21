@@ -31,6 +31,10 @@ type Iteration struct {
 	Usage ai.Usage
 	// UsageReported distinguishes absent usage from a reported zero.
 	UsageReported bool
+	// checkpointInput is the input of the caller's request as the provider
+	// counted it. It differs from Usage.InputTokens when the provider adapter
+	// combined several requests into one generation.
+	checkpointInput int
 	// RequestBudget is the finalized pre-generation accounting decision. Reported
 	// Usage supersedes its input estimate when establishing the next checkpoint.
 	RequestBudget *ai.RequestBudgetResult
@@ -136,6 +140,14 @@ func (i *Iteration) AppendToken(t ai.Token) {
 		if t.Completion.UsageReported {
 			i.Usage = t.Completion.Usage
 			i.UsageReported = true
+			// A combined generation sums its requests' input, so the
+			// checkpoint takes the first request's. When only later
+			// requests reported usage, the sum overcounts, which can fail a
+			// request that fits but never lets one exceed its budget.
+			i.checkpointInput = t.Completion.Usage.InputTokens
+			if t.Completion.InitialInputTokens > 0 {
+				i.checkpointInput = t.Completion.InitialInputTokens
+			}
 		}
 		if last != nil && last.Type == IterationTypeResponse {
 			last.Response.AppendToken(t)

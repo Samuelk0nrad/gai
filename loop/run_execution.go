@@ -569,10 +569,10 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 	// Persistence deliberately follows IterationDone emission.
 	r.owner.Iterations = append(r.owner.Iterations, attempt.iteration)
 	r.state.recordOutput(attempt.iteration)
-	if attempt.iteration.RequestBudget != nil && attempt.iteration.UsageReported && attempt.iteration.Usage.InputTokens >= 0 {
+	if attempt.iteration.RequestBudget != nil && attempt.iteration.UsageReported && attempt.iteration.checkpointInput >= 0 {
 		r.checkpoint = &requestCheckpoint{
 			request: attempt.request, model: attempt.model, modelName: attempt.modelName,
-			counterID: attempt.counterID, input: attempt.iteration.Usage.InputTokens,
+			counterID: attempt.counterID, input: attempt.iteration.checkpointInput,
 		}
 	}
 	r.userMessage = nil

@@ -1,12 +1,15 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
 	antropic "github.com/anthropics/anthropic-sdk-go"
 )
@@ -247,10 +250,139 @@ func TestGenerateStreamContinuesPausedTurn(t *testing.T) {
 		message.AppendToken(token)
 	}
 	assertSearchAndCitation(t, message)
-	if len(completions) != 1 || completions[0].FinishReason != "end_turn" || completions[0].RequestID != "msg_2" || completions[0].Usage.InputTokens != 30 || completions[0].Usage.OutputTokens != 8 {
+	if len(completions) != 1 || completions[0].FinishReason != "end_turn" || completions[0].RequestID != "msg_2" || completions[0].Usage.InputTokens != 30 || completions[0].Usage.OutputTokens != 8 || completions[0].InitialInputTokens != 10 {
 		t.Fatalf("completions = %+v", completions)
 	}
 	assertPausedTurnSentBack(t, bodies)
+}
+
+const pausedStream = `event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":` + serverToolUseBlock + `}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":` + searchResultBlock + `}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":3}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+
+func failSecondRequest(t *testing.T, first func(w http.ResponseWriter)) *Model {
+	requests := 0
+	return testModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			first(w)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"boom"}}`))
+	})
+}
+
+// A continuation that fails still reports the usage of the paused request,
+// which was billed.
+func TestGenerateStreamReportsPausedUsageWhenContinuationFails(t *testing.T) {
+	m := failSecondRequest(t, func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(pausedStream))
+	})
+	var completions []ai.Completion
+	var streamErr error
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "news")}}) {
+		if token.Completion != nil {
+			if streamErr != nil {
+				t.Fatal("completion after the error")
+			}
+			completions = append(completions, *token.Completion)
+		}
+		if token.Err != nil {
+			streamErr = token.Err
+		}
+	}
+	if streamErr == nil {
+		t.Fatal("missing continuation error")
+	}
+	if len(completions) != 1 || !completions[0].UsageReported || completions[0].Usage.InputTokens != 10 || completions[0].Usage.OutputTokens != 3 || completions[0].InitialInputTokens != 10 || completions[0].FinishReason != "" {
+		t.Fatalf("completions = %+v", completions)
+	}
+}
+
+// A continuation that fails after its message_start still reports the usage
+// that message_start carried, output tokens included.
+func TestGenerateStreamReportsContinuationStartUsageWhenItFails(t *testing.T) {
+	requests := 0
+	m := testModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			_, _ = w.Write([]byte(pausedStream))
+			return
+		}
+		_, _ = w.Write([]byte(sse("message_start", `{"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":20,"output_tokens":1}}}`) +
+			sse("content_block_delta", `{"type":"content_block_delta","index":7,"delta":{"type":"text_delta","text":"x"}}`)))
+	})
+	var completions []ai.Completion
+	var streamErr error
+	for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "news")}}) {
+		if token.Completion != nil {
+			completions = append(completions, *token.Completion)
+		}
+		if token.Err != nil {
+			streamErr = token.Err
+		}
+	}
+	if streamErr == nil {
+		t.Fatal("missing continuation error")
+	}
+	if len(completions) != 1 || completions[0].Usage.InputTokens != 30 || completions[0].Usage.OutputTokens != 4 || completions[0].InitialInputTokens != 10 {
+		t.Fatalf("completions = %+v", completions)
+	}
+}
+
+func TestGenerateRecordsPausedUsageWhenContinuationFails(t *testing.T) {
+	var finished *gai.Observation
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","stop_reason":"pause_turn","usage":{"input_tokens":10,"output_tokens":3},"content":[` + serverToolUseBlock + `,` + searchResultBlock + `]}`))
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"boom"}}`))
+	}))
+	t.Cleanup(server.Close)
+	provider := New("test-key", gai.ObservationSinkFunc(func(_ context.Context, event gai.Observation) {
+		if event.Name == "generation_finished" {
+			finished = &event
+		}
+	}))
+	provider.baseURL = server.URL
+	model, err := provider.Model(ClaudeSonnet4_6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := model.(*Model).Generate(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "news")}}); err == nil {
+		t.Fatal("missing continuation error")
+	}
+	if finished == nil || finished.Fields["input_tokens"] != 10 || finished.Fields["output_tokens"] != 3 {
+		t.Fatalf("generation_finished = %+v", finished)
+	}
 }
 
 func TestGenerateStopsContinuingPausedTurnAtLimit(t *testing.T) {

@@ -245,6 +245,31 @@ func TestRequestBudgetUsageCheckpointReplacesEstimateAndNextReport(t *testing.T)
 	}
 }
 
+// A generation that spanned several provider requests, such as a continued
+// Anthropic pause_turn, sums their input. The checkpoint takes the first
+// request's input, so the next request is not counted several times.
+func TestRequestBudgetCheckpointUsesInitialInputOfCombinedGeneration(t *testing.T) {
+	combined := ai.Token{Completion: &ai.Completion{UsageReported: true, Usage: ai.Usage{InputTokens: 90}, InitialInputTokens: 40, FinishReason: "tool_use"}}
+	model := &scriptedStreamModel{sequences: [][]ai.Token{
+		{requestToolToken("call-1"), combined},
+		{requestFinalToken()},
+	}}
+	l := loop.New(model, []loop.Tool{loop.NewEchoTool()}, testPromptBuilder(), nil)
+	l.TokenCounter = requestUnitCounter{}
+	l.RequestBudget = &ai.RequestBudgetConfig{Limit: 50}
+	events := collectLoopEvents(t, l, t.Context())
+	if err := loopError(events); err != nil {
+		t.Fatal(err)
+	}
+	budgets := requestBudgetSnapshots(events)
+	if len(budgets) != 2 || budgets[1].Method != "usage_checkpoint" || budgets[1].CheckpointTokens != 40 || budgets[1].InputTokens != 42 {
+		t.Fatalf("budgets=%+v", budgets)
+	}
+	if l.Iterations[0].Usage.InputTokens != 90 {
+		t.Fatalf("usage=%+v, want the billed sum", l.Iterations[0].Usage)
+	}
+}
+
 func TestRequestBudgetDistinguishesReportedZeroAbsentAndLaterMetadata(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
