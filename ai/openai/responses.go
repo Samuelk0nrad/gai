@@ -125,6 +125,13 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 				}
 				continue
 			}
+			if isHostedToolItem(event.Item.Type) {
+				part := hostedToolExtension(json.RawMessage(event.Item.RawJSON()))
+				if !emit(ai.Token{Part: &part}) {
+					return
+				}
+				continue
+			}
 			if event.Item.Type != "function_call" {
 				continue
 			}
@@ -138,6 +145,18 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 			call := &ai.ToolCall{ID: event.Item.CallID, Type: "function", Name: event.Item.Name, Args: args}
 			if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: call}}) {
 				return
+			}
+		case "response.content_part.done":
+			// The annotations arrive complete with their content part, after
+			// its text deltas. An empty text part with extensions attaches
+			// them to the text part those deltas built.
+			if event.Part.Type != "output_text" {
+				continue
+			}
+			if extensions := annotationsExtension(event.Part.JSON.Annotations.Raw()); extensions != nil {
+				if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Extensions: extensions}}) {
+					return
+				}
 			}
 		case "error":
 			err := fmt.Errorf("OpenAI Responses API: %s", event.Message)
@@ -315,10 +334,16 @@ func mapResponsesMessages(messages []ai.Message) (responses.ResponseInputParam, 
 				input = append(input, responses.ResponseInputItemParamOfMessage(text, role))
 			case ai.ContentExtension:
 				for _, ext := range part.Extensions {
-					if ext.Namespace == "openai" && ext.Type == "responses_reasoning" {
+					if ext.Namespace == ExtensionNamespace && ext.Type == "responses_reasoning" {
 						if err := appendReasoning(ext.Data); err != nil {
 							return nil, err
 						}
+					} else if ext.Namespace == ExtensionNamespace && ext.Type == ExtensionHostedTool {
+						item, err := hostedToolInput(ext.Data)
+						if err != nil {
+							return nil, err
+						}
+						input = append(input, item)
 					} else if ext.Required {
 						return nil, fmt.Errorf("%w: OpenAI Responses extension %s/%s", ai.ErrUnsupportedCapability, ext.Namespace, ext.Type)
 					}
@@ -362,7 +387,7 @@ func responseFromResponses(response *responses.Response) (*ai.AIResponse, error)
 			for _, content := range output.Content {
 				switch content.Type {
 				case "output_text":
-					message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentText, Text: content.Text})
+					message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentText, Text: content.Text, Extensions: annotationsExtension(content.JSON.Annotations.Raw())})
 				case "refusal":
 					message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentText, Text: content.Refusal})
 				default:
@@ -376,6 +401,10 @@ func responseFromResponses(response *responses.Response) (*ai.AIResponse, error)
 			}
 			message.Parts = append(message.Parts, ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: output.CallID, Type: "function", Name: output.Name, Args: args}})
 		default:
+			if isHostedToolItem(output.Type) {
+				message.Parts = append(message.Parts, hostedToolExtension(json.RawMessage(output.RawJSON())))
+				continue
+			}
 			return nil, fmt.Errorf("%w: OpenAI Responses output %q", ai.ErrUnsupportedCapability, output.Type)
 		}
 	}
