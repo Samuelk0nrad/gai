@@ -15,6 +15,7 @@ import (
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/syncutil"
 	"github.com/Samuelk0nrad/gai/loop"
 	"github.com/Samuelk0nrad/gai/modelinput"
 )
@@ -325,7 +326,7 @@ func (c Checkpoint) validate(deep bool) error {
 // the previous one, so readers only need mu to load the current value.
 type checkpointCoordinator struct {
 	mu       sync.RWMutex
-	commitMu sync.Mutex
+	commitMu syncutil.ContextMutex // Steer waits for it within its ctx
 	state    Checkpoint
 	// acknowledged reports whether state has been durably committed.
 	acknowledged     bool
@@ -336,6 +337,12 @@ type checkpointCoordinator struct {
 	failure          error
 	resumed          bool
 	resumeCheckpoint *Checkpoint
+	// steering holds live steering for the primary stage.
+	steering *steeringInbox
+	// primaryRevision is the revision of the primary loop's last commit.
+	// Steer also commits while that loop runs, so the head revision can be
+	// newer than the commit the loop reports.
+	primaryRevision atomic.Uint64
 }
 
 // snapshot returns only acknowledged state, or nil before the first commit.
@@ -407,8 +414,18 @@ func (d *checkpointCoordinator) revision() uint64 {
 // change may replace top-level and stage fields of its argument, but must not
 // modify values reachable through them: those are shared with earlier states.
 func (d *checkpointCoordinator) commit(ctx context.Context, change func(*Checkpoint)) error {
-	d.commitMu.Lock()
+	d.lockCommits()
 	defer d.commitMu.Unlock()
+	return d.commitLocked(ctx, change)
+}
+
+// lockCommits waits for commitMu regardless of cancellation, as commits do.
+func (d *checkpointCoordinator) lockCommits() {
+	_ = d.commitMu.Lock(context.Background())
+}
+
+// commitLocked commits while the caller holds commitMu.
+func (d *checkpointCoordinator) commitLocked(ctx context.Context, change func(*Checkpoint)) error {
 	if d.failure != nil {
 		return d.failure
 	}
@@ -439,6 +456,9 @@ func (d *checkpointCoordinator) commit(ctx context.Context, change func(*Checkpo
 	d.state = next
 	d.acknowledged = true
 	d.mu.Unlock()
+	if d.steering != nil {
+		d.steering.markReady()
+	}
 	return nil
 }
 
@@ -489,16 +509,23 @@ func changeStage(c *Checkpoint, id string, change func(*StageCheckpoint)) {
 	}
 }
 
-// control connects one loop to the aggregate checkpoint coordinator.
+// control connects one loop to the aggregate checkpoint coordinator. Only the
+// primary loop takes live steering.
 func (d *checkpointCoordinator) control(stageID string) *loop.ContinuationControl {
 	stage := d.stage(stageID)
 	runID, executionID, _ := d.eventIdentity(-1)
-	return &loop.ContinuationControl{RunID: runID, ExecutionID: executionID, StageID: stageID, Initial: stage.Continuation, Revision: d.revision, DeferredApprovals: d.durability.DeferredApprovals, PauseRequested: d.pause.Load, PauseSignal: d.pauseSignal, Commit: func(ctx context.Context, c loop.Continuation) error {
+	control := &loop.ContinuationControl{RunID: runID, ExecutionID: executionID, StageID: stageID, Initial: stage.Continuation, Revision: d.revision, DeferredApprovals: d.durability.DeferredApprovals, PauseRequested: d.pause.Load, PauseSignal: d.pauseSignal, Commit: func(ctx context.Context, c loop.Continuation) error {
 		return d.commit(ctx, func(cp *Checkpoint) {
 			cp.ActiveStageID = stageID
 			changeStage(cp, stageID, func(s *StageCheckpoint) { s.Continuation = &c })
 		})
 	}}
+	if stageID == PrimaryStageID && d.steering != nil {
+		control.Commit = d.commitPrimary
+		control.Steering = d.takeSteering
+		control.Revision = d.primaryRevision.Load
+	}
+	return control
 }
 
 // RequestPause cooperatively stops new work at an execution boundary.
@@ -575,7 +602,7 @@ func (w *Workflow) configureDurability(a *Agent, input RunInput) error {
 		m := item.(*AgentMiddleware)
 		cp.Stages = append(cp.Stages, StageCheckpoint{ID: m.config.ID, Name: m.name(), Output: m.config.Output})
 	}
-	w.durability = &checkpointCoordinator{state: cp, durability: *input.Durability, pauseSignal: make(chan struct{})}
+	w.durability = &checkpointCoordinator{state: cp, durability: *input.Durability, pauseSignal: make(chan struct{}), steering: newSteeringInbox(false, false)}
 	w.stageID = PrimaryStageID
 	w.loop.Continuation = w.durability.control(PrimaryStageID)
 	return nil
@@ -672,6 +699,9 @@ func (a *Agent) Resume(ctx context.Context, checkpoint Checkpoint, input ResumeI
 				}
 			}
 			stage.Continuation.Steering = append(stage.Continuation.Steering, messages...)
+			if len(messages) > 0 {
+				stage.Continuation.SteeringCommands = append(stage.Continuation.SteeringCommands, command.ID)
+			}
 			checkpoint.Commands = append(checkpoint.Commands, command)
 		}
 	}
@@ -711,7 +741,7 @@ func (a *Agent) Resume(ctx context.Context, checkpoint Checkpoint, input ResumeI
 	}
 	checkpoint.ExecutionID = rand.Text()
 	checkpoint.Status = StatusRunning
-	d := &checkpointCoordinator{state: checkpoint, durability: durability, pauseSignal: make(chan struct{}), resumed: true}
+	d := &checkpointCoordinator{state: checkpoint, durability: durability, pauseSignal: make(chan struct{}), resumed: true, steering: newSteeringInbox(true, primary.Complete)}
 	if err := d.commit(ctx, func(*Checkpoint) {}); err != nil {
 		return nil, err
 	}

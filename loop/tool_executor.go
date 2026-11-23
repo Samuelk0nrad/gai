@@ -224,6 +224,14 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 			if err := l.durable.completed(ctx, done, interrupted); err != nil {
 				fail(err)
 			}
+			// Steering may cancel a call refused without a handler while its
+			// result is processed. The saved cancellation is its outcome.
+			if l.durable.canceledBySteering(done.index) {
+				inv := l.durable.state.Pending.Invocations[done.index]
+				done.result = restoredResult(inv.Result)
+				done.execution = inv.Execution
+				done.err = nil
+			}
 		}
 		iteration.Parts[task.pending.partIndex].ToolResp = done.result
 		iteration.Parts[task.pending.partIndex].ToolExecution = cloneToolExecution(&done.execution)
@@ -305,14 +313,27 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 				}
 				dispatched := false
 				if l.durable != nil && !task.restored {
-					if err := l.durable.beforeDispatch(ctx, index, task.execution, task.result != nil); err != nil {
+					err := l.durable.beforeDispatch(ctx, index, task.execution, task.result != nil)
+					switch {
+					case errors.Is(err, errCanceledBySteering):
+						// Steering resolved the call. Publish its saved result
+						// without running the handler or the result processor.
+						inv := l.durable.state.Pending.Invocations[index]
+						tasks[index].restored = true
+						tasks[index].result = restoredResult(inv.Result)
+						tasks[index].execution = inv.Execution
+						task = tasks[index]
+					case err != nil:
 						release()
 						if !isPause(err) {
 							fail(err)
 						}
+					default:
+						dispatched = task.result == nil
+					}
+					if err != nil && !task.restored {
 						break
 					}
-					dispatched = task.result == nil
 				}
 				// abandon stops before the handler starts. An acknowledged dispatch
 				// is reverted, because the handler provably never ran.

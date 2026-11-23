@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -117,6 +118,13 @@ func (r *runExecution) continuationBoundary() bool {
 		r.pauseContinuation()
 		return true
 	}
+	take := SteeringOpen
+	if r.lastModelRequest() {
+		take = SteeringLast
+	}
+	d.takeSteering(take)
+	// Steering taken with the commit below waits for the next boundary, so
+	// one boundary applies one generation.
 	if d.state.Pending == nil && len(d.state.Steering) > 0 {
 		// Steering before the first accepted generation follows the original
 		// input. That input is already in the frozen request prefix, so it is
@@ -131,8 +139,10 @@ func (r *runExecution) continuationBoundary() bool {
 		}
 		messages = append(messages, ai.CloneMessages(d.state.Steering)...)
 		g := Generation{ID: newIdentity(), Messages: messages, InputMessages: inputMessages}
+		commands := d.state.SteeringCommands
 		d.state.Generations = append(d.state.Generations, g)
 		d.state.Steering = nil
+		d.state.SteeringCommands = nil
 		r.owner.Iterations = append(r.owner.Iterations, g.iteration())
 		if d.state.Phase == PhaseDone {
 			d.state.Phase = PhaseReady
@@ -141,8 +151,70 @@ func (r *runExecution) continuationBoundary() bool {
 			sendLoopFailure(r.ctx, r.events, r.state, err)
 			return true
 		}
+		if err := sendEvent(r.ctx, r.events, Event{Type: EventSteeringApplied, GenerationID: g.ID, Steering: &SteeringDetail{Commands: commands}}); err != nil {
+			sendLoopFailure(r.ctx, r.events, r.state, err)
+			return true
+		}
 	}
 	return false
+}
+
+// errCanceledBySteering reports that steering resolved a call before dispatch.
+var errCanceledBySteering = errors.New("tool call canceled by steering")
+
+// lastModelRequest reports whether no model request can follow the next one,
+// or the current plan when one is pending: steering accepted after that could
+// never be applied.
+func (r *runExecution) lastModelRequest() bool {
+	d := r.owner.durable
+	if d.state.Pending != nil {
+		return d.state.Pending.Iteration >= r.owner.MaxLoopIterations
+	}
+	return d.state.NextIteration >= r.owner.MaxLoopIterations
+}
+
+// takeSteering applies steering that the owner saved since the loop last took
+// it. Afterwards the loop's state matches the saved continuation again.
+func (d *durableLoop) takeSteering(take SteeringTake) {
+	if d.control.Steering == nil {
+		return
+	}
+	s := d.control.Steering(take)
+	d.state.Steering = append(d.state.Steering, ai.CloneMessages(s.Messages)...)
+	d.state.SteeringCommands = append(d.state.SteeringCommands, s.Commands...)
+	if d.state.Pending == nil {
+		return
+	}
+	for _, saved := range s.Canceled {
+		for i := range d.state.Pending.Invocations {
+			if d.state.Pending.Invocations[i].ID == saved.ID {
+				d.state.Pending.Invocations[i] = cloneInvocationRecord(saved)
+			}
+		}
+	}
+}
+
+// beforeTerminalBatch stops steering before a terminal batch ends the loop.
+// Steering that is already waiting, or a call that steering canceled, keeps
+// the loop running after the batch, so then nothing changes.
+func (d *durableLoop) beforeTerminalBatch() {
+	if len(d.state.Steering) > 0 {
+		return
+	}
+	if d.state.Pending != nil && slices.ContainsFunc(d.state.Pending.Invocations, func(inv InvocationRecord) bool { return inv.CanceledBySteering }) {
+		return
+	}
+	d.takeSteering(SteeringFinishing)
+}
+
+// finished reports whether the loop gave its final answer and holds no steering.
+func (d *durableLoop) finished() bool {
+	return d.state.Phase == PhaseDone && len(d.state.Steering) == 0
+}
+
+// canceledBySteering reports whether steering resolved the call at index.
+func (d *durableLoop) canceledBySteering(index int) bool {
+	return d.state.Pending.Invocations[index].CanceledBySteering
 }
 
 // pauseContinuation commits settled state before emitting the paused outcome.
@@ -302,9 +374,13 @@ func (d *durableLoop) invocation(index int) Invocation {
 }
 
 // beforeDispatch fences handlers behind acknowledged intent and honors a concurrent pause.
+// It returns errCanceledBySteering when steering resolved the call instead.
 func (d *durableLoop) beforeDispatch(ctx context.Context, index int, execution ToolExecution, synthetic bool) error {
 	if d.pausing() {
 		return ErrPaused
+	}
+	if d.canceledBySteering(index) {
+		return errCanceledBySteering
 	}
 	inv := &d.state.Pending.Invocations[index]
 	inv.Execution = execution
@@ -315,7 +391,7 @@ func (d *durableLoop) beforeDispatch(ctx context.Context, index int, execution T
 	}
 	acknowledged := d.commits
 	if err := d.commit(ctx); err != nil {
-		if !synthetic {
+		if !synthetic && !d.canceledBySteering(index) {
 			if d.commits > acknowledged {
 				// Storage acknowledged the intent, but delivering its commit event
 				// failed, for example because the run was canceled. The handler
@@ -329,6 +405,11 @@ func (d *durableLoop) beforeDispatch(ctx context.Context, index int, execution T
 			}
 		}
 		return err
+	}
+	// Steering accepted before this commit canceled the call: the owner saved
+	// the canceled record in place of the dispatch intent.
+	if d.canceledBySteering(index) {
+		return errCanceledBySteering
 	}
 	if d.pausing() {
 		if synthetic {
@@ -351,9 +432,13 @@ func (d *durableLoop) abandonDispatch(ctx context.Context, index int) error {
 	return d.commitSettled(ctx)
 }
 
-// revertDispatch undoes a dispatch intent in memory.
+// revertDispatch undoes a dispatch intent in memory. A call that steering
+// canceled stays canceled.
 func (d *durableLoop) revertDispatch(index int) {
 	inv := &d.state.Pending.Invocations[index]
+	if inv.CanceledBySteering {
+		return
+	}
 	inv.Disposition = InvocationPlanned
 	inv.Execution.State = ToolNotStarted
 	inv.Attempt--
@@ -365,7 +450,9 @@ func (d *durableLoop) revertDispatch(index int) {
 // resuming requires an explicit recovery resolution instead of showing the
 // model an error that could lead to a duplicate call.
 func (d *durableLoop) completed(ctx context.Context, done toolCompletion, interrupted bool) error {
-	if interrupted {
+	// Only a call that never ran can be canceled by steering, such as one
+	// refused without a handler, and an acknowledged cancellation stays.
+	if interrupted || d.canceledBySteering(done.index) {
 		return nil
 	}
 	inv := &d.state.Pending.Invocations[done.index]
@@ -441,10 +528,16 @@ func (d *durableLoop) deferredApprovals(ctx context.Context, l *Loop, tasks []sc
 	if err := d.commit(ctx); err != nil {
 		return err
 	}
+	// Steering taken with that commit may have canceled calls that were
+	// waiting for a decision; they no longer wait.
+	pending = false
 	for i, task := range tasks {
 		inv := d.state.Pending.Invocations[i]
-		if inv.Approval == nil || task.restored {
+		if inv.Approval == nil || task.restored || inv.CanceledBySteering {
 			continue
+		}
+		if task.execution.Decision.Action == ToolRequireApproval && inv.ApprovalDecision == nil {
+			pending = true
 		}
 		kind := EventToolApprovalRequested
 		if inv.ApprovalDecision != nil {
@@ -477,7 +570,9 @@ func stampLoopEvent(ctx context.Context, event Event) Event {
 	if d == nil {
 		return event
 	}
-	event.GenerationID = d.generationID
+	if event.GenerationID == "" {
+		event.GenerationID = d.generationID
+	}
 	if event.ToolCall != nil && d.state.Pending != nil {
 		for _, inv := range d.state.Pending.Invocations {
 			if inv.Call.ID == event.ToolCall.ID {

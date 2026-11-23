@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 
 	"github.com/Samuelk0nrad/gai"
@@ -200,6 +201,25 @@ func (o *workflowObserver) PrimaryFinished(ctx context.Context, result AgentResu
 	gai.AddObservationContent(ctx, o.debug, fields, "output_text", gai.ContentKindCompletion, result.Text)
 	gai.AddObservationContent(ctx, o.debug, fields, "reasoning", gai.ContentKindReasoning, result.Reasoning)
 	o.emit(ctx, "agent_primary_finished", fields, errors.Join(result.Errors...))
+}
+
+// SteeringAccepted records where a steering command entered the run.
+func (o *workflowObserver) SteeringAccepted(ctx context.Context, command string, revision uint64) {
+	o.emit(ctx, "agent_workflow_steering_accepted", map[string]any{
+		"agent_name":          o.agentName,
+		"command_id":          command,
+		"checkpoint_revision": int64(revision),
+	}, nil)
+}
+
+// SteeringApplied records where waiting steering joined the conversation.
+func (o *workflowObserver) SteeringApplied(ctx context.Context, commands []string, generationID string) {
+	o.emit(ctx, "agent_workflow_steering_applied", map[string]any{
+		"agent_name":    o.agentName,
+		"command_ids":   slices.Clone(commands),
+		"command_count": len(commands),
+		"generation_id": generationID,
+	}, nil)
 }
 
 func (o *workflowObserver) Finished(ctx context.Context, result WorkflowResult) {
