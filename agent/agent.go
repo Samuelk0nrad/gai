@@ -103,13 +103,9 @@ type Definition struct {
 	// RequestBudget atomically replaces the prompt builder's window/reserve.
 	// Nil inherits standard Builder settings; explicit zero limits disable checks.
 	RequestBudget *ai.RequestBudgetConfig
-	// AutoCompactHistory opts into persistent history compaction at workflow
-	// start, before history selection. Requires a *modelinput.Builder and history
-	// sources backed by a writable HistoryStore. Uses the effective run model,
-	// counter, and remaining source budget. Disabled budgets skip compaction.
-	// Conflicts, summary errors, or remaining pressure stop the run; no retry is
-	// added. Applications still own session ordering and accepted-turn writes.
-	AutoCompactHistory bool
+	// HistoryCompaction enables persistent history compaction at workflow
+	// start. Nil disables it. See HistoryCompactionPolicy.
+	HistoryCompaction *HistoryCompactionPolicy
 	// ToolResultProcessor can transform tool responses before they enter the transcript.
 	ToolResultProcessor loop.ToolResultProcessor
 	// ObservationSink receives agent and workflow lifecycle events.
@@ -298,12 +294,12 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 	} else if execution.requireTokenCounterSetter {
 		return nil, ErrTokenCounterNotConfigurable
 	}
-	if execution.autoCompactHistory {
+	if execution.historyCompaction != nil {
 		builder, ok := promptBuilder.(*modelinput.Builder)
 		if !ok {
 			return nil, ErrHistoryCompactionNotConfigurable
 		}
-		promptBuilder = &compactingPromptBuilder{Builder: builder, model: execution.model}
+		promptBuilder = &compactingPromptBuilder{Builder: builder, model: execution.model, policy: *execution.historyCompaction, sink: a.def.ObservationSink}
 	}
 
 	l := loop.New(execution.model, execution.tools, promptBuilder, execution.toolResultProcessor)

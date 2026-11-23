@@ -18,6 +18,7 @@ type primaryAccumulator struct {
 	errs             []error
 	canceled         bool
 	cancelErr        error
+	transcript       *ai.AIRequest
 }
 
 func (a *primaryAccumulator) recordOutput(event Event) {
@@ -67,6 +68,7 @@ func (a *primaryAccumulator) result() AgentResult {
 		AttemptedTokens: cloneTokens(a.attempted),
 		AttemptedText:   tokenText(a.attempted),
 		Messages:        cloneMessages(messages),
+		Transcript:      a.transcript,
 		Iterations:      cloneIterations(a.accepted),
 		Usage:           iterationUsage(a.accepted),
 		BilledUsage:     a.billed,
@@ -146,6 +148,10 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 				terminal = Event{Type: EventStageFinish, Source: source, StageOutcome: StagePaused, IterationCount: low.IterationCount, AttemptID: low.AttemptID}
 			case loop.EventDone:
 				terminal = Event{Type: EventStageFinish, Source: source, StageOutcome: StageSucceeded}
+				if low.Transcript != nil {
+					transcript := low.Transcript.Copy()
+					acc.transcript = &transcript
+				}
 			}
 			if terminal.Type != "" {
 				terminal.GenerationID = low.GenerationID
@@ -174,6 +180,9 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 			}
 		}
 		primary := acc.result()
+		if compaction, ok := w.loop.PromptBuilder.(*compactingPromptBuilder); ok {
+			primary.HistoryCompaction = compaction.compactionReports()
+		}
 		if w.durability != nil {
 			if err := w.finishDurablePrimary(ctx, primary, terminal.StageOutcome == StagePaused); err != nil {
 				primary.Errors = append(primary.Errors, err)

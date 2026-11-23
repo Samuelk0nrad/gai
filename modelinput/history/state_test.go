@@ -1,13 +1,12 @@
 package history
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
-	"github.com/Samuelk0nrad/gai/agent/summary"
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/modelinput"
-	"github.com/Samuelk0nrad/gai/testutil/mocks"
 )
 
 func TestHistoryStateCloneOwnsNestedPayloads(t *testing.T) {
@@ -40,11 +39,11 @@ func TestSummaryCandidateIsDetachedAndPreservesChronology(t *testing.T) {
 		},
 	}
 	before := state.Clone()
-	model := &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.TextMessage(ai.RoleAssistant, "combined")}}}}
-	summarizer := summary.New(model)
+	summarizer := &stubSummarizer{text: "combined"}
 	ctx, obs := newHistoryCompactionObserver(t.Context(), nil, "session", 10, .5)
 	defer obs.Finish(nil)
-	next, changed, err := summarizeHistory(ctx, state, &summarizer, ai.TextTokenEstimator{}, .5, 0, obs)
+	outcome, changed, err := summarizeHistory(ctx, state, summarizer, summaryRequest{amount: .5, counter: ai.TextTokenEstimator{}}, obs)
+	next := outcome.state
 	if err != nil || !changed {
 		t.Fatalf("summarize = %v, %v", changed, err)
 	}
@@ -56,4 +55,14 @@ func TestSummaryCandidateIsDetachedAndPreservesChronology(t *testing.T) {
 	if !reflect.DeepEqual(state, before) {
 		t.Fatal("summary generation or candidate changed input")
 	}
+}
+
+type stubSummarizer struct {
+	text  string
+	input SummaryInput
+}
+
+func (s *stubSummarizer) SummarizeHistory(_ context.Context, input SummaryInput) (SummaryOutput, error) {
+	s.input = input
+	return SummaryOutput{Text: s.text}, nil
 }

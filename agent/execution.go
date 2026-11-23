@@ -63,8 +63,9 @@ type ExecutionOverrides struct {
 	// RequestBudget replaces the entire budget policy. Set with nil restores
 	// prompt-builder inheritance; an explicit zero policy disables limits.
 	RequestBudget Optional[*ai.RequestBudgetConfig]
-	// AutoCompactHistory inherits when nil; false disables the definition's opt-in.
-	AutoCompactHistory *bool
+	// HistoryCompaction set to nil disables the definition's policy; a
+	// non-nil policy replaces it.
+	HistoryCompaction Optional[*HistoryCompactionPolicy]
 	// RetryPolicy set to nil disables the entire policy, including its timeouts.
 	RetryPolicy Optional[*loop.RetryPolicy]
 	// ToolResultProcessor set to nil disables the inherited processor.
@@ -86,7 +87,7 @@ type resolvedExecution struct {
 	reasoning                 ai.ReasoningConfig
 	counter                   ai.TokenCounter
 	requestBudget             *ai.RequestBudgetConfig
-	autoCompactHistory        bool
+	historyCompaction         *HistoryCompactionPolicy
 	retryPolicy               *loop.RetryPolicy
 	toolResultProcessor       loop.ToolResultProcessor
 	nativeTools               bool
@@ -103,9 +104,9 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 		toolApprovalResolver: def.ToolApprovalResolver,
 		toolChoice:           def.ToolChoice, responseFormat: def.ResponseFormat,
 		reasoning: def.Reasoning, counter: def.TokenCounter,
-		requestBudget:      def.RequestBudget,
-		autoCompactHistory: def.AutoCompactHistory,
-		retryPolicy:        def.RetryPolicy, toolResultProcessor: def.ToolResultProcessor,
+		requestBudget:     def.RequestBudget,
+		historyCompaction: def.HistoryCompaction,
+		retryPolicy:       def.RetryPolicy, toolResultProcessor: def.ToolResultProcessor,
 		reconfigureTools: def.ToolChoice.Mode != "" || len(def.ToolChoice.Names) != 0,
 	}
 	if overrides != nil {
@@ -150,8 +151,8 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 		if overrides.RequestBudget.Set {
 			r.requestBudget = overrides.RequestBudget.Value
 		}
-		if overrides.AutoCompactHistory != nil {
-			r.autoCompactHistory = *overrides.AutoCompactHistory
+		if overrides.HistoryCompaction.Set {
+			r.historyCompaction = overrides.HistoryCompaction.Value
 		}
 		if overrides.RetryPolicy.Set {
 			r.retryPolicy = overrides.RetryPolicy.Value
@@ -193,6 +194,10 @@ func resolveExecution(def Definition, overrides *ExecutionOverrides) (resolvedEx
 	if r.toolResultProcessor != nil && nilDependency(r.toolResultProcessor) {
 		return resolvedExecution{}, fmt.Errorf("%w: tool response processor is a typed nil", ErrInvalidExecutionConfig)
 	}
+	if err := r.historyCompaction.validate(); err != nil {
+		return resolvedExecution{}, err
+	}
+	r.historyCompaction = clonePointer(r.historyCompaction)
 	if r.retryPolicy != nil {
 		if err := r.retryPolicy.Validate(); err != nil {
 			return resolvedExecution{}, fmt.Errorf("execution.retry_policy: %w", err)
@@ -245,6 +250,7 @@ func nilDependency(value any) bool {
 
 func cloneDefinition(def Definition) Definition {
 	def.RequestBudget = clonePointer(def.RequestBudget)
+	def.HistoryCompaction = clonePointer(def.HistoryCompaction)
 	def.Tools = cloneTools(def.Tools)
 	def.ToolChoice = cloneToolChoice(def.ToolChoice)
 	def.ResponseFormat = cloneResponseFormat(def.ResponseFormat)
@@ -289,7 +295,7 @@ func cloneExecution(overrides *ExecutionOverrides) *ExecutionOverrides {
 	}
 	copy.Reasoning = clonePointer(overrides.Reasoning)
 	copy.RequestBudget.Value = clonePointer(overrides.RequestBudget.Value)
-	copy.AutoCompactHistory = clonePointer(overrides.AutoCompactHistory)
+	copy.HistoryCompaction.Value = clonePointer(overrides.HistoryCompaction.Value)
 	copy.RetryPolicy.Value = cloneRetryPolicy(overrides.RetryPolicy.Value)
 	return &copy
 }

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Samuelk0nrad/gai/agent"
+	"github.com/Samuelk0nrad/gai/agent/summary"
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/modelinput/history"
 )
@@ -194,13 +195,13 @@ func TestExplicitCompactionBeforeRunAndPressurePolicy(t *testing.T) {
 					}
 					return "new answer", nil
 				}),
-				compaction: &history.CompactorDefinition{Amount: 1, TokenCounter: cheapCounter{}, Model: textModel(func(context.Context, ai.AIRequest) (string, error) {
+				compaction: &history.CompactorDefinition{Amount: 1, TokenCounter: cheapCounter{}, Summarizer: summary.New(textModel(func(context.Context, ai.AIRequest) (string, error) {
 					summaries.Add(1)
 					if remains {
 						return strings.Repeat("large summary ", 200), nil
 					}
 					return "short summary", nil
-				})},
+				}))},
 			}
 			_, err := service.Run(t.Context(), "s", "new question")
 			if remains {

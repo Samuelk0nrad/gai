@@ -19,7 +19,7 @@ type HistorySource struct {
 
 // NewHistory creates a read-only history source. Its ordinary source functions
 // never run a summarizer or persist state. Use NewCompactor for explicit
-// compaction or agent.Definition.AutoCompactHistory for preparation at run start.
+// compaction or agent.Definition.HistoryCompaction for preparation at run start.
 func NewHistory(sessionID string, reader HistoryReader) *HistorySource {
 	return &HistorySource{historyStateStore: reader, sessionID: sessionID}
 }

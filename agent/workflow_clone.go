@@ -92,6 +92,11 @@ func cloneAgentResult(result AgentResult) AgentResult {
 	result.Tokens = cloneTokens(result.Tokens)
 	result.AttemptedTokens = cloneTokens(result.AttemptedTokens)
 	result.Messages = cloneMessages(result.Messages)
+	if result.Transcript != nil {
+		transcript := result.Transcript.Copy()
+		result.Transcript = &transcript
+	}
+	result.HistoryCompaction = append([]HistoryCompactionReport(nil), result.HistoryCompaction...)
 	result.Iterations = cloneIterations(result.Iterations)
 	result.Errors = append([]error(nil), result.Errors...)
 	return result

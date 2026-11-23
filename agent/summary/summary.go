@@ -10,6 +10,7 @@ import (
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/loop"
 	"github.com/Samuelk0nrad/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/modelinput/history"
 )
 
 //go:embed system.md
@@ -151,4 +152,20 @@ func (s Summarizer) Summarize(ctx context.Context, req Request) (string, error) 
 		return "", fmt.Errorf("%w: summary agent produced no text", modelinput.ErrPromptSource)
 	}
 	return result.Text, nil
+}
+
+// SummarizeHistory implements history.Summarizer with this separate summary
+// agent. It renders the earlier summary and the turns to fold as one text
+// message under the summary system prompt, so it shares no cached prefix with
+// the conversation. It ignores the prefix, request budget and response format.
+func (s Summarizer) SummarizeHistory(ctx context.Context, input history.SummaryInput) (history.SummaryOutput, error) {
+	text, err := history.RenderSummaryText(ctx, input.PreviousSummary, input.Turns)
+	if err != nil {
+		return history.SummaryOutput{}, err
+	}
+	summary, err := s.Summarize(ctx, Request{ID: "history", Text: text, MaxTokens: input.MaxTokens})
+	if err != nil {
+		return history.SummaryOutput{}, err
+	}
+	return history.SummaryOutput{Text: summary}, nil
 }

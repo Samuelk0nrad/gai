@@ -36,14 +36,7 @@ func selectHistory(ctx context.Context, state *HistoryState, tokenBudget int, co
 			return selected, err
 		}
 		// Count the same prefixed summary message returned in the prompt.
-		summaryParts := ai.TextParts("Conversation summary:\n" + state.Summary.Content.Text)
-		if len(state.Summary.Content.Extensions) > 0 {
-			// Opaque state belongs to the original part, whose text must stay
-			// unchanged. Only plain summaries can coalesce the prefix.
-			summaryParts = ai.TextParts("Conversation summary:\n")
-			summaryParts = append(summaryParts, ai.CloneParts([]ai.ContentPart{state.Summary.Content})...)
-		}
-		summaryPart := Part{Messages: []ai.Message{{Role: ai.RoleUser, Parts: summaryParts}}}
+		summaryPart := Part{Messages: []ai.Message{summaryMessage(state.Summary)}}
 		summaryTokenCount, err := summaryPart.Tokens(ctx, counter)
 		if err != nil {
 			selected.summaryFailed = true

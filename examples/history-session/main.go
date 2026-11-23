@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/Samuelk0nrad/gai/agent/summary"
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/modelinput/history"
 )
@@ -44,9 +45,9 @@ func main() {
 	}
 	service := &chatService{
 		store: store, requestWindow: 256,
-		compaction: &history.CompactorDefinition{Amount: 1, Model: textModel(func(context.Context, ai.AIRequest) (string, error) {
+		compaction: &history.CompactorDefinition{Amount: 1, Summarizer: summary.New(textModel(func(context.Context, ai.AIRequest) (string, error) {
 			return "The user prefers Go.", nil
-		})},
+		}))},
 		model: textModel(func(_ context.Context, request ai.AIRequest) (string, error) {
 			previous := 0
 			for _, message := range request.Messages {

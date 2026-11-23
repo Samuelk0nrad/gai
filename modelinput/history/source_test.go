@@ -2,6 +2,7 @@ package history_test
 
 import (
 	"context"
+	"github.com/Samuelk0nrad/gai/agent/summary"
 	"strings"
 	"testing"
 
@@ -317,7 +318,7 @@ func TestCompactorDoesNotSummarizeWhenHistoryFitsBudget(t *testing.T) {
 	}
 	compactor, err := history.NewCompactor("session-1", store, history.CompactorDefinition{
 		Amount:       0.67,
-		Model:        model,
+		Summarizer:   summary.New(model),
 		TokenCounter: &mocks.MockTokenCounter{},
 	})
 	if err != nil {
@@ -387,7 +388,7 @@ func TestCompactorSummarizesOldestTurnsWhenBudgetReached(t *testing.T) {
 	}
 	compactor, err := history.NewCompactor("session-1", store, history.CompactorDefinition{
 		Amount:       0.67,
-		Model:        model,
+		Summarizer:   summary.New(model),
 		TokenCounter: &mocks.MockTokenCounter{},
 	})
 	if err != nil {
@@ -578,7 +579,7 @@ func TestHistorySourceFunctionTable(t *testing.T) {
 			source := history.NewHistory("session-1", store)
 			if tt.summaryDef != nil {
 				summaryDef := *tt.summaryDef
-				summaryDef.Model = model
+				summaryDef.Summarizer = summary.New(model)
 				summaryDef.TokenCounter = &mocks.MockTokenCounter{}
 				compactor, err := history.NewCompactor("session-1", store, summaryDef)
 				if err != nil {

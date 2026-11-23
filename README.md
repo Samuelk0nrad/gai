@@ -383,27 +383,32 @@ See [request budgets and migration](docs/request-budgets.md).
 Ordinary context builds never invoke a summarizer or write history. Token counts are local
 and are not persisted.
 
-To compact automatically before an agent answers, set `AutoCompactHistory: true`
-on `agent.Definition`. Return a standard `*modelinput.Builder` containing
-`history.NewHistory(sessionID, store)`, with a writable `history.HistoryStore` and
-an enabled request budget. The agent uses its effective model and counter to
-compact only when history exceeds its remaining allocation. Compaction runs once
-at workflow start; conflicts or remaining pressure stop the run without retries.
-The flag does not persist new turns or provide session locking. See
-[automatic compaction](docs/history.md#automatic-compaction-in-agents) for usage.
+To compact automatically before an agent answers, set
+`HistoryCompaction: &agent.HistoryCompactionPolicy{}` on `agent.Definition`. Return a
+standard `*modelinput.Builder` containing `history.NewHistory(sessionID, store)`, with a
+writable `history.HistoryStore` and an enabled request budget. The agent uses its
+effective model and counter to compact only when history exceeds its remaining
+allocation. The summary continues the run's own prompt with one summary instruction
+appended, so the provider can serve it from the previous run's prompt cache.
+Compaction runs once at workflow start, without retries. With `OnFailure:
+agent.HistoryCompactionStop` (the default) conflicts, summary errors and remaining
+pressure stop the run; with `agent.HistoryCompactionContinue` the run reports them and
+builds its prompt from the uncompacted history. The policy does not persist new turns
+or provide session locking. See [automatic compaction](docs/history.md#automatic-compaction-in-agents).
 
 Use `history.NewCompactor(sessionID, store, history.CompactorDefinition{Model: model})`
-and call `Compact(ctx, historyBudget)` explicitly when older completed turns should
-be summarized. Stores load revisioned snapshots and commit through atomic
-compare-and-swap; conflicts are returned to the application without retrying.
-See [history persistence and migration](docs/history.md) for the store contract,
-compaction results, and session ordering. The [offline history-session example](examples/history-session)
-demonstrates the complete application lifecycle and concurrent-session tests.
+and call `Compact(ctx, historyBudget, history.WithPrefix(*result.Primary.Transcript))`
+after persisting a turn to summarize older completed turns from that run's cached
+prompt. Stores load revisioned snapshots and commit through atomic compare-and-swap;
+conflicts are returned to the application without retrying. See
+[history persistence and migration](docs/history.md) for continuation summaries, the
+store contract, compaction results, and session ordering. The
+[offline history-session example](examples/history-session) demonstrates the complete
+application lifecycle and concurrent-session tests.
 
-Built-in summarization uses a text projection. If the selected turns contain media,
-signed reasoning, or other opaque provider state, it returns
-`ai.ErrUnsupportedCapability` instead of dropping that content. Such content can
-still be preserved in storage and replayed by a compatible native adapter.
+The separate-prompt text summarizer, `summary.New(model)` from `agent/summary`, renders
+the turns as text instead. If they contain media, it returns
+`ai.ErrUnsupportedCapability` instead of dropping that content.
 
 ## Canonical messages
 

@@ -276,6 +276,18 @@ func (b *Builder) BuildContext(ctx context.Context) ([]Part, error) {
 	return b.buildContext(ctx, nil)
 }
 
+// SourcePreparation describes one context source that is about to be selected.
+type SourcePreparation struct {
+	Source ContextSource
+	// Remaining is the allocation left for this and later sources.
+	Remaining int
+	// Counter is the builder's local counter.
+	Counter ai.TokenCounter
+	// Preceding renders the request messages that precede Source, exactly as
+	// BuildRequest emits them: system instructions, then earlier sources.
+	Preceding func(context.Context) ([]ai.Message, error)
+}
+
 // BuildContextWithPreparation explicitly prepares each source immediately before
 // selecting it. The callback receives the same remaining allocation and local
 // counter as source selection, after earlier sources have been evaluated once.
@@ -284,11 +296,11 @@ func (b *Builder) BuildContext(ctx context.Context) ([]Part, error) {
 // Errors stop the build without rollback. Required input or a preceding source
 // that already exceeds the window fails before preparing subsequent sources.
 // Callers must not retain the callback arguments or modify builder configuration.
-func (b *Builder) BuildContextWithPreparation(ctx context.Context, prepare func(context.Context, ContextSource, int, ai.TokenCounter) error) ([]Part, error) {
+func (b *Builder) BuildContextWithPreparation(ctx context.Context, prepare func(context.Context, SourcePreparation) error) ([]Part, error) {
 	return b.buildContext(ctx, prepare)
 }
 
-func (b *Builder) buildContext(ctx context.Context, prepare func(context.Context, ContextSource, int, ai.TokenCounter) error) (contextParts []Part, err error) {
+func (b *Builder) buildContext(ctx context.Context, prepare func(context.Context, SourcePreparation) error) (contextParts []Part, err error) {
 	ctx, obs := newPromptBuilderContextObserver(ctx, b)
 	limit, outputReserve := b.TokenBudget, b.OutputTokenReserve
 	additionalReserve := 0
@@ -382,7 +394,12 @@ func (b *Builder) buildContext(ctx context.Context, prepare func(context.Context
 			setter.SetTokenCounter(b.counter)
 		}
 		if prepare != nil && limit > 0 {
-			if err = prepare(ctx, source, stats.RemainingTokens, b.counter); err != nil {
+			preceding := append([]Part(nil), contextParts...)
+			err = prepare(ctx, SourcePreparation{
+				Source: source, Remaining: stats.RemainingTokens, Counter: b.counter,
+				Preceding: func(ctx context.Context) ([]ai.Message, error) { return b.prefixMessages(ctx, preceding) },
+			})
+			if err != nil {
 				obs.SourceFailed(ctx, source.Name(), stats.RemainingTokens, err)
 				return nil, err
 			}
@@ -476,25 +493,9 @@ func (b *Builder) BuildRequest(ctx context.Context, conv Conversation) (ai.AIReq
 		request := ai.AIRequest{Messages: messages}
 		return request, request.Validate()
 	}
-	if len(b.SystemInstructions) > 0 {
-		system, err := b.renderMessages(ctx, []Part{NewSystemPart(b.SystemInstructions)}, ai.RoleSystem, false)
-		if err != nil {
-			return ai.AIRequest{}, err
-		}
-		messages = append(messages, system...)
-	}
-	for _, part := range b.ContextParts {
-		if err := ctx.Err(); err != nil {
-			return ai.AIRequest{}, err
-		}
-		if part == nil {
-			continue
-		}
-		projected, err := b.partMessages(ctx, part, false)
-		if err != nil {
-			return ai.AIRequest{}, err
-		}
-		messages = append(messages, projected...)
+	messages, err := b.prefixMessages(ctx, b.ContextParts)
+	if err != nil {
+		return ai.AIRequest{}, err
 	}
 	if len(b.input.User) > 0 {
 		messages = append(messages, ai.Message{Role: ai.RoleUser, Parts: ai.CloneParts(b.input.User)})
@@ -510,6 +511,33 @@ func (b *Builder) BuildRequest(ctx context.Context, conv Conversation) (ai.AIReq
 		return ai.AIRequest{}, err
 	}
 	return request, nil
+}
+
+// prefixMessages renders system instructions and context parts as the start of
+// a request. BuildRequest and SourcePreparation.Preceding share it.
+func (b *Builder) prefixMessages(ctx context.Context, parts []Part) ([]ai.Message, error) {
+	var messages []ai.Message
+	if len(b.SystemInstructions) > 0 {
+		system, err := b.renderMessages(ctx, []Part{NewSystemPart(b.SystemInstructions)}, ai.RoleSystem, false)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, system...)
+	}
+	for _, part := range parts {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if part == nil {
+			continue
+		}
+		projected, err := b.partMessages(ctx, part, false)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, projected...)
+	}
+	return messages, nil
 }
 
 // partMessages is shared by source allocation and final request construction.

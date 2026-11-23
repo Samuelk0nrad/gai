@@ -7,6 +7,7 @@ import (
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/loop"
 	"github.com/Samuelk0nrad/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/modelinput/history"
 )
 
 type checkpointSettings struct {
@@ -149,13 +150,52 @@ func checkpointError(err error) string {
 // checkpointOverrides contains only serializable values. Runtime dependencies
 // are reattached from the revision-compatible Definition.
 type checkpointOverrides struct {
-	Limits             LimitsOverrides                   `json:"limits"`
-	ToolExecution      *loop.ToolExecutionConfig         `json:"tool_execution,omitempty"`
-	ToolChoice         *ai.ToolChoice                    `json:"tool_choice,omitempty"`
-	ResponseFormat     *ai.ResponseFormat                `json:"response_format,omitempty"`
-	Reasoning          *ai.ReasoningConfig               `json:"reasoning,omitempty"`
-	RequestBudget      Optional[*ai.RequestBudgetConfig] `json:"request_budget"`
-	AutoCompactHistory *bool                             `json:"auto_compact_history,omitempty"`
+	Limits         LimitsOverrides                   `json:"limits"`
+	ToolExecution  *loop.ToolExecutionConfig         `json:"tool_execution,omitempty"`
+	ToolChoice     *ai.ToolChoice                    `json:"tool_choice,omitempty"`
+	ResponseFormat *ai.ResponseFormat                `json:"response_format,omitempty"`
+	Reasoning      *ai.ReasoningConfig               `json:"reasoning,omitempty"`
+	RequestBudget  Optional[*ai.RequestBudgetConfig] `json:"request_budget"`
+	// AutoCompactHistory is the pre-policy field, read only to resume older
+	// checkpoints: true restores the default policy, false disables it.
+	AutoCompactHistory *bool                        `json:"auto_compact_history,omitempty"`
+	HistoryCompaction  *checkpointHistoryCompaction `json:"history_compaction,omitempty"`
+}
+
+// checkpointHistoryCompaction holds the scalar fields of a policy override.
+// A Summarizer is a runtime dependency and is rejected for durable runs.
+type checkpointHistoryCompaction struct {
+	Disabled         bool                          `json:"disabled,omitempty"`
+	OnFailure        HistoryCompactionFailure      `json:"on_failure,omitempty"`
+	Amount           float32                       `json:"amount,omitempty"`
+	SummaryMaxTokens int                           `json:"summary_max_tokens,omitempty"`
+	ResponseFormat   history.SummaryResponseFormat `json:"response_format,omitempty"`
+}
+
+func snapshotHistoryCompaction(o Optional[*HistoryCompactionPolicy]) *checkpointHistoryCompaction {
+	if !o.Set {
+		return nil
+	}
+	if o.Value == nil {
+		return &checkpointHistoryCompaction{Disabled: true}
+	}
+	p := o.Value
+	return &checkpointHistoryCompaction{OnFailure: p.OnFailure, Amount: p.Amount, SummaryMaxTokens: p.SummaryMaxTokens, ResponseFormat: p.ResponseFormat}
+}
+
+func restoreHistoryCompaction(o *checkpointOverrides) Optional[*HistoryCompactionPolicy] {
+	switch {
+	case o.HistoryCompaction != nil && o.HistoryCompaction.Disabled:
+		return Optional[*HistoryCompactionPolicy]{Set: true}
+	case o.HistoryCompaction != nil:
+		c := o.HistoryCompaction
+		return Optional[*HistoryCompactionPolicy]{Set: true, Value: &HistoryCompactionPolicy{OnFailure: c.OnFailure, Amount: c.Amount, SummaryMaxTokens: c.SummaryMaxTokens, ResponseFormat: c.ResponseFormat}}
+	case o.AutoCompactHistory != nil && *o.AutoCompactHistory:
+		return Optional[*HistoryCompactionPolicy]{Set: true, Value: &HistoryCompactionPolicy{}}
+	case o.AutoCompactHistory != nil:
+		return Optional[*HistoryCompactionPolicy]{Set: true}
+	}
+	return Optional[*HistoryCompactionPolicy]{}
 }
 
 // snapshotOverrides retains scalar overrides for restored middleware input.
@@ -164,7 +204,7 @@ func snapshotOverrides(o *ExecutionOverrides) *checkpointOverrides {
 		return nil
 	}
 	o = cloneExecution(o)
-	return &checkpointOverrides{Limits: o.Limits, ToolExecution: o.ToolExecution, ToolChoice: o.ToolChoice, ResponseFormat: o.ResponseFormat, Reasoning: o.Reasoning, RequestBudget: o.RequestBudget, AutoCompactHistory: o.AutoCompactHistory}
+	return &checkpointOverrides{Limits: o.Limits, ToolExecution: o.ToolExecution, ToolChoice: o.ToolChoice, ResponseFormat: o.ResponseFormat, Reasoning: o.Reasoning, RequestBudget: o.RequestBudget, HistoryCompaction: snapshotHistoryCompaction(o.HistoryCompaction)}
 }
 
 // restoreOverrides rehydrates scalar execution overrides without runtime objects.
@@ -172,5 +212,5 @@ func restoreOverrides(o *checkpointOverrides) *ExecutionOverrides {
 	if o == nil {
 		return nil
 	}
-	return cloneExecution(&ExecutionOverrides{Limits: o.Limits, ToolExecution: o.ToolExecution, ToolChoice: o.ToolChoice, ResponseFormat: o.ResponseFormat, Reasoning: o.Reasoning, RequestBudget: o.RequestBudget, AutoCompactHistory: o.AutoCompactHistory})
+	return cloneExecution(&ExecutionOverrides{Limits: o.Limits, ToolExecution: o.ToolExecution, ToolChoice: o.ToolChoice, ResponseFormat: o.ResponseFormat, Reasoning: o.Reasoning, RequestBudget: o.RequestBudget, HistoryCompaction: restoreHistoryCompaction(o)})
 }

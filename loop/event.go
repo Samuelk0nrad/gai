@@ -67,6 +67,11 @@ type Event struct {
 	ToolApproval  *ToolApprovalRequest
 	Duration      time.Duration
 	Err           error
+	// Transcript is set on EventDone. It is the request the next generation
+	// would send: the run's prompt, every accepted message including the final
+	// answer, and the final request settings. It is nil when it could not be
+	// built. Pass it to history.WithPrefix to summarize from the cached prompt.
+	Transcript *ai.AIRequest
 }
 
 func AttemptStartEvent(iteration, attempt, retry int) Event {
