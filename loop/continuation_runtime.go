@@ -212,6 +212,14 @@ func (d *durableLoop) finished() bool {
 	return d.state.Phase == PhaseDone && len(d.state.Steering) == 0
 }
 
+// restoreSaved makes a scheduled call publish its saved outcome instead of
+// running, as for a call whose result a previous execution committed.
+func (t *scheduledTool) restoreSaved(inv InvocationRecord) {
+	t.restored = true
+	t.result = restoredResult(inv.Result)
+	t.execution = inv.Execution
+}
+
 // canceledBySteering reports whether steering resolved the call at index.
 func (d *durableLoop) canceledBySteering(index int) bool {
 	return d.state.Pending.Invocations[index].CanceledBySteering

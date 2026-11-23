@@ -282,6 +282,11 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 					break
 				}
 				index := pending[position]
+				// A call that steering canceled publishes its saved result. It
+				// runs no handler, so it does not wait for its guard.
+				if l.durable != nil && !tasks[index].restored && l.durable.canceledBySteering(index) {
+					tasks[index].restoreSaved(l.durable.state.Pending.Invocations[index])
+				}
 				task := tasks[index]
 				name := task.pending.call.Name
 				if task.options.Serial && (busy[name] || blockedNames[name]) {
@@ -318,10 +323,7 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 					case errors.Is(err, errCanceledBySteering):
 						// Steering resolved the call. Publish its saved result
 						// without running the handler or the result processor.
-						inv := l.durable.state.Pending.Invocations[index]
-						tasks[index].restored = true
-						tasks[index].result = restoredResult(inv.Result)
-						tasks[index].execution = inv.Execution
+						tasks[index].restoreSaved(l.durable.state.Pending.Invocations[index])
 						task = tasks[index]
 					case err != nil:
 						release()
@@ -406,16 +408,27 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 			break
 		}
 		cases := []reflect.SelectCase{{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(completions)}}
+		steering := -1
 		if firstErr == nil {
 			cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ctx.Done())})
 			if l.durable != nil && !l.durable.pausing() && l.durable.control.PauseSignal != nil {
 				cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(l.durable.control.PauseSignal)})
+			}
+			if l.durable != nil && l.durable.control.SteeringSignal != nil {
+				steering = len(cases)
+				cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(l.durable.control.SteeringSignal)})
 			}
 			for _, guard := range guards {
 				cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(guard)})
 			}
 		}
 		selected, value, _ := reflect.Select(cases)
+		if selected == steering {
+			// Steering canceled calls that may be waiting here; take it so
+			// they resolve now.
+			l.durable.takeSteering(SteeringOpen)
+			continue
+		}
 		if selected != 0 {
 			continue
 		}

@@ -377,6 +377,10 @@ type ContinuationControl struct {
 	// state matches the saved continuation once it applies the result. The
 	// SteeringTake argument tells the owner when to stop accepting steering.
 	Steering func(SteeringTake) Steering
+	// SteeringSignal, when set, receives a value after the owner canceled
+	// accepted calls through steering. A loop waiting to admit tools then takes
+	// the steering at once, so a canceled call does not wait for a guard.
+	SteeringSignal <-chan struct{}
 }
 
 // SteeringTake tells a ContinuationControl owner whether the loop could

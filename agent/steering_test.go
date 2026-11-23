@@ -32,17 +32,42 @@ func steer(t *testing.T, w *agent.Workflow, id, text string, tools agent.Pending
 	}
 }
 
+// runEvents drains the event stream and fails the test on a terminal error.
+// Call it only from the test's own goroutine; others use drainEvents.
 func runEvents(t *testing.T, w *agent.Workflow) ([]agent.Event, agent.WorkflowResult) {
 	t.Helper()
+	events, result, err := drainEvents(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events, result
+}
+
+// drained is the outcome of drainEvents, sent from a worker goroutine.
+type drained struct {
+	result agent.WorkflowResult
+	err    error
+}
+
+// drainEvents drains the event stream and returns the terminal error, so it
+// is safe to call from any goroutine.
+func drainEvents(w *agent.Workflow) ([]agent.Event, agent.WorkflowResult, error) {
 	var events []agent.Event
 	for event := range w.RunEvents(context.Background()) {
 		events = append(events, event)
 	}
 	result, err := w.Wait()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return events, result
+	return events, result, err
+}
+
+// drainInBackground drains the workflow in a goroutine and delivers its outcome.
+func drainInBackground(w *agent.Workflow) <-chan drained {
+	done := make(chan drained, 1)
+	go func() {
+		_, result, err := drainEvents(w)
+		done <- drained{result: result, err: err}
+	}()
+	return done
 }
 
 // messageIndexes returns the positions of messages whose text is text.
@@ -368,11 +393,7 @@ func TestSteerWaitsForFirstCommit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		done := make(chan agent.WorkflowResult)
-		go func() {
-			_, workflow := runEvents(t, w)
-			done <- workflow
-		}()
+		done := drainInBackground(w)
 		<-part.rendering
 		go func() {
 			steered <- w.Steer(context.Background(), steerInput("early", text, agent.ContinuePendingTools))
@@ -390,7 +411,11 @@ func TestSteerWaitsForFirstCommit(t *testing.T) {
 		if err := <-result; err != nil {
 			t.Fatal(err)
 		}
-		workflow := <-done
+		outcome := <-done
+		if outcome.err != nil {
+			t.Fatal(outcome.err)
+		}
+		workflow := outcome.result
 		last := model.requests[model.count()-1].Messages
 		if workflow.Status != agent.StatusSucceeded || len(messageIndexes(last, text)) != 1 || len(messageIndexes(workflow.Primary.Messages, text)) != 1 {
 			t.Fatalf("status=%s requests=%d", workflow.Status, model.count())
@@ -651,11 +676,7 @@ func TestSteerHonorsContextWhileStorageIsBusy(t *testing.T) {
 		}
 		model := &durableModel{responses: [][]ai.Token{response("answer")}}
 		w := newDurableRun(t, agent.New(durableDefinition(model)), store)
-		done := make(chan agent.WorkflowResult)
-		go func() {
-			_, result := runEvents(t, w)
-			done <- result
-		}()
+		done := drainInBackground(w)
 		<-blocked
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -663,8 +684,48 @@ func TestSteerHonorsContextWhileStorageIsBusy(t *testing.T) {
 			t.Fatal(err)
 		}
 		close(release)
-		if result := <-done; result.Status != agent.StatusSucceeded || len(store.load().Commands) != 0 {
-			t.Fatal(result.Status, store.load().Commands)
+		if outcome := <-done; outcome.err != nil || outcome.result.Status != agent.StatusSucceeded || len(store.load().Commands) != 0 {
+			t.Fatal(outcome.err, outcome.result.Status, store.load().Commands)
 		}
 	})
+}
+
+// A call that steering cancels while it waits for a tool guard resolves at
+// once instead of waiting for the guard's holder.
+func TestSteerCancelDoesNotWaitForToolGuard(t *testing.T) {
+	var w *agent.Workflow
+	var effects atomic.Int32
+	published := make(chan struct{})
+	tool := durableTool(t, "write", func(_ context.Context, call ai.ToolCall) (string, error) {
+		effects.Add(1)
+		if call.ID == "a" {
+			steer(t, w, "stop", "stop writing", agent.CancelUnstartedTools)
+			// Call b waits for the guard this call holds.
+			select {
+			case <-published:
+			case <-time.After(5 * time.Second):
+				t.Error("canceled call waited for the tool guard")
+			}
+		}
+		return "written", nil
+	})
+	tool, err := loop.WithToolOptions(tool, loop.ToolOptions{Guard: &loop.ToolGuard{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &durableModel{responses: [][]ai.Token{calls("write", "write"), response("done")}}
+	w = newDurableRun(t, agent.New(durableDefinition(model, tool)), &checkpointStore{})
+	var once sync.Once
+	for event := range w.RunEvents(context.Background()) {
+		if (event.Type == agent.EventToolResult || event.Type == agent.EventToolError) && event.ToolCall != nil && event.ToolCall.ID == "b" {
+			once.Do(func() { close(published) })
+		}
+	}
+	result, err := w.Wait()
+	if err != nil || result.Status != agent.StatusSucceeded || effects.Load() != 1 || model.count() != 2 {
+		t.Fatalf("err=%v status=%s effects=%d requests=%d", err, result.Status, effects.Load(), model.count())
+	}
+	if !reflect.DeepEqual(toolResultTexts(model.requests[1].Messages), []string{"written", canceledBySteering}) {
+		t.Fatalf("results=%q", toolResultTexts(model.requests[1].Messages))
+	}
 }

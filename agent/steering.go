@@ -95,10 +95,13 @@ type steeringInbox struct {
 	commands []string
 	// canceled holds records that steering canceled on the loop's behalf.
 	canceled []loop.InvocationRecord
-	// cancel stays set while CancelUnstartedTools steering waits to be
-	// applied, so a plan from a response that did not see it is canceled.
-	cancel bool
-	closed bool
+	// cancels lists CancelUnstartedTools commands whose messages still wait
+	// to be applied, so a plan from a response that did not see them is
+	// canceled. A command without messages stays until the next loop commit.
+	cancels []string
+	closed  bool
+	// wake tells a loop waiting to admit tools that steering canceled calls.
+	wake chan struct{}
 	// ready closes after the first acknowledged commit, or when the inbox
 	// closes first.
 	ready     chan struct{}
@@ -118,7 +121,7 @@ type steeringNotice struct {
 // newSteeringInbox returns an open inbox. A checkpoint that is already
 // acknowledged, as on Resume, makes it ready at once.
 func newSteeringInbox(acknowledged, closed bool) *steeringInbox {
-	s := &steeringInbox{ready: make(chan struct{}), notify: make(chan struct{}, 1)}
+	s := &steeringInbox{ready: make(chan struct{}), notify: make(chan struct{}, 1), wake: make(chan struct{}, 1)}
 	if acknowledged {
 		s.markReady()
 	}
@@ -175,7 +178,7 @@ func (s *steeringInbox) merge(c *loop.Continuation) []loop.InvocationRecord {
 			}
 		}
 	}
-	if s.cancel {
+	if len(s.cancels) > 0 {
 		return c.CancelPlanned()
 	}
 	return nil
@@ -240,7 +243,15 @@ func (d *checkpointCoordinator) steer(ctx context.Context, command ContinuationC
 		s.commands = append(s.commands, command.ID)
 	}
 	s.canceled = append(s.canceled, canceled...)
-	s.cancel = s.cancel || cancel
+	if cancel {
+		s.cancels = append(s.cancels, command.ID)
+	}
+	if len(canceled) > 0 {
+		select {
+		case s.wake <- struct{}{}:
+		default:
+		}
+	}
 	// Queued before commitMu is released, so the accepted event precedes the
 	// event that reports the steering applied.
 	s.notice(command.ID, d.state.Revision)
@@ -277,14 +288,15 @@ func (d *checkpointCoordinator) commitPrimary(ctx context.Context, c loop.Contin
 	}
 	d.primaryRevision.Store(d.state.Revision)
 	s.canceled = append(s.canceled, canceled...)
-	if len(c.Steering) == 0 {
-		s.cancel = false
-		// The final answer is saved and nothing waits, so the loop finishes.
-		// Closing here, under the same lock as Steer, means no steering can
-		// be accepted for a stage that is about to complete.
-		if c.Phase == loop.PhaseDone {
-			s.close()
-		}
+	// A cancellation ends once its messages are applied; each command keeps
+	// its own, so a later command that continues pending tools is not
+	// affected by an earlier one.
+	s.cancels = slices.DeleteFunc(s.cancels, func(id string) bool { return !slices.Contains(c.SteeringCommands, id) })
+	// The final answer is saved and nothing waits, so the loop finishes.
+	// Closing here, under the same lock as Steer, means no steering can be
+	// accepted for a stage that is about to complete.
+	if len(c.Steering) == 0 && c.Phase == loop.PhaseDone {
+		s.close()
 	}
 	return nil
 }
@@ -301,7 +313,7 @@ func (d *checkpointCoordinator) takeSteering(take loop.SteeringTake) loop.Steeri
 	case loop.SteeringFinishing:
 		// Waiting messages or a pending cancellation keep the loop running
 		// after its terminal batch, so it can still apply new steering.
-		if len(s.messages) == 0 && !s.cancel {
+		if len(s.messages) == 0 && len(s.cancels) == 0 {
 			s.close()
 		}
 	}

@@ -523,6 +523,7 @@ func (d *checkpointCoordinator) control(stageID string) *loop.ContinuationContro
 	if stageID == PrimaryStageID && d.steering != nil {
 		control.Commit = d.commitPrimary
 		control.Steering = d.takeSteering
+		control.SteeringSignal = d.steering.wake
 		control.Revision = d.primaryRevision.Load
 	}
 	return control
