@@ -45,10 +45,7 @@ func resolveAnthropicMedia(media *ai.MediaPart) (mediainput.Source, error) {
 	case anthropicImageTypes.Has(source.MIMEType), source.Kind == mediainput.KindPDF:
 		return source, nil
 	case source.Kind == mediainput.KindText:
-		if !source.Inline() {
-			return source, mediainput.Unsupported("anthropic", "text media %q must be inline data or a base64 data URI; text files are not fetched by URL", source.MIMEType)
-		}
-		return source, nil
+		return source, source.CheckText("anthropic")
 	default:
 		return source, mediainput.Unsupported("anthropic", "MIME type %q (supported: %s)", media.MIMEType, anthropicSupportedTypes)
 	}

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/url"
 	"path"
 	"slices"
@@ -135,6 +136,11 @@ func Resolve(provider string, media *ai.MediaPart) (Source, error) {
 		if !ok || NormalizeMIME(uriMIME) != mimeType {
 			return Source{}, Unsupported(provider, "media data URI must be base64 encoded and match the part MIME type")
 		}
+		// Check the payload without keeping a decoded copy, so a model
+		// never accepts media that mapping later fails to decode.
+		if _, err := io.Copy(io.Discard, base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload))); err != nil || payload == "" {
+			return Source{}, Unsupported(provider, "media data URI is not valid base64")
+		}
 		source.payload = payload
 		return source, nil
 	default:
@@ -181,6 +187,13 @@ func (s Source) Text(provider string) (string, error) {
 		return "", Unsupported(provider, "text media %q is not valid UTF-8", s.MIMEType)
 	}
 	return string(data), nil
+}
+
+// CheckText reports whether inline text media decodes to UTF-8 text, the
+// check Text and TextFile make. Adapters call it when accepting media.
+func (s Source) CheckText(provider string) error {
+	_, err := s.Text(provider)
+	return err
 }
 
 // TextFile renders text media as a <file> element that keeps the file name

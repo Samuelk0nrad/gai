@@ -65,10 +65,7 @@ func resolveOpenAIMedia(media *ai.MediaPart) (mediainput.Source, error) {
 	case openAIImageTypes.Has(source.MIMEType), openAIFileExtensions[source.MIMEType] != "":
 		return source, nil
 	case source.Kind == mediainput.KindText:
-		if !source.Inline() {
-			return source, unsupportedMedia("text media %q must be inline data or a base64 data URI; OpenAI does not fetch text files by URL", source.MIMEType)
-		}
-		return source, nil
+		return source, source.CheckText("openai")
 	default:
 		return source, unsupportedMedia("MIME type %q (supported: %s)", media.MIMEType, openAISupportedTypes)
 	}

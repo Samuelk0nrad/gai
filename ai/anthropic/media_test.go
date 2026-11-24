@@ -120,3 +120,10 @@ func TestAcceptsMedia(t *testing.T) {
 		}
 	}
 }
+
+func TestAcceptsMediaChecksTextEncoding(t *testing.T) {
+	err := (&Model{}).AcceptsMedia(ai.MediaPart{MIMEType: "text/csv", Data: []byte{0xff, 0xfe, 'a', 0}}, ai.MediaInToolResult)
+	if !errors.Is(err, ai.ErrUnsupportedCapability) {
+		t.Fatalf("err = %v", err)
+	}
+}
