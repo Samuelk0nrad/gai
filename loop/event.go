@@ -37,6 +37,11 @@ const (
 	EventDone                EventType = "done"
 	EventPaused              EventType = "paused"
 	EventCheckpointCommitted EventType = "checkpoint_committed"
+	// EventSteeringApplied reports that waiting steering became a generation
+	// of the conversation at a continuation boundary. GenerationID identifies
+	// that generation and Steering lists the IDs of the applied commands that
+	// the continuation recorded.
+	EventSteeringApplied EventType = "steering_applied"
 	// EventError reports terminal loop failure.
 	EventError EventType = "error"
 	// EventCanceled reports terminal cancellation without treating it as a failure.
@@ -72,6 +77,9 @@ type Event struct {
 	// answer, and the final request settings. It is nil when it could not be
 	// built. Pass it to history.WithPrefix to summarize from the cached prompt.
 	Transcript *ai.AIRequest
+
+	// Steering identifies the applied commands on EventSteeringApplied.
+	Steering *SteeringDetail
 }
 
 func AttemptStartEvent(iteration, attempt, retry int) Event {

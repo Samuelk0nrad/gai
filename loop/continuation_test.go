@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -71,6 +72,11 @@ func TestContinuationValidateRejectsInvalidState(t *testing.T) {
 			c.Pending.Invocations[0].Approval = &ToolApprovalRequest{ID: "a1", Input: ToolPolicyInput{Call: ai.ToolCall{Type: "function", ID: "other", Name: "write"}}}
 		},
 		"steering flag on open call": func(c *Continuation) { c.Pending.Invocations[0].CanceledBySteering = true },
+		"commands without steering":  func(c *Continuation) { c.SteeringCommands = []string{"command"} },
+		"empty steering command": func(c *Continuation) {
+			c.Steering = []ai.Message{{Role: ai.RoleUser, Parts: ai.TextParts("steer")}}
+			c.SteeringCommands = []string{""}
+		},
 		"decision without approval": func(c *Continuation) {
 			c.Pending.Invocations[0].ApprovalDecision = &ToolApprovalDecision{RequestID: "a1", Approved: true}
 		},
@@ -179,6 +185,11 @@ func TestContinuationApprovalsAndCancelUnstarted(t *testing.T) {
 	c := continuationForTest()
 	if err := c.CancelUnstarted(); !errors.Is(err, ErrRecoveryRequired) {
 		t.Fatal("dispatched call canceled", err)
+	}
+	// In a running loop a dispatched call is in progress, so CancelPlanned
+	// leaves it alone.
+	if canceled := c.CancelPlanned(); len(canceled) != 0 || c.Pending.Invocations[0].Disposition != InvocationDispatched {
+		t.Fatal("CancelPlanned changed a dispatched call", canceled)
 	}
 	inv := &c.Pending.Invocations[0]
 	inv.Disposition = InvocationPlanned
@@ -323,5 +334,99 @@ func TestReusedLoopDropsDurableState(t *testing.T) {
 	l.Continuation, l.Iterations = nil, nil
 	if event := last(); event.Type != EventDone || model.Count != 2 || l.durable != nil {
 		t.Fatal("reused loop continued the previous durable run", event.Type, model.Count, l.durable != nil)
+	}
+}
+
+// The owner accepts steering while the final answer is saved and adds it to
+// that commit. The loop takes it after the commit, so it continues instead of
+// finishing, and applies it at the next boundary.
+func TestSteeringMergedIntoFinalCommitContinuesLoop(t *testing.T) {
+	answer := func(text string) mocks.MockModelResponse {
+		return mocks.MockModelResponse{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: ai.TextParts(text)}}}
+	}
+	model := &mocks.MockModel{Responses: []mocks.MockModelResponse{answer("first"), answer("second")}}
+	builder := modelinput.New(modelinput.Definition{SystemInstructions: []modelinput.Part{modelinput.NewTextPart("system")}, PromptInput: modelinput.PromptInput{User: ai.TextParts("question")}})
+	l := New(model, nil, builder, nil)
+	l.MaxLoopIterations = 5
+	steering := ai.Message{Role: ai.RoleUser, Parts: ai.TextParts("one more thing")}
+	var saved []Continuation
+	var waiting *Steering
+	l.Continuation = &ContinuationControl{RunID: "run", ExecutionID: "execution", StageID: "primary", Commit: func(_ context.Context, c Continuation) error {
+		if c.Phase == PhaseDone && waiting == nil {
+			c.Steering = append(c.Steering, steering)
+			c.SteeringCommands = append(c.SteeringCommands, "more")
+			waiting = &Steering{Messages: []ai.Message{steering}, Commands: []string{"more"}}
+		}
+		saved = append(saved, c.Clone())
+		return nil
+	}, Steering: func(SteeringTake) Steering {
+		if waiting == nil {
+			return Steering{}
+		}
+		s := *waiting
+		waiting = &Steering{}
+		return s
+	}}
+	var events []Event
+	for e := range l.Run(t.Context()) {
+		events = append(events, e)
+	}
+	if last := events[len(events)-1]; last.Type != EventDone || model.Count != 2 {
+		t.Fatal(last.Type, last.Err, model.Count)
+	}
+	merged := slices.IndexFunc(saved, func(c Continuation) bool { return c.Phase == PhaseDone && len(c.Steering) == 1 })
+	if merged < 0 {
+		t.Fatal("final commit with steering was not saved")
+	}
+	final := saved[len(saved)-1]
+	if final.Phase != PhaseDone || len(final.Steering) != 0 || len(final.SteeringCommands) != 0 {
+		t.Fatalf("final continuation phase=%s steering=%d", final.Phase, len(final.Steering))
+	}
+	applied := slices.IndexFunc(events, func(e Event) bool { return e.Type == EventSteeringApplied })
+	if applied < 0 || events[applied].Steering == nil || !slices.Equal(events[applied].Steering.Commands, []string{"more"}) {
+		t.Fatal("steering not reported as applied", applied)
+	}
+	steered := slices.IndexFunc(final.Generations, func(g Generation) bool { return g.ID == events[applied].GenerationID })
+	if steered < 0 || final.Generations[steered].Messages[0].Text() != "one more thing" || steered != len(final.Generations)-2 {
+		t.Fatalf("steering generation=%d of %d", steered, len(final.Generations))
+	}
+}
+
+// Steering events keep loop events comparable.
+var _ = Event{} == Event{}
+
+// The loop stops steering before its last allowed model request and applies
+// what is waiting first, so steering never arrives that it could not apply.
+func TestSteeringStopsBeforeLastModelRequest(t *testing.T) {
+	answer := func(text string) mocks.MockModelResponse {
+		return mocks.MockModelResponse{Res: ai.AIResponse{Message: ai.Message{Role: ai.RoleAssistant, Parts: ai.TextParts(text)}}}
+	}
+	model := &mocks.MockModel{Responses: []mocks.MockModelResponse{answer("only")}}
+	builder := modelinput.New(modelinput.Definition{SystemInstructions: []modelinput.Part{modelinput.NewTextPart("system")}, PromptInput: modelinput.PromptInput{User: ai.TextParts("question")}})
+	l := New(model, nil, builder, nil)
+	l.MaxLoopIterations = 1
+	var takes []SteeringTake
+	waiting := []ai.Message{{Role: ai.RoleUser, Parts: ai.TextParts("early")}}
+	l.Continuation = &ContinuationControl{RunID: "run", ExecutionID: "execution", StageID: "primary", Commit: func(_ context.Context, c Continuation) error {
+		return nil
+	}, Steering: func(take SteeringTake) Steering {
+		takes = append(takes, take)
+		s := Steering{Messages: waiting}
+		waiting = nil
+		return s
+	}}
+	var last Event
+	for e := range l.Run(t.Context()) {
+		last = e
+	}
+	if last.Type != EventDone || model.Count != 1 {
+		t.Fatal(last.Type, last.Err, model.Count)
+	}
+	if !slices.Contains(takes, SteeringLast) {
+		t.Fatalf("takes=%v", takes)
+	}
+	// The steering taken by the closing take was applied before the request.
+	if len(l.Iterations) != 2 || l.Iterations[0].Conversation[len(l.Iterations[0].Conversation)-1].Text() != "early" {
+		t.Fatalf("iterations=%+v", l.Iterations)
 	}
 }
