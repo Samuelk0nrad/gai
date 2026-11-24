@@ -64,9 +64,13 @@ func resolveGeminiMedia(media *ai.MediaPart) (mediainput.Source, error) {
 }
 
 // siblingToolResultMedia reports whether model predates multimodal function
-// responses.
+// responses. It reads the model ID from resource names such as
+// models/<id> and projects/.../publishers/google/models/<id>.
 func siblingToolResultMedia(model string) bool {
-	name := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(model), "models/"))
+	name := strings.ToLower(strings.TrimSpace(model))
+	if i := strings.LastIndex(name, "models/"); i >= 0 {
+		name = name[i+len("models/"):]
+	}
 	return strings.HasPrefix(name, "gemini-1") || strings.HasPrefix(name, "gemini-2")
 }
 

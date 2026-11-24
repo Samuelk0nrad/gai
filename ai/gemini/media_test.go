@@ -124,3 +124,18 @@ func TestAcceptsMedia(t *testing.T) {
 		t.Errorf("msword: %v", err)
 	}
 }
+
+func TestSiblingToolResultMediaReadsTheModelID(t *testing.T) {
+	for model, want := range map[string]bool{
+		"gemini-2.5-flash":                          true,
+		"models/gemini-2.5-flash":                   true,
+		"publishers/google/models/gemini-2.5-flash": true,
+		"projects/p/locations/us-central1/publishers/google/models/gemini-1.5-pro": true,
+		"gemini-3-flash-preview": false,
+		"projects/p/locations/global/publishers/google/models/gemini-3-pro-preview": false,
+	} {
+		if got := siblingToolResultMedia(model); got != want {
+			t.Errorf("%s: got %t, want %t", model, got, want)
+		}
+	}
+}
