@@ -12,13 +12,23 @@ import (
 )
 
 // ToolResult is the normalized result of an invocation or result processor.
-// Err takes precedence over Text. Errors are immutable caller-owned values.
+// Err takes precedence over Text and Media. Errors are immutable caller-owned
+// values.
+//
+// Media holds images, PDFs or other files that a ResultTool returns. They follow
+// Text in the canonical tool result, as ai.ContentMedia parts, and reach the
+// model only through providers that accept media in tool results. Processors
+// receive and return Media: a processor that builds a new ToolResult must copy
+// Media to keep it. Text processors such as RedactToolResult and
+// LimitToolResultBytes see only Text; media bytes are not redacted or limited.
 type ToolResult struct {
-	Text string
-	Err  error
+	Text  string
+	Media []ai.MediaPart
+	Err   error
 }
 
 // String returns the model-facing text, giving errors precedence over output.
+// It does not include Media.
 func (r ToolResult) String() string {
 	if r.Err != nil {
 		return r.Err.Error()
@@ -32,6 +42,95 @@ func normalizeToolResult(text string, err error) ToolResult {
 		return ToolResult{Err: err}
 	}
 	return ToolResult{Text: text}
+}
+
+// normalized discards text and media from an error result, and copies media
+// so later mutation by the producer cannot change the published result.
+func (r ToolResult) normalized() ToolResult {
+	if r.Err != nil {
+		return ToolResult{Err: r.Err}
+	}
+	return ToolResult{Text: r.Text, Media: cloneMedia(r.Media)}
+}
+
+func cloneMedia(src []ai.MediaPart) []ai.MediaPart {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]ai.MediaPart, len(src))
+	for i, media := range src {
+		media.Data = append([]byte(nil), media.Data...)
+		out[i] = media
+	}
+	return out
+}
+
+func equalMedia(a, b []ai.MediaPart) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].MIMEType != b[i].MIMEType || a[i].URI != b[i].URI || a[i].Name != b[i].Name || !bytes.Equal(a[i].Data, b[i].Data) {
+			return false
+		}
+	}
+	return true
+}
+
+// validateMedia checks each media part as canonical content.
+func validateMedia(media []ai.MediaPart) error {
+	for i := range media {
+		if err := (ai.ContentPart{Kind: ai.ContentMedia, Media: &media[i]}).Validate(); err != nil {
+			return fmt.Errorf("tool result media %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// canonical converts a processed result to the canonical tool result for
+// call. A result without media keeps exactly one text part, as before media
+// existed. With media, non-empty text comes first, then each media part.
+func (r ToolResult) canonical(call ai.ToolCall) ai.ToolResult {
+	out := ai.ToolResult{ToolCallID: call.ID, Name: call.Name, IsError: r.Err != nil}
+	if r.Err != nil || len(r.Media) == 0 {
+		out.Parts = ai.TextParts(r.String())
+		return out
+	}
+	if r.Text != "" {
+		out.Parts = ai.TextParts(r.Text)
+	}
+	for _, media := range cloneMedia(r.Media) {
+		out.Parts = append(out.Parts, ai.ContentPart{Kind: ai.ContentMedia, Media: &media})
+	}
+	return out
+}
+
+// ResultTool is an optional Tool extension for tools whose result carries
+// media, such as an image or PDF, as well as text. The loop calls
+// FunctionResult instead of Function. A returned error takes precedence over
+// the result, as for Function. Build one with NewResultTool.
+type ResultTool interface {
+	Tool
+	FunctionResult(context.Context, ai.ToolCall) (ToolResult, error)
+}
+
+// ToolResultFunc is the implementation of a ResultTool.
+type ToolResultFunc func(context.Context, ai.ToolCall) (ToolResult, error)
+
+// InvokeTool runs tool with call through FunctionResult when the tool is a
+// ResultTool, otherwise through Function, and returns the normalized result.
+// Tool wrappers that embed a Tool use it to forward FunctionResult. It does
+// not validate the call or the media and bypasses Loop policy and processing.
+func InvokeTool(ctx context.Context, tool Tool, call ai.ToolCall) ToolResult {
+	if resultTool, ok := tool.(ResultTool); ok {
+		result, err := resultTool.FunctionResult(ctx, call)
+		if err != nil {
+			return ToolResult{Err: err}
+		}
+		return result.normalized()
+	}
+	text, err := tool.Function(ctx, call)
+	return normalizeToolResult(text, err)
 }
 
 // Tool defines a function that a model may request during a loop run.
@@ -95,6 +194,37 @@ func (t *functionTool) Function(ctx context.Context, call ai.ToolCall) (string, 
 	return t.function(ctx, call)
 }
 
+type resultTool struct {
+	functionTool
+	result ToolResultFunc
+}
+
+// NewResultTool is NewTool for a handler that returns a ToolResult, whose
+// Media is sent to the model after its Text. The returned tool is a
+// ResultTool; its Function returns only the text.
+func NewResultTool(name, description string, params ai.ToolParameters, function ToolResultFunc) (Tool, error) {
+	if function == nil {
+		return nil, fmt.Errorf("%w: tool function is nil", ai.ErrInvalidToolDefinition)
+	}
+	text := func(ctx context.Context, call ai.ToolCall) (string, error) {
+		result, err := function(ctx, call)
+		if err != nil {
+			return "", err
+		}
+		return result.String(), result.Err
+	}
+	base, err := NewTool(name, description, params, text)
+	if err != nil {
+		return nil, err
+	}
+	return &resultTool{functionTool: *base.(*functionTool), result: function}, nil
+}
+
+// FunctionResult invokes the registered handler with the supplied call.
+func (t *resultTool) FunctionResult(ctx context.Context, call ai.ToolCall) (ToolResult, error) {
+	return t.result(ctx, call)
+}
+
 // CallTool validates a call and invokes the matching tool with an isolated copy.
 // This low-level helper bypasses Loop execution policy and result processing.
 // Invalid calls and missing tools return ordinary tool errors.
@@ -118,8 +248,11 @@ func invokeTool(ctx context.Context, req ai.ToolCall, tools []Tool) (ToolResult,
 			return ToolResult{Err: fmt.Errorf("%w: tool at index %d is nil", ai.ErrInvalidToolDefinition, index)}, false
 		}
 		if tool.Name() == req.Name {
-			text, err := tool.Function(ctx, req.Clone())
-			return normalizeToolResult(text, err), true
+			result := InvokeTool(ctx, tool, req.Clone())
+			if err := validateMedia(result.Media); err != nil {
+				return ToolResult{Err: err}, true
+			}
+			return result, true
 		}
 	}
 	return ToolResult{Err: fmt.Errorf("%w: %s", ErrToolNotFound, req.Name)}, false

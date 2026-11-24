@@ -27,7 +27,7 @@ func ChainToolResultProcessors(processors ...ToolResultProcessor) (ToolResultPro
 			if err != nil {
 				return ToolResult{}, err
 			}
-			result = normalizeToolResult(next.Text, next.Err)
+			result = next.normalized()
 		}
 		return result, nil
 	}), nil
@@ -63,7 +63,7 @@ func RedactToolResult(redact func(context.Context, string) (string, error)) (Too
 			return ToolResult{}, err
 		}
 		if result.Err == nil {
-			return ToolResult{Text: text}, nil
+			return ToolResult{Text: text, Media: result.Media}, nil
 		}
 		return ToolResult{Err: safeToolError{text: text, kind: errors.Join(safeToolErrorKinds(result.Err)...)}}, nil
 	}), nil

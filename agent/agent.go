@@ -352,6 +352,11 @@ type toolOptionsSnapshot struct {
 	options loop.ToolOptions
 }
 
+// FunctionResult forwards to the wrapped tool, keeping a ResultTool's media.
+func (t *toolOptionsSnapshot) FunctionResult(ctx context.Context, call ai.ToolCall) (loop.ToolResult, error) {
+	return loop.InvokeTool(ctx, t.Tool, call), nil
+}
+
 func (t *toolOptionsSnapshot) ToolOptions() loop.ToolOptions {
 	options := t.options
 	options.Timeout = clonePointer(options.Timeout)

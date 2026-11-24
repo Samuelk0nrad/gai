@@ -225,6 +225,7 @@ func cloneToolEventPayload(event Event) Event {
 	}
 	if event.ToolResult != nil {
 		r := *event.ToolResult
+		r.Media = cloneMedia(r.Media)
 		event.ToolResult = &r
 	}
 

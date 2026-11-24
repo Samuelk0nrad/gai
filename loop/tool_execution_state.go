@@ -61,7 +61,7 @@ func outputState(before ToolResult, after *ToolResult) ToolOutputState {
 	if after == nil || errors.Is(after.Err, ErrToolResultRejected) {
 		return ToolOutputRejected
 	}
-	if (before.Err != nil) != (after.Err != nil) || before.String() != after.String() {
+	if (before.Err != nil) != (after.Err != nil) || before.String() != after.String() || !equalMedia(before.Media, after.Media) {
 		return ToolOutputChanged
 	}
 	return ToolOutputAccepted

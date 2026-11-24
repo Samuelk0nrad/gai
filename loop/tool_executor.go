@@ -447,7 +447,7 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 		if result == nil {
 			continue
 		}
-		output := ai.ToolResult{ToolCallID: task.pending.call.ID, Name: task.pending.call.Name, Parts: ai.TextParts(result.String()), IsError: result.Err != nil}
+		output := result.canonical(task.pending.call)
 		if l.durable != nil {
 			if saved := l.durable.state.Pending.Invocations[index].Result; saved != nil {
 				output = *saved
@@ -473,7 +473,7 @@ func (l *Loop) processUninvoked(ctx context.Context, task scheduledTool) (respon
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrToolResultProcess, err)
 		}
-		result = normalizeToolResult(processed.Text, processed.Err)
+		result = processed.normalized()
 	}
 	result = preserveToolRefusal(*task.result, result)
 	return &result, nil

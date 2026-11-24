@@ -85,6 +85,10 @@ func cloneToolResult(response *loop.ToolResult) *loop.ToolResult {
 		return nil
 	}
 	cloned := *response
+	cloned.Media = append([]ai.MediaPart(nil), cloned.Media...)
+	for i := range cloned.Media {
+		cloned.Media[i].Data = append([]byte(nil), cloned.Media[i].Data...)
+	}
 	return &cloned
 }
 

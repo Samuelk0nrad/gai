@@ -468,7 +468,8 @@ func (d *durableLoop) completed(ctx context.Context, done toolCompletion, interr
 	inv.Disposition = InvocationCompleted
 	inv.ProcessingFailed = done.err != nil
 	if done.result != nil {
-		inv.Result = &ai.ToolResult{ToolCallID: inv.Call.ID, Name: inv.Call.Name, Parts: ai.TextParts(done.result.String()), IsError: done.result.Err != nil}
+		output := done.result.canonical(inv.Call)
+		inv.Result = &output
 	}
 	return d.commitSettled(ctx)
 }
