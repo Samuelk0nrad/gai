@@ -284,8 +284,8 @@ func TestResponsesMediaRequestOnTheWire(t *testing.T) {
 	}
 	for _, leak := range []string{"dmVyeS1zZWNyZXQtaW1hZ2UtYnl0ZXM", "very-secret", "X-Amz-Signature", "files.example.com"} {
 		for key, value := range attrs {
-			if strings.Contains(value.Emit(), leak) {
-				t.Fatalf("span attribute %s leaks %q: %s", key, leak, value.Emit())
+			if strings.Contains(value.String(), leak) {
+				t.Fatalf("span attribute %s leaks %q: %s", key, leak, value.String())
 			}
 		}
 	}

@@ -42,15 +42,18 @@ func openFileTool(t *testing.T, runs *atomic.Int32) loop.Tool {
 func toolResultMedia(t *testing.T, messages []ai.Message) (string, []ai.MediaPart) {
 	t.Helper()
 	for _, message := range messages {
-		for _, result := range message.ToolResults() {
-			var media []ai.MediaPart
-			for _, part := range result.Parts {
-				if part.Media != nil {
-					media = append(media, *part.Media)
-				}
-			}
-			return result.Text(), media
+		results := message.ToolResults()
+		if len(results) == 0 {
+			continue
 		}
+		result := results[0]
+		var media []ai.MediaPart
+		for _, part := range result.Parts {
+			if part.Media != nil {
+				media = append(media, *part.Media)
+			}
+		}
+		return result.Text(), media
 	}
 	t.Fatalf("no tool result in %+v", messages)
 	return "", nil
@@ -151,7 +154,7 @@ func TestResultToolMediaIsNotCapturedInTraces(t *testing.T) {
 	var toolOutput string
 	for _, span := range recorder.Ended() {
 		for key, value := range obstest.Attributes(span) {
-			text := value.Emit()
+			text := value.String()
 			for _, leak := range []string{"receipt-secret", "UE5HLXJlY2VpcHQtc2VjcmV0", "X-Amz-Signature", "files.example.test"} {
 				if strings.Contains(text, leak) {
 					t.Fatalf("span %q attribute %s leaks %q: %s", span.Name(), key, leak, text)
