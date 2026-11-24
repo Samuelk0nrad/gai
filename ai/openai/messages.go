@@ -19,16 +19,23 @@ func canonicalResultText(result *ai.ToolResult) (string, error) {
 			out.WriteString(part.Text)
 		case ai.ContentJSON:
 			out.Write(part.JSON)
+		case ai.ContentMedia:
+			return "", unsupportedMedia("tool-result media requires the Responses transport")
 		default:
 			return "", fmt.Errorf("%w: tool-result content %q", ai.ErrUnsupportedCapability, part.Kind)
 		}
 	}
 	content := out.String()
 	if result.IsError {
-		encoded, _ := json.Marshal(map[string]string{"error": content})
-		content = string(encoded)
+		content = toolErrorText(content)
 	}
 	return content, nil
+}
+
+// toolErrorText wraps a failed tool's text as {"error": text}.
+func toolErrorText(text string) string {
+	encoded, _ := json.Marshal(map[string]string{"error": text})
+	return string(encoded)
 }
 
 func rejectRequiredExtensions(extensions []ai.Extension) error {

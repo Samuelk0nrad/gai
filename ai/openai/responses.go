@@ -323,10 +323,43 @@ func mapResponsesMessages(messages []ai.Message) (responses.ResponseInputParam, 
 			}
 			return nil
 		}
+		// A user message with media sends each run of text, JSON and media
+		// as one message item with a content list. Text-only messages keep
+		// one string item per part.
+		hasMedia := partsContainMedia(message.Parts)
+		if hasMedia && message.Role != ai.RoleUser {
+			return nil, unsupportedMedia("media is only accepted in user messages and tool results, not %s messages", message.Role)
+		}
+		var content responses.ResponseInputMessageContentListParam
+		flushContent := func() {
+			if len(content) > 0 {
+				input = append(input, responses.ResponseInputItemParamOfMessage(content, responses.EasyInputMessageRoleUser))
+				content = nil
+			}
+		}
 		for _, part := range message.Parts {
 			if part.Kind != ai.ContentExtension {
 				if err := rejectRequiredExtensions(part.Extensions); err != nil {
 					return nil, err
+				}
+			}
+			if hasMedia {
+				switch part.Kind {
+				case ai.ContentText:
+					content = append(content, responses.ResponseInputContentParamOfInputText(part.Text))
+					continue
+				case ai.ContentJSON:
+					content = append(content, responses.ResponseInputContentParamOfInputText(string(part.JSON)))
+					continue
+				case ai.ContentMedia:
+					item, err := mediaInputContent(part.Media)
+					if err != nil {
+						return nil, err
+					}
+					content = append(content, item)
+					continue
+				default:
+					flushContent()
 				}
 			}
 			switch part.Kind {
@@ -359,15 +392,24 @@ func mapResponsesMessages(messages []ai.Message) (responses.ResponseInputParam, 
 				}
 				input = append(input, responses.ResponseInputItemParamOfFunctionCall(string(call.Args), call.ID, call.Name))
 			case ai.ContentToolResult:
-				content, err := canonicalResultText(part.ToolResult)
+				if partsContainMedia(part.ToolResult.Parts) {
+					output, err := toolResultContent(part.ToolResult)
+					if err != nil {
+						return nil, err
+					}
+					input = append(input, functionCallOutputWithContent(part.ToolResult.ToolCallID, output))
+					continue
+				}
+				output, err := canonicalResultText(part.ToolResult)
 				if err != nil {
 					return nil, err
 				}
-				input = append(input, responses.ResponseInputItemParamOfFunctionCallOutput(part.ToolResult.ToolCallID, content))
+				input = append(input, responses.ResponseInputItemParamOfFunctionCallOutput(part.ToolResult.ToolCallID, output))
 			default:
 				return nil, fmt.Errorf("%w: OpenAI Responses content %q", ai.ErrUnsupportedCapability, part.Kind)
 			}
 		}
+		flushContent()
 	}
 	return input, nil
 }
