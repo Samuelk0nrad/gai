@@ -584,7 +584,7 @@ func TestImageInputAcceptsJPGAliasInDataURI(t *testing.T) {
 func TestImageInputRejectsUnsupportedCombinations(t *testing.T) {
 	image := func(media ai.MediaPart) ai.ContentPart { return ai.ContentPart{Kind: ai.ContentMedia, Media: &media} }
 	cases := map[string]ai.Message{
-		"non-image MIME":    {Role: ai.RoleUser, Parts: []ai.ContentPart{image(ai.MediaPart{MIMEType: "audio/mpeg", URI: "https://example.com/a.mp3"})}},
+		"non-image MIME":    {Role: ai.RoleUser, Parts: []ai.ContentPart{image(ai.MediaPart{MIMEType: "video/mp4", URI: "https://example.com/a.mp4"})}},
 		"unsupported image": {Role: ai.RoleUser, Parts: []ai.ContentPart{image(ai.MediaPart{MIMEType: "image/tiff", Data: []byte{1}})}},
 		"file scheme":       {Role: ai.RoleUser, Parts: []ai.ContentPart{image(ai.MediaPart{MIMEType: "image/png", URI: "file:///tmp/a.png"})}},
 		"cloud scheme":      {Role: ai.RoleUser, Parts: []ai.ContentPart{image(ai.MediaPart{MIMEType: "image/png", URI: "gs://bucket/a.png"})}},

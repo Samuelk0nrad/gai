@@ -68,12 +68,11 @@ openFile, err := loop.NewResultTool("open_file", "Open a stored file", params,
   media, non-empty text comes first, then one `ai.ContentMedia` part per media
   item. Checkpoints keep the parts, so a resumed run replays them.
 - **Providers.** OpenAI (Responses transport), Anthropic, Gemini and Mistral
-  send tool-result media to the model; see each provider guide for the
-  accepted types. The OpenAI Chat Completions transport returns
-  `ai.ErrUnsupportedCapability` when the next request is built, after the tool
-  has already run, and so does any adapter given media it cannot send, such as
-  an inline PDF on Mistral. The checkpoint keeps the media, so resuming the run
-  with the same provider fails the same way.
+  send tool-result media to the model; [Media](media.md) lists the accepted
+  types. Media the model does not accept is converted by `Loop.Media`
+  (`Definition.Media` on agents) right after `ToolResultProcessor`. Media that
+  still cannot be sent becomes a tool error matching
+  `loop.ErrToolMediaUnsupported`, and the run continues.
 - **Telemetry.** Captured tool output shows each media part as a placeholder
   with its size, such as `[image: a.png, image/png, 2048 bytes]`. Bytes and
   URIs are never captured.

@@ -108,3 +108,15 @@ func TestUnsupportedMediaIsTyped(t *testing.T) {
 		})
 	}
 }
+
+func TestAcceptsMedia(t *testing.T) {
+	model := &Model{}
+	if err := model.AcceptsMedia(ai.MediaPart{MIMEType: "application/pdf", URI: "https://example.com/a.pdf"}, ai.MediaInToolResult); err != nil {
+		t.Fatal(err)
+	}
+	for _, rejected := range []string{"audio/mpeg", "video/mp4", "image/heic", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"} {
+		if err := model.AcceptsMedia(ai.MediaPart{MIMEType: rejected, Data: []byte{1}}, ai.MediaInUserMessage); !errors.Is(err, ai.ErrUnsupportedCapability) {
+			t.Errorf("%s: %v", rejected, err)
+		}
+	}
+}

@@ -1,7 +1,8 @@
 // Package mediainput resolves canonical ai.MediaPart values into the forms
 // provider adapters send: a remote URL, base64 data, or decoded text. Adapters
-// share it so that every provider accepts and rejects the same inputs, and
-// every rejection is an *ai.UnsupportedContentError naming the provider.
+// share it so that every provider validates URIs and data URIs the same way,
+// and every rejection is an *ai.UnsupportedContentError naming the provider.
+// Which MIME types a provider accepts is decided by the adapter, with Types.
 package mediainput
 
 import (
@@ -9,6 +10,8 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/url"
+	"path"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -19,27 +22,24 @@ import (
 type Kind int
 
 const (
-	// KindOther is media no adapter sends, such as audio or video.
+	// KindOther is any type without a more specific kind.
 	KindOther Kind = iota
-	// KindImage is image/jpeg, image/png, image/webp or image/gif.
+	// KindImage is image/*.
 	KindImage
 	// KindPDF is application/pdf.
 	KindPDF
-	// KindText is text/*, application/json or a +json type, sent as text.
+	// KindText is text/*, application/json or a +json type.
 	KindText
+	// KindAudio is audio/*.
+	KindAudio
+	// KindVideo is video/*.
+	KindVideo
 )
 
 // MIMEPDF is the PDF MIME type.
 const MIMEPDF = "application/pdf"
 
-var imageTypes = map[string]bool{
-	"image/jpeg": true,
-	"image/png":  true,
-	"image/webp": true,
-	"image/gif":  true,
-}
-
-// Source is resolved media. Exactly one of URL and Base64 is set.
+// Source is resolved media. Exactly one of URL and inline data is set.
 type Source struct {
 	// MIMEType is the normalized MIME type, such as "image/jpeg".
 	MIMEType string
@@ -47,20 +47,29 @@ type Source struct {
 	Kind Kind
 	// URL is an http or https URL with a host.
 	URL string
-	// Base64 is the standard base64 encoding of inline bytes or of a base64
-	// data URI's payload.
-	Base64 string
 	// Name is the trimmed MediaPart.Name.
 	Name string
+
+	data    []byte // inline bytes
+	payload string // base64 payload of a data URI
 }
 
+// Inline reports whether the media is inline bytes or a data URI.
+func (s Source) Inline() bool { return s.URL == "" }
+
 // NormalizeMIME lowercases a MIME type, drops parameters such as charset, and
-// maps the image/jpg alias to image/jpeg.
+// maps common aliases: image/jpg to image/jpeg, audio/mp3 to audio/mpeg and
+// audio/x-wav to audio/wav.
 func NormalizeMIME(mimeType string) string {
 	mimeType, _, _ = strings.Cut(mimeType, ";")
 	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
-	if mimeType == "image/jpg" {
+	switch mimeType {
+	case "image/jpg":
 		return "image/jpeg"
+	case "audio/mp3":
+		return "audio/mpeg"
+	case "audio/x-wav", "audio/wave":
+		return "audio/wav"
 	}
 	return mimeType
 }
@@ -69,77 +78,89 @@ func NormalizeMIME(mimeType string) string {
 func Classify(mimeType string) Kind {
 	mimeType = NormalizeMIME(mimeType)
 	switch {
-	case imageTypes[mimeType]:
+	case strings.HasPrefix(mimeType, "image/"):
 		return KindImage
 	case mimeType == MIMEPDF:
 		return KindPDF
 	case ai.IsTextMIME(mimeType):
 		return KindText
+	case strings.HasPrefix(mimeType, "audio/"):
+		return KindAudio
+	case strings.HasPrefix(mimeType, "video/"):
+		return KindVideo
 	default:
 		return KindOther
 	}
 }
+
+// Types is a set of normalized MIME types an adapter accepts.
+type Types []string
+
+// Has reports whether the set holds mimeType after normalization.
+func (t Types) Has(mimeType string) bool { return slices.Contains(t, NormalizeMIME(mimeType)) }
+
+// String lists the types for error messages.
+func (t Types) String() string { return strings.Join(t, ", ") }
 
 // Unsupported returns an *ai.UnsupportedContentError for media.
 func Unsupported(provider, format string, args ...any) error {
 	return &ai.UnsupportedContentError{Provider: provider, Kind: ai.ContentMedia, Detail: fmt.Sprintf(format, args...)}
 }
 
-// SupportedTypes lists the MIME types Resolve accepts, for error messages.
-const SupportedTypes = "image/jpeg, image/png, image/webp, image/gif, application/pdf, text/*, application/json"
-
-// Resolve checks media and returns its source. Inline bytes and base64 data
-// URIs whose MIME type matches the part become Base64; http(s) URLs with a
-// host become URL. Other MIME types, schemes and data URIs are rejected.
+// Resolve validates where media comes from and returns its source. Inline
+// bytes and base64 data URIs whose MIME type matches the part are inline;
+// http(s) URLs with a host are URLs. Other schemes and data URIs are
+// rejected. It does not check the MIME type against a provider's list and
+// does not encode inline bytes.
 func Resolve(provider string, media *ai.MediaPart) (Source, error) {
 	mimeType := NormalizeMIME(media.MIMEType)
 	source := Source{MIMEType: mimeType, Kind: Classify(mimeType), Name: strings.TrimSpace(media.Name)}
-	what := "media"
-	switch source.Kind {
-	case KindImage:
-		what = "image"
-	case KindPDF:
-		what = "PDF"
-	case KindText:
-		what = "text file"
-	default:
-		return Source{}, Unsupported(provider, "MIME type %q (supported: %s)", media.MIMEType, SupportedTypes)
-	}
 	if len(media.Data) > 0 {
-		source.Base64 = base64.StdEncoding.EncodeToString(media.Data)
+		source.data = media.Data
 		return source, nil
 	}
 	parsed, err := url.Parse(media.URI)
 	if err != nil {
-		return Source{}, Unsupported(provider, "invalid %s URI", what)
+		return Source{}, Unsupported(provider, "invalid media URI")
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "http", "https":
 		if parsed.Host == "" {
-			return Source{}, Unsupported(provider, "%s URL requires a host", what)
+			return Source{}, Unsupported(provider, "media URL requires a host")
 		}
 		source.URL = media.URI
 		return source, nil
 	case "data":
 		uriMIME, payload, ok := ParseBase64DataURI(media.URI)
 		if !ok || NormalizeMIME(uriMIME) != mimeType {
-			return Source{}, Unsupported(provider, "%s data URI must be base64 encoded and match the part MIME type", what)
+			return Source{}, Unsupported(provider, "media data URI must be base64 encoded and match the part MIME type")
 		}
-		source.Base64 = payload
+		source.payload = payload
 		return source, nil
 	default:
-		return Source{}, Unsupported(provider, "%s URI scheme %q (use http, https, data, or inline bytes)", what, parsed.Scheme)
+		return Source{}, Unsupported(provider, "media URI scheme %q (use http, https, data, or inline bytes)", parsed.Scheme)
 	}
+}
+
+// Base64 returns the standard base64 encoding of inline media.
+func (s Source) Base64() string {
+	if s.payload != "" {
+		return s.payload
+	}
+	return base64.StdEncoding.EncodeToString(s.data)
 }
 
 // DataURL returns "data:<mime>;base64,<payload>" for inline media.
 func (s Source) DataURL() string {
-	return "data:" + s.MIMEType + ";base64," + s.Base64
+	return "data:" + s.MIMEType + ";base64," + s.Base64()
 }
 
-// Bytes decodes inline media.
+// Bytes returns inline media bytes, decoding a data URI.
 func (s Source) Bytes(provider string) ([]byte, error) {
-	data, err := base64.StdEncoding.DecodeString(s.Base64)
+	if s.payload == "" {
+		return s.data, nil
+	}
+	data, err := base64.StdEncoding.DecodeString(s.payload)
 	if err != nil {
 		return nil, Unsupported(provider, "media data URI is not valid base64")
 	}
@@ -149,7 +170,7 @@ func (s Source) Bytes(provider string) ([]byte, error) {
 // Text returns the UTF-8 text of inline text media. Text given by URL is
 // rejected, because no provider fetches text files by URL.
 func (s Source) Text(provider string) (string, error) {
-	if s.URL != "" {
+	if !s.Inline() {
 		return "", Unsupported(provider, "text media %q must be inline data or a base64 data URI; text files are not fetched by URL", s.MIMEType)
 	}
 	data, err := s.Bytes(provider)
@@ -186,6 +207,19 @@ func (s Source) TextFile(provider string) (string, error) {
 	out.WriteString(text)
 	out.WriteString("\n</file>")
 	return out.String(), nil
+}
+
+// Filename returns Name when it ends with ext, otherwise Name (or "file")
+// with ext appended. Providers that detect a file type from its name need it.
+func (s Source) Filename(ext string) string {
+	name := s.Name
+	if name == "" {
+		name = "file"
+	}
+	if strings.EqualFold(path.Ext(name), ext) {
+		return name
+	}
+	return name + ext
 }
 
 // ParseBase64DataURI splits "data:<mime>;base64,<payload>".

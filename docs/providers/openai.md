@@ -22,7 +22,7 @@ message := ai.Message{Role: ai.RoleUser, Parts: []ai.ContentPart{
 | Media | Sent as |
 | --- | --- |
 | `image/jpeg`, `image/png`, `image/webp`, `image/gif` | `input_image` with `detail: "auto"`. An `http(s)` URL or base64 `data:` URL is sent as `image_url`; inline bytes become a base64 data URL. |
-| `application/pdf` | `input_file`. An `http(s)` URL is sent as `file_url`; inline bytes or a base64 data URL are sent as `file_data` with `filename` set to `MediaPart.Name`, or `file.pdf`. |
+| `application/pdf`, .docx, .pptx, .xlsx | `input_file`. An `http(s)` URL is sent as `file_url`; inline bytes or a base64 data URL are sent as `file_data` with `filename` set to `MediaPart.Name`, given the type's extension when it lacks one (`file.pdf`, `file.docx`, …). OpenAI reads only the text of Office files, and its accepted list changes; Azure OpenAI takes only PDFs. |
 | `text/*`, `application/json`, `+json` types | `input_text` holding `<file name="…" mime_type="…">` and the UTF-8 text, because OpenAI has no text-file input. Only inline bytes or a base64 data URL are accepted. |
 
 - **Tool results.** A tool result that contains media is sent as a
@@ -30,7 +30,7 @@ message := ai.Message{Role: ai.RoleUser, Parts: []ai.ContentPart{
   `input_image` and `input_file` items. A failed result sends its text first,
   as `{"error": "…"}`, then its media. Text-only results keep the plain string
   `output`.
-- **Rejected inputs.** Other MIME types, other URI schemes (such as `s3:` or
+- **Rejected inputs.** Audio, video, other MIME types, other URI schemes (such as `s3:` or
   `file:`), text files given by URL, text that is not UTF-8, and media in
   system or assistant messages fail with `*ai.UnsupportedContentError`
   (`errors.Is(err, ai.ErrUnsupportedCapability)`). No request is sent.

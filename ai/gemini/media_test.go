@@ -38,6 +38,8 @@ func TestUserMediaMapsToInlineAndFileData(t *testing.T) {
 		{"image data URI", ai.MediaPart{MIMEType: "image/png", URI: "data:image/png;base64,cG5n"}, `{"inlineData":{"data":"cG5n","mimeType":"image/png"}}`},
 		{"PDF URL", ai.MediaPart{MIMEType: "application/pdf", URI: "https://example.com/a.pdf"}, `{"fileData":{"fileUri":"https://example.com/a.pdf","mimeType":"application/pdf"}}`},
 		{"text bytes", ai.MediaPart{MIMEType: "text/plain", Data: []byte("hi"), Name: "a.txt"}, `{"text":"<file name=\"a.txt\" mime_type=\"text/plain\">\nhi\n</file>"}`},
+		{"audio bytes with alias MIME", ai.MediaPart{MIMEType: "audio/mp3", Data: []byte("mp3")}, `{"inlineData":{"data":"bXAz","mimeType":"audio/mpeg"}}`},
+		{"video URL", ai.MediaPart{MIMEType: "video/mp4", URI: "https://www.youtube.com/watch?v=x"}, `{"fileData":{"fileUri":"https://www.youtube.com/watch?v=x","mimeType":"video/mp4"}}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,7 +80,8 @@ func TestToolResultMediaUsesFunctionResponseParts(t *testing.T) {
 
 func TestUnsupportedMediaIsTyped(t *testing.T) {
 	for name, message := range map[string]ai.Message{
-		"audio":       {Role: ai.RoleUser, Parts: []ai.ContentPart{media(ai.MediaPart{MIMEType: "audio/mpeg", Data: []byte{1}})}},
+		"zip":         {Role: ai.RoleUser, Parts: []ai.ContentPart{media(ai.MediaPart{MIMEType: "application/zip", Data: []byte{1}})}},
+		"gif":         {Role: ai.RoleUser, Parts: []ai.ContentPart{media(ai.MediaPart{MIMEType: "image/gif", Data: []byte{1}})}},
 		"file scheme": {Role: ai.RoleUser, Parts: []ai.ContentPart{media(ai.MediaPart{MIMEType: "image/png", URI: "file:///a.png"})}},
 		"text by URL": {Role: ai.RoleUser, Parts: []ai.ContentPart{media(ai.MediaPart{MIMEType: "text/plain", URI: "https://example.com/a.txt"})}},
 		"assistant":   {Role: ai.RoleAssistant, Parts: []ai.ContentPart{media(ai.MediaPart{MIMEType: "image/png", Data: []byte{1}})}},
@@ -90,5 +93,34 @@ func TestUnsupportedMediaIsTyped(t *testing.T) {
 				t.Fatalf("err = %v", err)
 			}
 		})
+	}
+}
+
+func TestToolResultAudioFollowsFunctionResponse(t *testing.T) {
+	call := ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "c1", Type: "function", Name: "record", Args: json.RawMessage(`{}`)}}}}
+	result := ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &ai.ToolResult{ToolCallID: "c1", Name: "record", Parts: []ai.ContentPart{
+		media(ai.MediaPart{MIMEType: "audio/wav", Data: []byte("wav")}),
+	}}}}}
+	got := contentsJSON(t, Gemini3FlashPreview, call, result)
+	want := `[{"parts":[{"functionCall":{"id":"c1","name":"record"}}],"role":"model"},` +
+		`{"parts":[{"functionResponse":{"id":"c1","name":"record","response":{"output":""}}},{"inlineData":{"data":"d2F2","mimeType":"audio/wav"}}],"role":"user"}]`
+	if got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}
+
+func TestAcceptsMedia(t *testing.T) {
+	model := &Model{name: Gemini3FlashPreview}
+	for _, accepted := range []ai.MediaPart{
+		{MIMEType: "audio/x-wav", Data: []byte{1}},
+		{MIMEType: "video/quicktime", URI: "https://example.com/a.mov"},
+		{MIMEType: "application/pdf", Data: []byte{1}},
+	} {
+		if err := model.AcceptsMedia(accepted, ai.MediaInToolResult); err != nil {
+			t.Errorf("%s: %v", accepted.MIMEType, err)
+		}
+	}
+	if err := model.AcceptsMedia(ai.MediaPart{MIMEType: "application/msword", Data: []byte{1}}, ai.MediaInUserMessage); !errors.Is(err, ai.ErrUnsupportedCapability) {
+		t.Errorf("msword: %v", err)
 	}
 }

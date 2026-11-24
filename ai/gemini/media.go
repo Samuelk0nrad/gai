@@ -11,22 +11,60 @@ import (
 
 // Media input on generateContent.
 //
-//   - Images (image/jpeg, image/png, image/webp, image/gif) and PDFs
-//     (application/pdf) given as inline bytes or a base64 data URI become
-//     inlineData parts; an http(s) URL, such as a Files API URI, becomes a
-//     fileData part.
+//   - Images (image/png, image/jpeg, image/webp), PDFs (application/pdf),
+//     audio (wav, mp3, aiff, aac, ogg, flac) and video (mp4, mpeg, mov, avi,
+//     flv, mpg, webm, wmv, 3gpp) given as inline bytes or a base64 data URI
+//     become inlineData parts; an http(s) URL, such as a Files API URI or a
+//     YouTube link, becomes a fileData part.
 //   - Text media (text/*, application/json, +json) given as bytes or a base64
 //     data URI becomes a text part wrapped in a <file> element.
 //
 // Tool results with images or PDFs use multimodal function responses: the
 // media becomes functionResponse.parts. Gemini 1.x and 2.x models do not
-// accept those parts, so for them the media follows the functionResponse as
-// sibling parts of the same content. Text media is appended to the
-// function response's output text.
+// accept those parts, and function responses take no audio or video, so that
+// media follows the functionResponse as sibling parts of the same content.
+// Text media is appended to the function response's output text.
 //
 // User messages and tool results accept media; system and model messages do
 // not. Other MIME types, URI schemes and text by URL return
 // *ai.UnsupportedContentError.
+
+var (
+	geminiImageTypes = mediainput.Types{"image/png", "image/jpeg", "image/webp"}
+	geminiAudioTypes = mediainput.Types{"audio/wav", "audio/mpeg", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac"}
+	geminiVideoTypes = mediainput.Types{
+		"video/mp4", "video/mpeg", "video/quicktime", "video/mov", "video/avi", "video/x-msvideo",
+		"video/x-flv", "video/mpg", "video/webm", "video/wmv", "video/x-ms-wmv", "video/3gpp",
+	}
+)
+
+const geminiSupportedTypes = "image/png, image/jpeg, image/webp, application/pdf, audio (wav, mp3, aiff, aac, ogg, flac), video (mp4, mpeg, mov, avi, flv, mpg, webm, wmv, 3gpp), text/*, application/json"
+
+// AcceptsMedia reports whether the generateContent mapping sends media. User
+// messages and tool results take the same types.
+func (m *Model) AcceptsMedia(media ai.MediaPart, _ ai.MediaPlacement) error {
+	_, err := resolveGeminiMedia(&media)
+	return err
+}
+
+func resolveGeminiMedia(media *ai.MediaPart) (mediainput.Source, error) {
+	source, err := mediainput.Resolve("gemini", media)
+	if err != nil {
+		return source, err
+	}
+	switch {
+	case geminiImageTypes.Has(source.MIMEType), source.Kind == mediainput.KindPDF,
+		geminiAudioTypes.Has(source.MIMEType), geminiVideoTypes.Has(source.MIMEType):
+		return source, nil
+	case source.Kind == mediainput.KindText:
+		if !source.Inline() {
+			return source, mediainput.Unsupported("gemini", "text media %q must be inline data or a base64 data URI; text files are not fetched by URL", source.MIMEType)
+		}
+		return source, nil
+	default:
+		return source, mediainput.Unsupported("gemini", "MIME type %q (supported: %s)", media.MIMEType, geminiSupportedTypes)
+	}
+}
 
 // siblingToolResultMedia reports whether model predates multimodal function
 // responses.
@@ -35,13 +73,17 @@ func siblingToolResultMedia(model string) bool {
 	return strings.HasPrefix(name, "gemini-1") || strings.HasPrefix(name, "gemini-2")
 }
 
-// mediaPart maps media in a user message, or a sibling of a legacy function
+// mediaPart maps media in a user message, or a sibling of a function
 // response.
 func mediaPart(media *ai.MediaPart) (*genai.Part, error) {
-	source, err := mediainput.Resolve("gemini", media)
+	source, err := resolveGeminiMedia(media)
 	if err != nil {
 		return nil, err
 	}
+	return sourcePart(source)
+}
+
+func sourcePart(source mediainput.Source) (*genai.Part, error) {
 	if source.Kind == mediainput.KindText {
 		text, err := source.TextFile("gemini")
 		if err != nil {
@@ -49,7 +91,7 @@ func mediaPart(media *ai.MediaPart) (*genai.Part, error) {
 		}
 		return &genai.Part{Text: text}, nil
 	}
-	if source.URL != "" {
+	if !source.Inline() {
 		return &genai.Part{FileData: &genai.FileData{FileURI: source.URL, MIMEType: source.MIMEType}}, nil
 	}
 	data, err := source.Bytes("gemini")
@@ -60,7 +102,7 @@ func mediaPart(media *ai.MediaPart) (*genai.Part, error) {
 }
 
 // functionResponseParts maps a canonical tool result to a functionResponse
-// part and, for legacy models, the media parts that follow it.
+// part and the media parts that follow it.
 func functionResponseParts(r *ai.ToolResult, siblingMedia bool) ([]*genai.Part, error) {
 	var text strings.Builder
 	var nested []*genai.FunctionResponsePart
@@ -77,11 +119,12 @@ func functionResponseParts(r *ai.ToolResult, siblingMedia bool) ([]*genai.Part, 
 		case ai.ContentExtension:
 			// Optional metadata has no model-visible content.
 		case ai.ContentMedia:
-			source, err := mediainput.Resolve("gemini", part.Media)
+			source, err := resolveGeminiMedia(part.Media)
 			if err != nil {
 				return nil, err
 			}
-			if source.Kind == mediainput.KindText {
+			switch {
+			case source.Kind == mediainput.KindText:
 				file, err := source.TextFile("gemini")
 				if err != nil {
 					return nil, err
@@ -90,25 +133,21 @@ func functionResponseParts(r *ai.ToolResult, siblingMedia bool) ([]*genai.Part, 
 					text.WriteString("\n")
 				}
 				text.WriteString(file)
-				continue
-			}
-			if siblingMedia {
-				sibling, err := mediaPart(part.Media)
+			case siblingMedia || source.Kind == mediainput.KindAudio || source.Kind == mediainput.KindVideo:
+				sibling, err := sourcePart(source)
 				if err != nil {
 					return nil, err
 				}
 				siblings = append(siblings, sibling)
-				continue
-			}
-			if source.URL != "" {
+			case !source.Inline():
 				nested = append(nested, &genai.FunctionResponsePart{FileData: &genai.FunctionResponseFileData{FileURI: source.URL, MIMEType: source.MIMEType}})
-				continue
+			default:
+				data, err := source.Bytes("gemini")
+				if err != nil {
+					return nil, err
+				}
+				nested = append(nested, &genai.FunctionResponsePart{InlineData: &genai.FunctionResponseBlob{MIMEType: source.MIMEType, Data: data}})
 			}
-			data, err := source.Bytes("gemini")
-			if err != nil {
-				return nil, err
-			}
-			nested = append(nested, &genai.FunctionResponsePart{InlineData: &genai.FunctionResponseBlob{MIMEType: source.MIMEType, Data: data}})
 		default:
 			return nil, fmt.Errorf("%w: Gemini result %q", ai.ErrUnsupportedCapability, part.Kind)
 		}

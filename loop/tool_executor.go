@@ -394,7 +394,7 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 					if task.options.Timeout != nil {
 						timeout = *task.options.Timeout
 					}
-					done.result, done.duration, done.err = processObservedToolExecution(invocationCtx, ToolPolicyInput{Call: task.pending.call, Traits: task.options.Traits}, []Tool{task.tool}, l.ToolResultProcessor, timeout, &done.execution, l.ObservationSink)
+					done.result, done.duration, done.err = processObservedToolExecution(invocationCtx, ToolPolicyInput{Call: task.pending.call, Traits: task.options.Traits}, []Tool{task.tool}, l.resultProcessor(), timeout, &done.execution, l.ObservationSink)
 				}(index, task, release, invocationCtx)
 			}
 		}

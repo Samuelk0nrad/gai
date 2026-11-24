@@ -87,6 +87,16 @@ func TestResponsesMapsUserMediaInOrder(t *testing.T) {
 			want:  `{"file_data":"data:application/pdf;base64,JVBERg==","filename":"invoice.pdf","type":"input_file"}`,
 		},
 		{
+			name:  "docx bytes named without extension",
+			media: ai.MediaPart{MIMEType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", Data: []byte("PK"), Name: "report"},
+			want:  `{"file_data":"data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,UEs=","filename":"report.docx","type":"input_file"}`,
+		},
+		{
+			name:  "xlsx URL",
+			media: ai.MediaPart{MIMEType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", URI: "https://example.com/q.xlsx"},
+			want:  `{"file_url":"https://example.com/q.xlsx","type":"input_file"}`,
+		},
+		{
 			name:  "text bytes",
 			media: ai.MediaPart{MIMEType: "text/markdown; charset=utf-8", Data: []byte("# Plan"), Name: `a&"b".md`},
 			want:  `{"text":"<file name=\"a&amp;&#34;b&#34;.md\" mime_type=\"text/markdown\">\n# Plan\n</file>","type":"input_text"}`,
@@ -320,5 +330,30 @@ func TestTokenCounterEstimatesMediaRequests(t *testing.T) {
 	// the 4 MiB of image bytes would be millions of tokens if tokenized.
 	if result.MessageTokens < 18_200 || result.MessageTokens > 18_600 {
 		t.Fatalf("message tokens = %d, want about 18,200 plus envelopes", result.MessageTokens)
+	}
+}
+
+func TestAcceptsMediaFollowsTransport(t *testing.T) {
+	image := ai.MediaPart{MIMEType: "image/png", Data: []byte{1}}
+	responsesModel, err := New("k", nil, WithResponsesTransport()).TypedModel("gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatModel, err := New("k", nil).TypedModel("gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var acceptor ai.MediaAcceptor = responsesModel
+	if err := acceptor.AcceptsMedia(image, ai.MediaInToolResult); err != nil {
+		t.Fatalf("Responses image: %v", err)
+	}
+	for name, check := range map[string]error{
+		"chat transport": chatModel.AcceptsMedia(image, ai.MediaInUserMessage),
+		"audio":          responsesModel.AcceptsMedia(ai.MediaPart{MIMEType: "audio/mpeg", Data: []byte{1}}, ai.MediaInUserMessage),
+		"video URL":      responsesModel.AcceptsMedia(ai.MediaPart{MIMEType: "video/mp4", URI: "https://example.com/a.mp4"}, ai.MediaInUserMessage),
+	} {
+		if !errors.Is(check, ai.ErrUnsupportedCapability) {
+			t.Errorf("%s: err = %v", name, check)
+		}
 	}
 }

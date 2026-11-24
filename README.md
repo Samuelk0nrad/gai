@@ -167,6 +167,8 @@ The [OpenAI provider guide](docs/providers/openai.md) documents image, PDF and
 text-file input and hosted tools on the Responses transport. The
 [Anthropic](docs/providers/anthropic.md), [Gemini](docs/providers/gemini.md)
 and [Mistral](docs/providers/mistral.md) guides document their media input.
+[Media](docs/media.md) compares what each provider accepts and shows how to
+convert the rest, such as Office files or audio, with `ai.MediaPolicy`.
 [Hosted tools and citations](docs/hosted-tools.md)
 documents how OpenAI, Anthropic and Gemini keep server-run tool calls, such as
 web search, and their citations across rounds.

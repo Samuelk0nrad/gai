@@ -96,6 +96,14 @@ type Loop struct {
 	PromptBuilder modelinput.PromptBuilder
 	// ToolResultProcessor optionally processes tool responses before they are recorded, emitted, or captured by loop telemetry.
 	ToolResultProcessor ToolResultProcessor
+	// Media controls media the Model does not accept, when the Model is an
+	// ai.MediaAcceptor. Tool results are adapted once, after
+	// ToolResultProcessor; media the model cannot read there becomes an
+	// ErrToolMediaUnsupported tool error. Every request is adapted before
+	// its budget check; each distinct file is converted once per run.
+	Media ai.MediaPolicy
+	// mediaAdapter applies Media for the current run.
+	mediaAdapter *ai.MediaAdapter
 }
 
 // Validate applies default iteration limits and checks required loop dependencies.
@@ -238,7 +246,10 @@ func (l *Loop) buildAttemptRequest(ctx context.Context, toolDefinitions []ai.Too
 		return ai.AIRequest{}, err
 	}
 	settings := l.requestSettings(toolDefinitions, requiredToolCallSatisfied)
-	settings.Messages = request.Messages
+	settings.Messages, err = l.mediaAdapter.Messages(ctx, request.Messages)
+	if err != nil {
+		return ai.AIRequest{}, err
+	}
 	// Snapshot the canonical request after applying execution settings.
 	request = settings.Copy()
 	if err := request.Validate(); err != nil {

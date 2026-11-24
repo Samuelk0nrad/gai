@@ -78,3 +78,15 @@ func TestInlinePDFIsRejected(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestAudioMapsToInputAudio(t *testing.T) {
+	got := mappedJSON(t, ai.Message{Role: ai.RoleUser, Parts: []ai.ContentPart{
+		{Kind: ai.ContentText, Text: "transcribe"},
+		mediaContentPart(ai.MediaPart{MIMEType: "audio/mp3", Data: []byte("mp3")}),
+		mediaContentPart(ai.MediaPart{MIMEType: "audio/wav", URI: "https://example.com/a.wav"}),
+	}})
+	want := `[{"role":"user","content":[{"type":"text","text":"transcribe"},{"type":"input_audio","input_audio":"bXAz"},{"type":"input_audio","input_audio":"https://example.com/a.wav"}]}]`
+	if got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}

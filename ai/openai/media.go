@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"cmp"
 	"fmt"
 	"strings"
 
@@ -16,43 +15,86 @@ import (
 //   - Images (image/jpeg, image/png, image/webp, image/gif) become input_image
 //     with detail "auto". An http(s) URL or base64 data URL is sent as is;
 //     inline bytes become a base64 data URL.
-//   - PDFs (application/pdf) become input_file. An http(s) URL is sent as
-//     file_url; inline bytes or a base64 data URL are sent as file_data with a
-//     filename, MediaPart.Name or "file.pdf".
+//   - PDFs and Office files (.docx, .pptx, .xlsx) become input_file. An
+//     http(s) URL is sent as file_url; inline bytes or a base64 data URL are
+//     sent as file_data with a filename, MediaPart.Name or "file.<ext>".
+//     OpenAI reads only the text of Office files.
 //   - Text media (text/*, application/json, +json) given as bytes or a base64
 //     data URL becomes input_text wrapped in a <file> element, because OpenAI
 //     has no text-file input.
 //
-// Other MIME types, other URI schemes and text media by URL return
-// *ai.UnsupportedContentError. Nothing is dropped.
+// Audio, video, other MIME types, other URI schemes and text media by URL
+// return *ai.UnsupportedContentError. Nothing is dropped. The Chat
+// Completions transport sends no media.
 
-const defaultFilename = "file.pdf"
+var (
+	openAIImageTypes = mediainput.Types{"image/jpeg", "image/png", "image/webp", "image/gif"}
+	// openAIFileExtensions maps input_file MIME types to the file extension
+	// OpenAI uses to detect the type.
+	openAIFileExtensions = map[string]string{
+		mediainput.MIMEPDF: ".pdf",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document":   ".docx",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":         ".xlsx",
+	}
+)
+
+const openAISupportedTypes = "image/jpeg, image/png, image/webp, image/gif, application/pdf, .docx, .pptx and .xlsx files, text/*, application/json"
 
 func unsupportedMedia(format string, args ...any) error {
 	return mediainput.Unsupported("openai", format, args...)
 }
 
+// AcceptsMedia reports whether the model's transport sends media. Only the
+// Responses transport sends media; see the package media notes.
+func (m *Model) AcceptsMedia(media ai.MediaPart, _ ai.MediaPlacement) error {
+	if m.provider.transport != TransportResponses {
+		return unsupportedMedia("media input requires the Responses transport (WithResponsesTransport)")
+	}
+	_, err := resolveOpenAIMedia(&media)
+	return err
+}
+
+// resolveOpenAIMedia resolves media and checks its type and source.
+func resolveOpenAIMedia(media *ai.MediaPart) (mediainput.Source, error) {
+	source, err := mediainput.Resolve("openai", media)
+	if err != nil {
+		return source, err
+	}
+	switch {
+	case openAIImageTypes.Has(source.MIMEType), openAIFileExtensions[source.MIMEType] != "":
+		return source, nil
+	case source.Kind == mediainput.KindText:
+		if !source.Inline() {
+			return source, unsupportedMedia("text media %q must be inline data or a base64 data URI; OpenAI does not fetch text files by URL", source.MIMEType)
+		}
+		return source, nil
+	default:
+		return source, unsupportedMedia("MIME type %q (supported: %s)", media.MIMEType, openAISupportedTypes)
+	}
+}
+
 // mediaInputContent maps one media part to a Responses input content item.
 func mediaInputContent(media *ai.MediaPart) (responses.ResponseInputContentUnionParam, error) {
-	source, err := mediainput.Resolve("openai", media)
+	source, err := resolveOpenAIMedia(media)
 	if err != nil {
 		return responses.ResponseInputContentUnionParam{}, err
 	}
-	switch source.Kind {
-	case mediainput.KindImage:
+	if openAIImageTypes.Has(source.MIMEType) {
 		imageURL := source.URL
-		if imageURL == "" {
+		if source.Inline() {
 			imageURL = source.DataURL()
 		}
 		return responses.ResponseInputContentUnionParam{OfInputImage: &responses.ResponseInputImageParam{
 			Detail:   responses.ResponseInputImageDetailAuto,
 			ImageURL: param.NewOpt(imageURL),
 		}}, nil
-	case mediainput.KindPDF:
+	}
+	if ext := openAIFileExtensions[source.MIMEType]; ext != "" {
 		file := &responses.ResponseInputFileParam{}
-		if source.URL == "" {
+		if source.Inline() {
 			file.FileData = param.NewOpt(source.DataURL())
-			file.Filename = param.NewOpt(cmp.Or(source.Name, defaultFilename))
+			file.Filename = param.NewOpt(source.Filename(ext))
 		} else {
 			file.FileURL = param.NewOpt(source.URL)
 			if source.Name != "" {
@@ -60,13 +102,12 @@ func mediaInputContent(media *ai.MediaPart) (responses.ResponseInputContentUnion
 			}
 		}
 		return responses.ResponseInputContentUnionParam{OfInputFile: file}, nil
-	default: // mediainput.KindText; Resolve rejects other kinds.
-		text, err := source.TextFile("openai")
-		if err != nil {
-			return responses.ResponseInputContentUnionParam{}, err
-		}
-		return responses.ResponseInputContentParamOfInputText(text), nil
 	}
+	text, err := source.TextFile("openai")
+	if err != nil {
+		return responses.ResponseInputContentUnionParam{}, err
+	}
+	return responses.ResponseInputContentParamOfInputText(text), nil
 }
 
 // toolResultContent maps a tool result that contains media to the array form

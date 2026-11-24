@@ -28,6 +28,19 @@ const (
 	mediaPDFUnknownPages = 10
 	// mediaPDFBytesPerPage estimates pages when the page tree is compressed.
 	mediaPDFBytesPerPage = 64 * 1024
+	// mediaAudioBytesPerToken estimates audio from its size. Gemini counts
+	// 32 tokens per second; 128 bytes per token is 4 KB/s, a 32 kbit/s
+	// stream, so most encodings are overestimated.
+	mediaAudioBytesPerToken = 128
+	// mediaVideoBytesPerToken estimates video from its size. Gemini counts
+	// about 300 tokens per second at default resolution; 512 bytes per token
+	// is about 1.2 Mbit/s.
+	mediaVideoBytesPerToken = 512
+	// mediaAudioURLTokens and mediaVideoURLTokens are the allowances for
+	// audio or video given by URI, whose size is unknown locally: about ten
+	// minutes of audio and about five minutes of video.
+	mediaAudioURLTokens = 20_000
+	mediaVideoURLTokens = 90_000
 )
 
 // estimateMediaTokens returns the local allowance for one media part. Text
@@ -48,12 +61,26 @@ func estimateMediaTokens(ctx context.Context, media *MediaPart, counter TokenCou
 			return 0, nil
 		}
 		return countLocalText(ctx, string(data), counter)
+	case strings.HasPrefix(mimeType, "audio/"):
+		return sizedMediaTokens(media, mediaAudioBytesPerToken, mediaAudioURLTokens), nil
+	case strings.HasPrefix(mimeType, "video/"):
+		return sizedMediaTokens(media, mediaVideoBytesPerToken, mediaVideoURLTokens), nil
 	default:
 		if n := (len(media.inlineData()) + 3) / 4; n > mediaImageTokens {
 			return n, nil
 		}
 		return mediaImageTokens, nil
 	}
+}
+
+// sizedMediaTokens estimates media from its inline size, with at least one
+// image allowance, or returns urlTokens for media given by URI.
+func sizedMediaTokens(media *MediaPart, bytesPerToken, urlTokens int) int {
+	data := media.inlineData()
+	if len(data) == 0 {
+		return urlTokens
+	}
+	return max((len(data)+bytesPerToken-1)/bytesPerToken, mediaImageTokens)
 }
 
 // inlineData returns Data, or the decoded payload of a base64 data URI. It

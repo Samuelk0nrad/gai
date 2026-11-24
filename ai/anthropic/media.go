@@ -24,6 +24,36 @@ import (
 // do not. Other MIME types, URI schemes and text by URL return
 // *ai.UnsupportedContentError.
 
+var anthropicImageTypes = mediainput.Types{"image/jpeg", "image/png", "image/webp", "image/gif"}
+
+const anthropicSupportedTypes = "image/jpeg, image/png, image/webp, image/gif, application/pdf, text/*, application/json"
+
+// AcceptsMedia reports whether the Messages API mapping sends media. The
+// placement does not matter: user messages and tool results take the same
+// types.
+func (m *Model) AcceptsMedia(media ai.MediaPart, _ ai.MediaPlacement) error {
+	_, err := resolveAnthropicMedia(&media)
+	return err
+}
+
+func resolveAnthropicMedia(media *ai.MediaPart) (mediainput.Source, error) {
+	source, err := mediainput.Resolve("anthropic", media)
+	if err != nil {
+		return source, err
+	}
+	switch {
+	case anthropicImageTypes.Has(source.MIMEType), source.Kind == mediainput.KindPDF:
+		return source, nil
+	case source.Kind == mediainput.KindText:
+		if !source.Inline() {
+			return source, mediainput.Unsupported("anthropic", "text media %q must be inline data or a base64 data URI; text files are not fetched by URL", source.MIMEType)
+		}
+		return source, nil
+	default:
+		return source, mediainput.Unsupported("anthropic", "MIME type %q (supported: %s)", media.MIMEType, anthropicSupportedTypes)
+	}
+}
+
 // mediaContent is an image or document block for one media part. Exactly one
 // field is set.
 type mediaContent struct {
@@ -32,29 +62,29 @@ type mediaContent struct {
 }
 
 func mapMedia(media *ai.MediaPart) (mediaContent, error) {
-	source, err := mediainput.Resolve("anthropic", media)
+	source, err := resolveAnthropicMedia(media)
 	if err != nil {
 		return mediaContent{}, err
 	}
 	switch source.Kind {
 	case mediainput.KindImage:
 		image := &antropic.ImageBlockParam{}
-		if source.URL != "" {
-			image.Source.OfURL = &antropic.URLImageSourceParam{URL: source.URL}
+		if source.Inline() {
+			image.Source.OfBase64 = &antropic.Base64ImageSourceParam{Data: source.Base64(), MediaType: antropic.Base64ImageSourceMediaType(source.MIMEType)}
 		} else {
-			image.Source.OfBase64 = &antropic.Base64ImageSourceParam{Data: source.Base64, MediaType: antropic.Base64ImageSourceMediaType(source.MIMEType)}
+			image.Source.OfURL = &antropic.URLImageSourceParam{URL: source.URL}
 		}
 		return mediaContent{image: image}, nil
 	case mediainput.KindPDF:
 		document := &antropic.DocumentBlockParam{}
-		if source.URL != "" {
-			document.Source.OfURL = &antropic.URLPDFSourceParam{URL: source.URL}
+		if source.Inline() {
+			document.Source.OfBase64 = &antropic.Base64PDFSourceParam{Data: source.Base64()}
 		} else {
-			document.Source.OfBase64 = &antropic.Base64PDFSourceParam{Data: source.Base64}
+			document.Source.OfURL = &antropic.URLPDFSourceParam{URL: source.URL}
 		}
 		setDocumentTitle(document, source.Name)
 		return mediaContent{document: document}, nil
-	default: // mediainput.KindText; Resolve rejects other kinds.
+	default: // mediainput.KindText
 		text, err := source.Text("anthropic")
 		if err != nil {
 			return mediaContent{}, err

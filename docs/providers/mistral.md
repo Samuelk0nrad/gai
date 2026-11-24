@@ -23,7 +23,7 @@ model, err := provider.TypedModel(mistral.MistralSmallLatest)
 | Reasoning (`thinking` chunks) | Supported | Mapped to `ai.ContentReasoning` parts and `TokenTypeThought` stream events. |
 | Reasoning effort | Supported | `none` and `high` for documented adjustable-reasoning models. Other values pass through for models without known facts. |
 | Reasoning replay | Supported | Thinking chunks and their signatures are replayed in later turns. |
-| Image, PDF and text-file input | Supported | User messages and tool results. See [Images, PDFs and text files](#images-pdfs-and-text-files). |
+| Image, PDF, audio and text-file input | Supported | User messages and tool results. See [Images, PDFs and text files](#images-pdfs-and-text-files). |
 | Typed native options | Supported | See [Native options](#native-options). |
 | Hosted tools (web search, code interpreter, image generation, document library, connectors) | Deferred | Use `NativeClient`. |
 | Citation, reference, tool-reference, document, file, and audio chunks | Deferred | Responses containing them fail explicitly instead of being flattened. |
@@ -121,6 +121,7 @@ message := ai.Message{Role: ai.RoleUser, Parts: []ai.ContentPart{
 | --- | --- |
 | `image/jpeg`, `image/png`, `image/webp`, `image/gif` | `image_url` chunk. An `http(s)` URL is sent as is; inline bytes and base64 `data:` URIs become a base64 data URL. |
 | `application/pdf` | `document_url` chunk with `document_name` set to `MediaPart.Name`. Only `http(s)` URLs: upload an inline PDF with the Mistral Files API and pass its signed URL. |
+| Audio (`audio/mpeg`, `audio/wav`, `audio/flac`, `audio/ogg`, `audio/aac`, `audio/mp4`, `audio/webm`) | `input_audio` chunk holding the base64 audio, or its `http(s)` URL. Choose an audio model such as Voxtral. |
 | `text/*`, `application/json`, `+json` types | Text chunk holding `<file name="…" mime_type="…">` and the UTF-8 text. Only inline bytes or a base64 `data:` URI. |
 
 - **Tool results.** A tool result that contains media is sent as a `tool`

@@ -108,6 +108,9 @@ type Definition struct {
 	HistoryCompaction *HistoryCompactionPolicy
 	// ToolResultProcessor can transform tool responses before they enter the transcript.
 	ToolResultProcessor loop.ToolResultProcessor
+	// Media converts or replaces media the model does not accept, such as a
+	// .docx file for a model that reads only PDFs. See loop.Loop.Media.
+	Media ai.MediaPolicy
 	// ObservationSink receives agent and workflow lifecycle events.
 	ObservationSink gai.ObservationSink
 	// Middleware transforms the run stream in declaration order.
@@ -304,6 +307,7 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 
 	l := loop.New(execution.model, execution.tools, promptBuilder, execution.toolResultProcessor)
 	l.ObservationSink = a.def.ObservationSink
+	l.Media = a.def.Media
 	if !nativeTools {
 		l.ToolTransport = loop.ToolTransportText
 	}

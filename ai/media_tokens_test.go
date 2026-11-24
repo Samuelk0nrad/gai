@@ -36,7 +36,12 @@ func TestRequestEstimateCountsMediaWithoutEncodedBytes(t *testing.T) {
 		{"compressed PDF", media(MediaPart{MIMEType: "application/pdf", Data: compressedPDF}), 4 * mediaPDFPageTokens},
 		{"PDF URL", media(MediaPart{MIMEType: "application/pdf", URI: "https://example.com/a.pdf"}), mediaPDFUnknownPages * mediaPDFPageTokens},
 		{"text bytes", media(MediaPart{MIMEType: "text/plain; charset=utf-8", Data: []byte("hello file")}), len("hello file")},
-		{"other bytes", media(MediaPart{MIMEType: "audio/mpeg", Data: bytes.Repeat([]byte{1}, 4*(mediaImageTokens+10))}), mediaImageTokens + 10},
+		{"other bytes", media(MediaPart{MIMEType: "application/zip", Data: bytes.Repeat([]byte{1}, 4*(mediaImageTokens+10))}), mediaImageTokens + 10},
+		{"audio bytes", media(MediaPart{MIMEType: "audio/mpeg", Data: bytes.Repeat([]byte{1}, mediaAudioBytesPerToken*2000)}), 2000},
+		{"short audio", media(MediaPart{MIMEType: "audio/wav", Data: []byte{1}}), mediaImageTokens},
+		{"audio URL", media(MediaPart{MIMEType: "audio/mpeg", URI: "https://example.com/a.mp3"}), mediaAudioURLTokens},
+		{"video bytes", media(MediaPart{MIMEType: "video/mp4", Data: bytes.Repeat([]byte{1}, mediaVideoBytesPerToken*4000)}), 4000},
+		{"video URL", media(MediaPart{MIMEType: "video/mp4", URI: "https://example.com/a.mp4"}), mediaVideoURLTokens},
 		{"tool result media", ContentPart{Kind: ContentToolResult, ToolResult: &ToolResult{ToolCallID: "c", Name: "open_file", Parts: []ContentPart{
 			{Kind: ContentText, Text: "here"}, media(MediaPart{MIMEType: "image/webp", Data: image}),
 		}}}, mediaImageTokens},
