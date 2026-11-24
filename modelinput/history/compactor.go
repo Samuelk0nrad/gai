@@ -96,9 +96,10 @@ func WithExpectedRevision(revision Revision) CompactOption {
 	return func(o *compactOptions) { o.expected, o.expectedSet = revision, true }
 }
 
-// WithRequestBudget limits the summary request, usually to the agent run's
-// request budget. A continuation summary that does not fit drops its cached
-// prefix after the last folded turn, then folds fewer turns.
+// WithRequestBudget limits a continuation summary request, usually to the
+// agent run's request budget. A request that does not fit drops its cached
+// prefix after the last folded turn, then folds fewer turns. Summarizers with
+// their own prompt, such as agent/summary, do not use it.
 func WithRequestBudget(budget ai.RequestBudgetConfig) CompactOption {
 	return func(o *compactOptions) { o.requestBudget = budget }
 }

@@ -36,7 +36,9 @@ type SummaryInput struct {
 	MaxTokens int
 	// ResponseFormat selects how the prefix's structured-output setting is used.
 	ResponseFormat SummaryResponseFormat
-	// RequestBudget limits the summary request. A zero budget skips the check.
+	// RequestBudget limits a summary request that continues Prefix. A zero
+	// budget skips the check. Summarizers with their own prompt, such as
+	// agent/summary, ignore it: their request shares nothing with the run's.
 	RequestBudget ai.RequestBudgetConfig
 	// Counter estimates the summary request for RequestBudget.
 	Counter ai.TokenCounter

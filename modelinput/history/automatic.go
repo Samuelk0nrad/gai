@@ -36,7 +36,8 @@ type AutoCompaction struct {
 	// previous run's cached prompt. A nil Prefix is ErrSummaryPrefixRequired
 	// for the continuation summarizer.
 	Prefix func(context.Context) (ai.AIRequest, error)
-	// RequestBudget limits the summary request; zero skips the check.
+	// RequestBudget limits a continuation summary request; zero skips the
+	// check. Summarizers with their own prompt do not use it.
 	RequestBudget ai.RequestBudgetConfig
 }
 
