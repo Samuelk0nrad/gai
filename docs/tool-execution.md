@@ -262,6 +262,48 @@ but the executor preserves the original denial or approval-required classificati
 and the model-facing error flag. Filtering cannot turn an unapproved call into a
 successful invocation.
 
+### Truncate instead of rejecting
+
+`LimitToolResultBytes` hides an oversized result from the model entirely. To
+keep the start of a large result (a web page, a long search list) instead, use
+`TruncateToolResultBytes` as the last processor:
+
+```go
+truncate, err := loop.TruncateToolResultBytes(16 * 1024) // about 4,000 tokens
+if err != nil { return err }
+processor, err := loop.ChainToolResultProcessors(redact, truncate)
+if err != nil { return err }
+```
+
+An oversized successful result keeps its start, cut on a UTF-8 boundary, and
+ends with a note that counts toward the limit:
+
+```text
+<first K bytes>
+
+[tool result truncated: showing first K of N bytes]
+```
+
+- The cut is plain text. A cut JSON result is no longer valid JSON; providers
+  send tool results as text, and models read the prefix and note well. To
+  shorten JSON by its structure (drop fields, cap arrays), put your own
+  processor before the truncation.
+- The limit is in bytes, not tokens, so the same result is always cut the same
+  way, whatever the model or tokenizer. Output that already fits is unchanged,
+  so a cut result stored in history and replayed with the same or a larger
+  limit stays the same, which keeps prompt-cache prefixes stable. If the limit
+  is later lowered, a stored cut is cut again from its kept text and keeps the
+  original size in its single note, giving the same text as cutting the
+  original once at the new limit.
+- Oversized error text, including `ErrToolDenied` and `ErrToolApprovalRequired`
+  refusals, is never cut: it is replaced exactly as `LimitToolResultBytes` does.
+- Zero disables truncation. Positive limits must be at least
+  `loop.MinTruncateToolResultBytes` (128 bytes) so the note always fits.
+- Events, the conversation, retained results, and tool spans all see the cut
+  text with its note; the full original is never captured by loop telemetry.
+  The execution's output state is `changed`, and tool spans record it as
+  `gai.tool.output=changed`.
+
 A custom processor returns `ToolResult{Text: ..., Err: ...}` as a replacement.
 Use `RejectToolResult("safe reason")` to withhold output while continuing the run
 with a model-visible error. A processing error or panic terminates the run and
