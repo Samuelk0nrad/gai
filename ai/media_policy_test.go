@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Samuelk0nrad/gai/ai"
 )
@@ -116,5 +118,65 @@ func TestMediaAdapterWithoutAcceptorChangesNothing(t *testing.T) {
 	got, err := ai.NewMediaAdapter(nil, ai.MediaPolicy{Fallback: ai.MediaFallbackPlaceholder}).Messages(t.Context(), messages)
 	if err != nil || !reflect.DeepEqual(got, messages) {
 		t.Fatalf("got %#v, %v", got, err)
+	}
+}
+
+func TestMediaAdapterSharesConcurrentConversions(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	converter := ai.MediaConverterFunc(func(context.Context, ai.MediaPart, func(ai.MediaPart) error) ([]ai.ContentPart, error) {
+		calls.Add(1)
+		<-release
+		return ai.TextParts("transcript"), nil
+	})
+	adapter := ai.NewMediaAdapter(pngOnlyModel{}, ai.MediaPolicy{Converter: converter})
+	parts := []ai.ContentPart{mediaContent(ai.MediaPart{MIMEType: "audio/mpeg", Data: []byte{1, 2}})}
+	const callers = 8
+	results := make(chan []ai.ContentPart, callers)
+	errs := make(chan error, callers)
+	for range callers {
+		go func() {
+			got, err := adapter.Parts(t.Context(), parts, ai.MediaInToolResult)
+			results <- got
+			errs <- err
+		}()
+	}
+	// Let every caller reach the adapter before the conversion finishes.
+	for calls.Load() == 0 {
+		runtime.Gosched()
+	}
+	time.Sleep(10 * time.Millisecond)
+	close(release)
+	for range callers {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+		if got := <-results; len(got) != 1 || got[0].Text != "transcript" {
+			t.Fatalf("parts = %#v", got)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("converter calls = %d, want 1", calls.Load())
+	}
+}
+
+func TestMediaAdapterEmptyConversionRemovesMedia(t *testing.T) {
+	empty := ai.MediaConverterFunc(func(context.Context, ai.MediaPart, func(ai.MediaPart) error) ([]ai.ContentPart, error) {
+		return nil, nil
+	})
+	parts := []ai.ContentPart{{Kind: ai.ContentText, Text: "see"}, mediaContent(ai.MediaPart{MIMEType: "application/zip", Data: []byte{1}})}
+	got, err := ai.NewMediaAdapter(pngOnlyModel{}, ai.MediaPolicy{Converter: empty}).Parts(t.Context(), parts, ai.MediaInUserMessage)
+	if err != nil || len(got) != 1 || got[0].Text != "see" {
+		t.Fatalf("parts = %#v, %v", got, err)
+	}
+}
+
+func TestMediaAdapterKeepsRequiredExtensions(t *testing.T) {
+	part := mediaContent(ai.MediaPart{MIMEType: "audio/mpeg", Data: []byte{1}})
+	part.Extensions = []ai.Extension{{Namespace: "x", Type: "state", Data: []byte(`1`), Required: true}}
+	_, err := ai.NewMediaAdapter(pngOnlyModel{}, ai.MediaPolicy{Fallback: ai.MediaFallbackPlaceholder}).Parts(t.Context(), []ai.ContentPart{part}, ai.MediaInUserMessage)
+	var unsupported *ai.UnsupportedContentError
+	if !errors.As(err, &unsupported) || unsupported.Kind != ai.ContentExtension {
+		t.Fatalf("err = %v", err)
 	}
 }

@@ -110,15 +110,28 @@ type MediaAdapter struct {
 	acceptor MediaAcceptor
 	policy   MediaPolicy
 
-	mu    sync.Mutex
-	cache map[[sha256.Size]byte][]ContentPart
+	mu       sync.Mutex
+	cache    map[[sha256.Size]byte][]ContentPart
+	inflight map[[sha256.Size]byte]*mediaConversion
+}
+
+// mediaConversion is a conversion in progress, shared by concurrent callers
+// that need the same media converted.
+type mediaConversion struct {
+	done  chan struct{}
+	parts []ContentPart
+	err   error
 }
 
 // NewMediaAdapter returns an adapter for model. If model is not a
 // MediaAcceptor, the adapter changes nothing.
 func NewMediaAdapter(model Model, policy MediaPolicy) *MediaAdapter {
 	acceptor, _ := model.(MediaAcceptor)
-	return &MediaAdapter{acceptor: acceptor, policy: policy, cache: map[[sha256.Size]byte][]ContentPart{}}
+	return &MediaAdapter{
+		acceptor: acceptor, policy: policy,
+		cache:    map[[sha256.Size]byte][]ContentPart{},
+		inflight: map[[sha256.Size]byte]*mediaConversion{},
+	}
 }
 
 // Messages returns messages whose media in user messages and tool results the
@@ -167,14 +180,16 @@ func (a *MediaAdapter) adaptParts(ctx context.Context, parts []ContentPart, plac
 		var replacement []ContentPart
 		switch {
 		case part.Kind == ContentMedia && part.Media != nil:
-			adapted, err := a.adaptMedia(ctx, *part.Media, placement)
+			adapted, replaced, err := a.adaptMedia(ctx, *part.Media, placement, hasRequiredExtension(part.Extensions))
 			if err != nil {
 				return nil, false, err
 			}
-			if adapted == nil {
+			if !replaced {
 				break
 			}
-			replacement = adapted
+			// An empty replacement removes the part; keep a non-nil slice
+			// so it still counts as a change.
+			replacement = append([]ContentPart{}, adapted...)
 		case part.Kind == ContentToolResult && part.ToolResult != nil:
 			resultParts, resultChanged, err := a.adaptParts(ctx, part.ToolResult.Parts, MediaInToolResult)
 			if err != nil {
@@ -206,28 +221,72 @@ func (a *MediaAdapter) adaptParts(ctx context.Context, parts []ContentPart, plac
 	return out, true, nil
 }
 
-// adaptMedia returns nil when the model accepts media, otherwise its
-// replacement parts.
-func (a *MediaAdapter) adaptMedia(ctx context.Context, media MediaPart, placement MediaPlacement) ([]ContentPart, error) {
+// adaptMedia reports replaced false when the model accepts media; otherwise
+// it returns the replacement parts, which may be empty. Concurrent callers
+// with the same media share one conversion. Media whose part carries a
+// required extension is never replaced, since the extension would be lost.
+func (a *MediaAdapter) adaptMedia(ctx context.Context, media MediaPart, placement MediaPlacement, requiredExtension bool) (parts []ContentPart, replaced bool, err error) {
 	rejection := a.acceptor.AcceptsMedia(media, placement)
 	if rejection == nil {
-		return nil, nil
+		return nil, false, nil
+	}
+	if requiredExtension {
+		return nil, false, &UnsupportedContentError{Provider: "media", Kind: ContentExtension, Detail: "media with a required extension cannot be converted: " + rejection.Error()}
 	}
 	key := mediaKey(media, placement)
-	a.mu.Lock()
-	cached, ok := a.cache[key]
-	a.mu.Unlock()
-	if ok {
-		return CloneParts(cached), nil
+	for {
+		a.mu.Lock()
+		if cached, ok := a.cache[key]; ok {
+			a.mu.Unlock()
+			return CloneParts(cached), true, nil
+		}
+		if running, ok := a.inflight[key]; ok {
+			a.mu.Unlock()
+			select {
+			case <-running.done:
+			case <-ctx.Done():
+				return nil, false, ctx.Err()
+			}
+			// A conversion canceled by its own caller is retried by
+			// waiters whose context is still live.
+			if running.err != nil && isContextError(running.err) && ctx.Err() == nil {
+				continue
+			}
+			if running.err != nil {
+				return nil, false, running.err
+			}
+			return CloneParts(running.parts), true, nil
+		}
+		conversion := &mediaConversion{done: make(chan struct{})}
+		a.inflight[key] = conversion
+		a.mu.Unlock()
+
+		conversion.parts, conversion.err = a.convert(ctx, media, placement, rejection)
+		a.mu.Lock()
+		delete(a.inflight, key)
+		if conversion.err == nil {
+			a.cache[key] = CloneParts(conversion.parts)
+		}
+		a.mu.Unlock()
+		close(conversion.done)
+		if conversion.err != nil {
+			return nil, false, conversion.err
+		}
+		return CloneParts(conversion.parts), true, nil
 	}
-	replacement, err := a.convert(ctx, media, placement, rejection)
-	if err != nil {
-		return nil, err
+}
+
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func hasRequiredExtension(extensions []Extension) bool {
+	for _, ext := range extensions {
+		if ext.Required {
+			return true
+		}
 	}
-	a.mu.Lock()
-	a.cache[key] = CloneParts(replacement)
-	a.mu.Unlock()
-	return replacement, nil
+	return false
 }
 
 func (a *MediaAdapter) convert(ctx context.Context, media MediaPart, placement MediaPlacement, rejection error) ([]ContentPart, error) {
