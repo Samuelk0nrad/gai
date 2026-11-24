@@ -224,6 +224,28 @@ func TestHistoryCompactionEarlyFailuresAndCancellation(t *testing.T) {
 	}
 }
 
+func TestEarlyCompactionLeavingPressureFollowsStop(t *testing.T) {
+	// The committed summary replaced history that fit with history that does
+	// not, so the fit no longer excuses the failure.
+	probe := &compactionProbe{result: history.CompactionResult{Early: true, Changed: true, PressureRemaining: true, Revision: "2"}}
+	model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}
+	a := agent.New(agent.Definition{Model: model, TokenCounter: ai.TextTokenEstimator{}, HistoryCompaction: &agent.HistoryCompactionPolicy{},
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{TokenBudget: 256, ContextSources: []modelinput.ContextSource{probe}}), nil
+		}})
+	workflow, err := a.NewRun(t.Context(), textRunInput("q"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := workflow.Run(t.Context())
+	if !errors.Is(err, history.ErrHistoryPressureRemaining) || len(model.Requests()) != 0 {
+		t.Fatalf("err=%v calls=%d", err, len(model.Requests()))
+	}
+	if reports := result.Primary.HistoryCompaction; len(reports) != 1 || reports[0].Continued {
+		t.Fatalf("reports = %+v", reports)
+	}
+}
+
 func TestHistoryCompactionTimeoutFailsTheRunWithoutCanceling(t *testing.T) {
 	probe := &compactionProbe{err: fmt.Errorf("summary call: %w", context.DeadlineExceeded)}
 	model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}

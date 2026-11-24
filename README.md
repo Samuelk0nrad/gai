@@ -395,8 +395,8 @@ to fit. Compaction runs once at workflow start, without retries. With `OnFailure
 agent.HistoryCompactionStop` (the default) conflicts, summary errors and remaining
 pressure stop the run; with `agent.HistoryCompactionContinue` the run reports them and
 builds its prompt from the uncompacted history. A compaction that started while the
-history still fit stops the run only on cancellation, a configuration error or a
-revision conflict. The policy does not persist new turns
+history still fit and wrote nothing stops the run only on cancellation, a
+configuration error or a revision conflict. The policy does not persist new turns
 or provide session locking. See [automatic compaction](docs/history.md#automatic-compaction-in-agents).
 
 Use `history.NewCompactor(sessionID, store, history.CompactorDefinition{Model: model})`

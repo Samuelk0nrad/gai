@@ -187,9 +187,10 @@ the main answer; with remaining pressure a smaller summary may already have been
 committed. With `HistoryCompactionContinue`, these failures are reported and the
 run builds its prompt from the history as stored, which selection trims to its
 allocation. A compaction that started early, while the history still fit, does
-not stop the run when it fails: `CompactionResult.Early` is set and the failure is
-reported as continued. A revision conflict still follows `OnFailure`, because
-another writer changed the history, which may no longer fit. Cancellation and configuration errors, such as a read-only store,
+not stop the run when it fails without writing: `CompactionResult.Early` is set and
+the failure is reported as continued. Once the history changed, `OnFailure`
+applies again: a committed summary that still leaves pressure, or a revision
+conflict because another writer changed the history. Cancellation and configuration errors, such as a read-only store,
 stop the run in all cases. Cancellation is the run's context ending or a
 `context.Canceled` error; a deadline that the summarizer or store sets for itself
 is an ordinary compaction failure; when it ends the run, the run fails with

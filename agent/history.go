@@ -28,9 +28,10 @@ var ErrHistoryCompactionTimeout = errors.New("history compaction timed out")
 type HistoryCompactionFailure uint8
 
 // A compaction that started early, below the allocation, does not end the run
-// when it fails: the failure is reported and the run continues with the
-// history, which still fits. A revision conflict is the exception, since
-// another writer changed the history; it follows the mode. Under either mode,
+// when it fails without writing: the failure is reported and the run continues
+// with the history, which still fits. Once the history changed, the mode
+// applies: a committed summary that leaves pressure, or a revision conflict
+// because another writer changed it. Under either mode,
 // cancellation (the run's context ending, or a context.Canceled error) and
 // configuration errors end the run. A deadline that the summarizer or store
 // sets for itself is an ordinary failure; when it ends the run, the run fails
@@ -122,7 +123,7 @@ type HistoryCompactionReport struct {
 	Err error
 	// Continued is true when the run went on despite Err: under
 	// HistoryCompactionContinue, or after an early compaction (Result.Early)
-	// that failed for a reason other than a revision conflict.
+	// that wrote nothing and did not conflict.
 	Continued bool
 }
 
@@ -236,11 +237,12 @@ func (b *compactingPromptBuilder) compactionReports() []HistoryCompactionReport 
 }
 
 // earlyFailure reports a failed compaction that started while the history still
-// fit, which the run can continue past. After a conflict, another writer has
-// changed the history, which may no longer fit.
+// fit and wrote nothing, which the run can continue past. After a commit or a
+// conflict, the history changed and may no longer fit: a committed summary can
+// leave pressure, and a conflict means another writer changed it.
 func earlyFailure(result history.CompactionResult, err error) bool {
 	var conflict *history.RevisionConflictError
-	return result.Early && !errors.As(err, &conflict)
+	return result.Early && !result.Changed && !errors.As(err, &conflict)
 }
 
 // canceled reports whether the run was canceled. A summarizer or store can
