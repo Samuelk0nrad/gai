@@ -67,12 +67,13 @@ openFile, err := loop.NewResultTool("open_file", "Open a stored file", params,
 - **Canonical result.** A result without media keeps its single text part. With
   media, non-empty text comes first, then one `ai.ContentMedia` part per media
   item. Checkpoints keep the parts, so a resumed run replays them.
-- **Providers.** The provider must accept media in tool results. Only the
-  OpenAI Responses transport does. Anthropic, Gemini, Mistral and OpenAI Chat
-  Completions return `ai.ErrUnsupportedCapability` when the next request is
-  built, after the tool has already run. The checkpoint keeps the media, so
-  resuming the run with the same provider fails the same way. Register
-  `NewResultTool` tools only on agents that use the Responses transport.
+- **Providers.** OpenAI (Responses transport), Anthropic, Gemini and Mistral
+  send tool-result media to the model; see each provider guide for the
+  accepted types. The OpenAI Chat Completions transport returns
+  `ai.ErrUnsupportedCapability` when the next request is built, after the tool
+  has already run, and so does any adapter given media it cannot send, such as
+  an inline PDF on Mistral. The checkpoint keeps the media, so resuming the run
+  with the same provider fails the same way.
 - **Telemetry.** Captured tool output shows each media part as a placeholder
   with its size, such as `[image: a.png, image/png, 2048 bytes]`. Bytes and
   URIs are never captured.

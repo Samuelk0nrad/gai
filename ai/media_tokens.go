@@ -11,13 +11,14 @@ import (
 
 // Local media estimates. Providers encode media differently, and the byte size
 // of an image says little about its token cost, so request budgets use fixed
-// allowances instead of counting encoded bytes. They are sized for the OpenAI
-// Responses transport, the only adapter that sends images, PDFs and text files
-// in user messages and tool results.
+// allowances instead of counting encoded bytes.
 const (
 	// mediaImageTokens is the allowance for one image. OpenAI's tile
 	// accounting caps a high-detail image near 1,450 tokens, and its patch
 	// accounting caps an image at 1,536 patches before model multipliers.
+	// Anthropic resizes images to about 1.15 megapixels, about 1,600 tokens,
+	// and Gemini tiles cost 258 tokens each. Large images on Mistral vision
+	// models can cost more than this allowance.
 	mediaImageTokens = 1600
 	// mediaPDFPageTokens is the allowance for one PDF page. Providers
 	// such as OpenAI send both the extracted text and an image of each page.

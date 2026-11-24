@@ -23,7 +23,7 @@ model, err := provider.TypedModel(mistral.MistralSmallLatest)
 | Reasoning (`thinking` chunks) | Supported | Mapped to `ai.ContentReasoning` parts and `TokenTypeThought` stream events. |
 | Reasoning effort | Supported | `none` and `high` for documented adjustable-reasoning models. Other values pass through for models without known facts. |
 | Reasoning replay | Supported | Thinking chunks and their signatures are replayed in later turns. |
-| Image input | Supported | User messages only. Accepts http(s) URLs, base64 `data:` URIs, or inline bytes. |
+| Image, PDF and text-file input | Supported | User messages and tool results. See [Images, PDFs and text files](#images-pdfs-and-text-files). |
 | Typed native options | Supported | See [Native options](#native-options). |
 | Hosted tools (web search, code interpreter, image generation, document library, connectors) | Deferred | Use `NativeClient`. |
 | Citation, reference, tool-reference, document, file, and audio chunks | Deferred | Responses containing them fail explicitly instead of being flattened. |
@@ -104,10 +104,10 @@ Mistral keeps content and tool calls in separate fields, so text or reasoning
 placed after a tool call in one assistant message is rejected rather than
 reordered.
 
-## Images
+## Images, PDFs and text files
 
-Image parts use the shared `ai.MediaPart`. Text and images keep their order
-inside a user message:
+Media parts use the shared `ai.MediaPart`. Text and media keep their order
+inside a user message and inside a tool result:
 
 ```go
 message := ai.Message{Role: ai.RoleUser, Parts: []ai.ContentPart{
@@ -117,16 +117,23 @@ message := ai.Message{Role: ai.RoleUser, Parts: []ai.ContentPart{
 }}
 ```
 
-- **Supported MIME types.** `image/jpeg`, `image/png`, `image/webp`, and
-  `image/gif`.
-- **Inline bytes** are sent as a base64 `data:` URL.
-- **Rejected inputs.** Other MIME types, other URI schemes such as `file:` or
-  `gs:`, and images in system, assistant, or tool messages fail with
-  `*ai.UnsupportedContentError`. No request is sent.
-- **Vision support.** Choose a vision-capable model. See
-  [Vision](https://docs.mistral.ai/studio/conversations/vision).
+| Media | Sent as |
+| --- | --- |
+| `image/jpeg`, `image/png`, `image/webp`, `image/gif` | `image_url` chunk. An `http(s)` URL is sent as is; inline bytes and base64 `data:` URIs become a base64 data URL. |
+| `application/pdf` | `document_url` chunk with `document_name` set to `MediaPart.Name`. Only `http(s)` URLs: upload an inline PDF with the Mistral Files API and pass its signed URL. |
+| `text/*`, `application/json`, `+json` types | Text chunk holding `<file name="…" mime_type="…">` and the UTF-8 text. Only inline bytes or a base64 `data:` URI. |
 
-Broader multimedia work is tracked in #67 and #68.
+- **Tool results.** A tool result that contains media is sent as a `tool`
+  message whose content is a chunk list. A failed result sends its text first,
+  as `{"error": "…"}`, then its media. Text-only results keep plain string
+  content.
+- **Rejected inputs.** Other MIME types, other URI schemes such as `file:` or
+  `gs:`, inline PDFs, text files by URL, text that is not UTF-8, and media in
+  system or assistant messages fail with `*ai.UnsupportedContentError`. No
+  request is sent.
+- **Vision support.** Choose a vision-capable model. See
+  [Vision](https://docs.mistral.ai/studio/conversations/vision). Images in
+  tool results count as image input for the catalog `vision: false` check.
 
 ## Native options
 

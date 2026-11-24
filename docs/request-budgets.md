@@ -98,8 +98,8 @@ A message with media, including media inside tool results, is counted as its
 canonical JSON envelope without the media bytes (MIME type, URI and name stay;
 a base64 `data:` URI keeps only its header), plus a fixed local allowance per
 media part. A `data:` URI is decoded and estimated like the same bytes in
-`Data`. The allowances are sized for the OpenAI Responses transport, the only
-adapter that sends PDFs, text files and media in tool results:
+`Data`. The allowances cover OpenAI, Anthropic and Gemini; large images on
+Mistral vision models can cost more than the image allowance:
 
 | Media | Allowance |
 | --- | --- |

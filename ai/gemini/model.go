@@ -10,6 +10,7 @@ import (
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/mediainput"
 	"google.golang.org/genai"
 )
 
@@ -151,7 +152,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 			return
 		}
 
-		contents, err := nativeContents(req)
+		contents, err := nativeContentsForModel(m.name, req)
 		if err != nil {
 			streamErr = err
 			emit(ai.Token{Err: err})
@@ -387,7 +388,7 @@ func (m *Model) Generate(ctx context.Context, req ai.AIRequest) (response *ai.AI
 		return nil, err
 	}
 
-	contents, err := nativeContents(req)
+	contents, err := nativeContentsForModel(m.name, req)
 	if err != nil {
 		return nil, err
 	}
@@ -525,7 +526,16 @@ func geminiTerminalError(reason string) error {
 
 // nativeContents maps only the conversation; system messages are mapped to
 // GenerateContentConfig.SystemInstruction by buildGenerateContentConfig.
+// Tool-result media uses multimodal function responses.
 func nativeContents(req ai.AIRequest) ([]*genai.Content, error) {
+	return nativeContentsForModel("", req)
+}
+
+// nativeContentsForModel is nativeContents for a named model; models that
+// predate multimodal function responses get tool-result media as sibling
+// parts.
+func nativeContentsForModel(model string, req ai.AIRequest) ([]*genai.Content, error) {
+	siblingMedia := siblingToolResultMedia(model)
 	req = req.Copy()
 	err := req.Validate()
 	if err != nil {
@@ -589,28 +599,21 @@ func nativeContents(req ai.AIRequest) ([]*genai.Content, error) {
 				}
 				parts = append(parts, &genai.Part{FunctionCall: &genai.FunctionCall{ID: c.ID, Name: c.Name, Args: args}, ThoughtSignature: callSignature})
 			case ai.ContentToolResult:
-				r := part.ToolResult
-				var text strings.Builder
-				for _, resultPart := range r.Parts {
-					if err := rejectRequiredGeminiExtensions(resultPart.Extensions); err != nil {
-						return nil, err
-					}
-					switch resultPart.Kind {
-					case ai.ContentText:
-						text.WriteString(resultPart.Text)
-					case ai.ContentJSON:
-						text.Write(resultPart.JSON)
-					case ai.ContentExtension:
-						// Optional metadata has no model-visible content.
-					default:
-						return nil, fmt.Errorf("%w: Gemini result %q", ai.ErrUnsupportedCapability, resultPart.Kind)
-					}
+				responseParts, err := functionResponseParts(part.ToolResult, siblingMedia)
+				if err != nil {
+					return nil, err
 				}
-				key := "output"
-				if r.IsError {
-					key = "error"
+				parts = append(parts, responseParts...)
+			case ai.ContentMedia:
+				if m.Role != ai.RoleUser {
+					return nil, mediainput.Unsupported("gemini", "media is only accepted in user messages and tool results, not %s messages", m.Role)
 				}
-				parts = append(parts, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: r.ToolCallID, Name: r.Name, Response: map[string]any{key: text.String()}}})
+				media, err := mediaPart(part.Media)
+				if err != nil {
+					return nil, err
+				}
+				media.ThoughtSignature = signature
+				parts = append(parts, media)
 			case ai.ContentExtension:
 				if len(signature) > 0 {
 					parts = append(parts, &genai.Part{ThoughtSignature: signature})

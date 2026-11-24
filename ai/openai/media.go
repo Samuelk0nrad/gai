@@ -2,14 +2,11 @@ package openai
 
 import (
 	"cmp"
-	"encoding/base64"
-	"encoding/xml"
 	"fmt"
-	"net/url"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/mediainput"
 	"github.com/openai/openai-go/packages/param"
 	"github.com/openai/openai-go/responses"
 )
@@ -29,159 +26,47 @@ import (
 // Other MIME types, other URI schemes and text media by URL return
 // *ai.UnsupportedContentError. Nothing is dropped.
 
-const (
-	mimePDF         = "application/pdf"
-	defaultFilename = "file.pdf"
-)
-
-var openAIImageMIMETypes = map[string]bool{
-	"image/jpeg": true,
-	"image/png":  true,
-	"image/webp": true,
-	"image/gif":  true,
-}
+const defaultFilename = "file.pdf"
 
 func unsupportedMedia(format string, args ...any) error {
-	return &ai.UnsupportedContentError{Provider: "openai", Kind: ai.ContentMedia, Detail: fmt.Sprintf(format, args...)}
-}
-
-// normalizeMIME lowercases a MIME type, drops parameters, and maps the
-// image/jpg alias to image/jpeg.
-func normalizeMIME(mimeType string) string {
-	mimeType, _, _ = strings.Cut(mimeType, ";")
-	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
-	if mimeType == "image/jpg" {
-		return "image/jpeg"
-	}
-	return mimeType
-}
-
-func partsContainMedia(parts []ai.ContentPart) bool {
-	for _, part := range parts {
-		if part.Kind == ai.ContentMedia {
-			return true
-		}
-	}
-	return false
+	return mediainput.Unsupported("openai", format, args...)
 }
 
 // mediaInputContent maps one media part to a Responses input content item.
 func mediaInputContent(media *ai.MediaPart) (responses.ResponseInputContentUnionParam, error) {
-	mimeType := normalizeMIME(media.MIMEType)
-	switch {
-	case openAIImageMIMETypes[mimeType]:
-		imageURL, err := mediaURL(media, mimeType, "image")
-		if err != nil {
-			return responses.ResponseInputContentUnionParam{}, err
+	source, err := mediainput.Resolve("openai", media)
+	if err != nil {
+		return responses.ResponseInputContentUnionParam{}, err
+	}
+	switch source.Kind {
+	case mediainput.KindImage:
+		imageURL := source.URL
+		if imageURL == "" {
+			imageURL = source.DataURL()
 		}
 		return responses.ResponseInputContentUnionParam{OfInputImage: &responses.ResponseInputImageParam{
 			Detail:   responses.ResponseInputImageDetailAuto,
 			ImageURL: param.NewOpt(imageURL),
 		}}, nil
-	case mimeType == mimePDF:
-		fileURL, err := mediaURL(media, mimeType, "PDF")
-		if err != nil {
-			return responses.ResponseInputContentUnionParam{}, err
-		}
+	case mediainput.KindPDF:
 		file := &responses.ResponseInputFileParam{}
-		if strings.HasPrefix(fileURL, "data:") {
-			file.FileData = param.NewOpt(fileURL)
-			file.Filename = param.NewOpt(cmp.Or(strings.TrimSpace(media.Name), defaultFilename))
+		if source.URL == "" {
+			file.FileData = param.NewOpt(source.DataURL())
+			file.Filename = param.NewOpt(cmp.Or(source.Name, defaultFilename))
 		} else {
-			file.FileURL = param.NewOpt(fileURL)
-			if name := strings.TrimSpace(media.Name); name != "" {
-				file.Filename = param.NewOpt(name)
+			file.FileURL = param.NewOpt(source.URL)
+			if source.Name != "" {
+				file.Filename = param.NewOpt(source.Name)
 			}
 		}
 		return responses.ResponseInputContentUnionParam{OfInputFile: file}, nil
-	case ai.IsTextMIME(mimeType):
-		text, err := textMediaInput(media, mimeType)
+	default: // mediainput.KindText; Resolve rejects other kinds.
+		text, err := source.TextFile("openai")
 		if err != nil {
 			return responses.ResponseInputContentUnionParam{}, err
 		}
 		return responses.ResponseInputContentParamOfInputText(text), nil
-	default:
-		return responses.ResponseInputContentUnionParam{}, unsupportedMedia("MIME type %q (supported: image/jpeg, image/png, image/webp, image/gif, application/pdf, text/*, application/json)", media.MIMEType)
 	}
-}
-
-// mediaURL returns an http(s) URL or a base64 data URL with the canonical
-// MIME type for an image or PDF.
-func mediaURL(media *ai.MediaPart, mimeType, what string) (string, error) {
-	if len(media.Data) > 0 {
-		return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(media.Data), nil
-	}
-	parsed, err := url.Parse(media.URI)
-	if err != nil {
-		return "", unsupportedMedia("invalid %s URI", what)
-	}
-	switch strings.ToLower(parsed.Scheme) {
-	case "http", "https":
-		if parsed.Host == "" {
-			return "", unsupportedMedia("%s URL requires a host", what)
-		}
-		return media.URI, nil
-	case "data":
-		uriMIME, payload, ok := parseBase64DataURI(media.URI)
-		if !ok || normalizeMIME(uriMIME) != mimeType {
-			return "", unsupportedMedia("%s data URI must be base64 encoded and match the part MIME type", what)
-		}
-		return "data:" + mimeType + ";base64," + payload, nil
-	default:
-		return "", unsupportedMedia("%s URI scheme %q (use http, https, data, or inline bytes)", what, parsed.Scheme)
-	}
-}
-
-// parseBase64DataURI splits "data:<mime>;base64,<payload>".
-func parseBase64DataURI(uri string) (mimeType, payload string, ok bool) {
-	if len(uri) < len("data:") || !strings.EqualFold(uri[:len("data:")], "data:") {
-		return "", "", false
-	}
-	header, payload, found := strings.Cut(uri[len("data:"):], ",")
-	if !found {
-		return "", "", false
-	}
-	mimeType, isBase64 := strings.CutSuffix(strings.ToLower(header), ";base64")
-	if !isBase64 {
-		return "", "", false
-	}
-	return mimeType, payload, true
-}
-
-// textMediaInput renders text media as input text. The file name and MIME
-// type are kept so the model can tell the file apart from the message.
-func textMediaInput(media *ai.MediaPart, mimeType string) (string, error) {
-	data := media.Data
-	if len(data) == 0 {
-		uriMIME, payload, ok := parseBase64DataURI(media.URI)
-		if !ok {
-			return "", unsupportedMedia("text media %q must be inline data or a base64 data URI; OpenAI does not fetch text files by URL", mimeType)
-		}
-		if normalizeMIME(uriMIME) != mimeType {
-			return "", unsupportedMedia("text data URI must match the part MIME type")
-		}
-		decoded, err := base64.StdEncoding.DecodeString(payload)
-		if err != nil {
-			return "", unsupportedMedia("text data URI is not valid base64")
-		}
-		data = decoded
-	}
-	if !utf8.Valid(data) {
-		return "", unsupportedMedia("text media %q is not valid UTF-8", mimeType)
-	}
-	var out strings.Builder
-	out.WriteString("<file")
-	if name := strings.TrimSpace(media.Name); name != "" {
-		out.WriteString(` name="`)
-		_ = xml.EscapeText(&out, []byte(name))
-		out.WriteString(`"`)
-	}
-	out.WriteString(` mime_type="`)
-	_ = xml.EscapeText(&out, []byte(mimeType))
-	out.WriteString("\">\n")
-	out.Write(data)
-	out.WriteString("\n</file>")
-	return out.String(), nil
 }
 
 // toolResultContent maps a tool result that contains media to the array form

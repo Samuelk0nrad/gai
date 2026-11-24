@@ -7,6 +7,7 @@ import (
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/mediainput"
 	"github.com/Samuelk0nrad/gai/internal/streamtext"
 	"github.com/openai/openai-go/packages/param"
 	"github.com/openai/openai-go/responses"
@@ -326,7 +327,7 @@ func mapResponsesMessages(messages []ai.Message) (responses.ResponseInputParam, 
 		// A user message with media sends each run of text, JSON and media
 		// as one message item with a content list. Text-only messages keep
 		// one string item per part.
-		hasMedia := partsContainMedia(message.Parts)
+		hasMedia := mediainput.ContainsMedia(message.Parts)
 		if hasMedia && message.Role != ai.RoleUser {
 			return nil, unsupportedMedia("media is only accepted in user messages and tool results, not %s messages", message.Role)
 		}
@@ -392,7 +393,7 @@ func mapResponsesMessages(messages []ai.Message) (responses.ResponseInputParam, 
 				}
 				input = append(input, responses.ResponseInputItemParamOfFunctionCall(string(call.Args), call.ID, call.Name))
 			case ai.ContentToolResult:
-				if partsContainMedia(part.ToolResult.Parts) {
+				if mediainput.ContainsMedia(part.ToolResult.Parts) {
 					output, err := toolResultContent(part.ToolResult)
 					if err != nil {
 						return nil, err

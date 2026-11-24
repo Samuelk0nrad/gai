@@ -280,9 +280,9 @@ func mapNativeMessages(messages []ai.Message) ([]chatMessageRequest, error) {
 				message.Content = append(message.Content, chunk)
 			case ai.ContentMedia:
 				if m.Role != ai.RoleUser {
-					return nil, &ai.UnsupportedContentError{Provider: "mistral", Kind: ai.ContentMedia, Detail: "images are only accepted in user messages"}
+					return nil, &ai.UnsupportedContentError{Provider: "mistral", Kind: ai.ContentMedia, Detail: fmt.Sprintf("media is only accepted in user messages and tool results, not %s messages", m.Role)}
 				}
-				chunk, err := imageChunk(part.Media)
+				chunk, err := mediaChunk(part.Media)
 				if err != nil {
 					return nil, err
 				}
@@ -294,11 +294,11 @@ func mapNativeMessages(messages []ai.Message) ([]chatMessageRequest, error) {
 				}
 				message.ToolCalls = append(message.ToolCalls, chatMessageToolCall{ID: c.ID, Type: "function", Function: chatToolCallFunction{Name: c.Name, Arguments: string(c.Args)}})
 			case ai.ContentToolResult:
-				content, err := canonicalResultText(part.ToolResult)
+				content, err := toolResultContent(part.ToolResult)
 				if err != nil {
 					return nil, err
 				}
-				out = append(out, chatMessageRequest{Role: "tool", Content: textContent(content), ToolCallID: part.ToolResult.ToolCallID})
+				out = append(out, chatMessageRequest{Role: "tool", Content: content, ToolCallID: part.ToolResult.ToolCallID})
 			case ai.ContentExtension:
 			default:
 				return nil, fmt.Errorf("%w: Mistral content %q", ai.ErrUnsupportedCapability, part.Kind)

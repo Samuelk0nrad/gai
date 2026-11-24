@@ -164,12 +164,15 @@ facts, adaptive thinking and effort levels, prompt caching, refusals and
 server-side fallbacks, and mid-conversation system messages.
 
 The [OpenAI provider guide](docs/providers/openai.md) documents image, PDF and
-text-file input and hosted tools on the Responses transport. [Hosted tools and citations](docs/hosted-tools.md)
+text-file input and hosted tools on the Responses transport. The
+[Anthropic](docs/providers/anthropic.md), [Gemini](docs/providers/gemini.md)
+and [Mistral](docs/providers/mistral.md) guides document their media input.
+[Hosted tools and citations](docs/hosted-tools.md)
 documents how OpenAI, Anthropic and Gemini keep server-run tool calls, such as
 web search, and their citations across rounds.
 
 The [Mistral provider guide](docs/providers/mistral.md) documents reasoning,
-image input, typed native options, and capability boundaries. Models with
+image, PDF and text-file input, typed native options, and capability boundaries. Models with
 documented adjustable reasoning accept only the `none` and `high` efforts. For
 other models, the API decides which effort values are valid. Some reasoning
 requests are rejected locally: a reasoning token budget, `none` combined with
