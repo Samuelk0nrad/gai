@@ -85,6 +85,17 @@ func TestTruncateToolResultBytesCutsSuccessfulText(t *testing.T) {
 	}
 }
 
+func TestTruncateToolResultBytesFillsBudgetWhenNoteShrinks(t *testing.T) {
+	// The first estimate keeps 70 bytes, aligned to 67; the note for a two-digit
+	// kept size frees bytes for one more rune, filling 128 exactly with 71.
+	text := "abc" + strings.Repeat("😀", 250)
+	processor, _ := TruncateToolResultBytes(MinTruncateToolResultBytes)
+	result, _ := processor.Process(t.Context(), ToolPolicyInput{}, ToolResult{Text: text})
+	if want := text[:71] + truncationNote(71, len(text)); result.Text != want || len(want) != MinTruncateToolResultBytes {
+		t.Fatalf("result=%q (%d bytes) want %q", result.Text, len(result.Text), want)
+	}
+}
+
 func TestTruncateToolResultBytesRecutKeepsOriginalSize(t *testing.T) {
 	text := strings.Repeat("a€😀é", 100000)
 	large, _ := TruncateToolResultBytes(16 * 1024)
