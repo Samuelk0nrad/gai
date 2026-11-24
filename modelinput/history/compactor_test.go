@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Samuelk0nrad/gai/agent/summary"
 	"math"
 	"reflect"
 	"strings"
@@ -46,7 +47,7 @@ func oldHistory() *history.HistoryState {
 }
 func newCompactor(t *testing.T, store history.HistoryStore, model ai.Model) *history.Compactor {
 	t.Helper()
-	c, err := history.NewCompactor("session", store, history.CompactorDefinition{Model: model, Amount: 1})
+	c, err := history.NewCompactor("session", store, history.CompactorDefinition{Summarizer: summary.New(model), Amount: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +216,7 @@ func TestCompactorReportsCommittedRevisionAndRemainingPressure(t *testing.T) {
 		store := &sharedHistoryStore{state: oldHistory()}
 		initial, _ := store.LoadHistory(t.Context(), "session")
 		observations := &compactionObservations{}
-		c, err := history.NewCompactor("session", store, history.CompactorDefinition{Model: summaryModel(), Amount: 1, ObservationSink: observations})
+		c, err := history.NewCompactor("session", store, history.CompactorDefinition{Summarizer: summary.New(summaryModel()), Amount: 1, ObservationSink: observations})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -260,7 +261,7 @@ func TestCompactionRejectsConcurrentAppend(t *testing.T) {
 	}}
 	errorsOut := make(chan error, 1)
 	observations := &compactionObservations{}
-	c, err := history.NewCompactor("session", store, history.CompactorDefinition{Model: model, Amount: 1, ObservationSink: observations})
+	c, err := history.NewCompactor("session", store, history.CompactorDefinition{Summarizer: summary.New(model), Amount: 1, ObservationSink: observations})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +370,7 @@ func TestCompactionFailuresDoNotPersistCandidates(t *testing.T) {
 			model := summaryModel()
 			wrapper := failingStore{HistoryStore: store}
 			observations := &compactionObservations{}
-			def := history.CompactorDefinition{Amount: 1, Model: model, ObservationSink: observations}
+			def := history.CompactorDefinition{Amount: 1, Summarizer: summary.New(model), ObservationSink: observations}
 			want := failure
 			wantEvent := ""
 			wantFields := map[string]any{"session_id": "session", "counter_id": (ai.TextTokenEstimator{}).ID()}

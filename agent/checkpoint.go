@@ -582,7 +582,7 @@ func validateDurability(a *Agent, input RunInput) error {
 
 // validateDurableOverrides keeps live dependencies in the compatible Definition.
 func validateDurableOverrides(o *ExecutionOverrides) error {
-	if o != nil && (o.Model != nil || o.Tools != nil || o.ToolPolicy.Set || o.ToolApprovalResolver.Set || o.TokenCounter.Set || o.ToolResultProcessor.Set || o.RetryPolicy.Set) {
+	if o != nil && (o.Model != nil || o.Tools != nil || o.ToolPolicy.Set || o.ToolApprovalResolver.Set || o.TokenCounter.Set || o.ToolResultProcessor.Set || o.RetryPolicy.Set || (o.HistoryCompaction.Value != nil && o.HistoryCompaction.Value.Summarizer != nil)) {
 		return fmt.Errorf("%w: durable dependencies and retry policy must be registered in Definition", ErrDurability)
 	}
 	return nil

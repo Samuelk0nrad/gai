@@ -237,7 +237,19 @@ func (l *Loop) buildAttemptRequest(ctx context.Context, toolDefinitions []ai.Too
 	if err != nil {
 		return ai.AIRequest{}, err
 	}
+	settings := l.requestSettings(toolDefinitions, requiredToolCallSatisfied)
+	settings.Messages = request.Messages
+	// Snapshot the canonical request after applying execution settings.
+	request = settings.Copy()
+	if err := request.Validate(); err != nil {
+		return ai.AIRequest{}, err
+	}
+	return request, nil
+}
 
+// requestSettings returns the execution settings of a model request, without
+// messages.
+func (l *Loop) requestSettings(toolDefinitions []ai.ToolDefinition, requiredToolCallSatisfied bool) ai.AIRequest {
 	toolChoice := l.ToolChoice
 	if toolChoice.Mode == ai.ToolChoiceRequired && requiredToolCallSatisfied {
 		toolChoice = ai.ToolChoice{Mode: ai.ToolChoiceAuto}
@@ -247,17 +259,22 @@ func (l *Loop) buildAttemptRequest(ctx context.Context, toolDefinitions []ai.Too
 		// choice is likewise required when native tool definitions are absent.
 		toolChoice = ai.ToolChoice{}
 	}
-	request.MaxTokens = l.MaxTokens
-	request.Tools = toolDefinitions
-	request.ToolChoice = toolChoice
-	request.ResponseFormat = l.ResponseFormat
-	request.Reasoning = l.Reasoning
-	// Snapshot the canonical request after applying execution settings.
-	request = request.Copy()
-	if err := request.Validate(); err != nil {
-		return ai.AIRequest{}, err
+	return ai.AIRequest{
+		MaxTokens:      l.MaxTokens,
+		Tools:          toolDefinitions,
+		ToolChoice:     toolChoice,
+		ResponseFormat: l.ResponseFormat,
+		Reasoning:      l.Reasoning,
 	}
-	return request, nil
+}
+
+// RequestTemplateSetter is an optional PromptBuilder capability. The loop
+// calls it once per run, before BuildContext, with the run's request settings
+// and no messages, and with the run's resolved request budget. The tool choice
+// is the one that applies once any required tool call is satisfied, which is
+// the setting a completed run's final request carries.
+type RequestTemplateSetter interface {
+	SetRequestTemplate(settings ai.AIRequest, budget ai.RequestBudgetConfig)
 }
 
 func userMessageForIteration(promptBuilder modelinput.PromptBuilder, index int) *ai.Message {

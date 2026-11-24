@@ -19,6 +19,7 @@ type primaryAccumulator struct {
 	errs             []error
 	canceled         bool
 	cancelErr        error
+	transcript       *ai.AIRequest
 }
 
 func (a *primaryAccumulator) recordOutput(event Event) {
@@ -68,6 +69,7 @@ func (a *primaryAccumulator) result() AgentResult {
 		AttemptedTokens: cloneTokens(a.attempted),
 		AttemptedText:   tokenText(a.attempted),
 		Messages:        cloneMessages(messages),
+		Transcript:      a.transcript,
 		Iterations:      cloneIterations(a.accepted),
 		Usage:           iterationUsage(a.accepted),
 		BilledUsage:     a.billed,
@@ -182,6 +184,8 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 				terminal = Event{Type: EventStageFinish, Source: source, StageOutcome: StagePaused, IterationCount: low.IterationCount, AttemptID: low.AttemptID}
 			case loop.EventDone:
 				terminal = Event{Type: EventStageFinish, Source: source, StageOutcome: StageSucceeded}
+				// The loop built the transcript for this event alone.
+				acc.transcript = low.Transcript
 			}
 			if terminal.Type != "" {
 				terminal.GenerationID = low.GenerationID
@@ -216,6 +220,9 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 			}
 		}
 		primary := acc.result()
+		if compaction, ok := w.loop.PromptBuilder.(*compactingPromptBuilder); ok {
+			primary.HistoryCompaction = compaction.compactionReports()
+		}
 		if w.durability != nil {
 			if err := w.finishDurablePrimary(ctx, primary, terminal.StageOutcome == StagePaused); err != nil {
 				primary.Errors = append(primary.Errors, err)
@@ -227,7 +234,12 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 		if terminal.StageOutcome == StagePaused {
 			w.result.Status = StatusPaused
 		}
-		w.result.Primary = cloneAgentResult(primary)
+		// The transcript was built for this result alone, so only Result
+		// copies it.
+		stored := primary
+		stored.Transcript = nil
+		w.result.Primary = cloneAgentResult(stored)
+		w.result.Primary.Transcript = primary.Transcript
 		w.result.Usage = primary.Usage
 		w.result.BilledUsage = primary.BilledUsage
 		w.result.Errors = append([]error(nil), primary.Errors...)

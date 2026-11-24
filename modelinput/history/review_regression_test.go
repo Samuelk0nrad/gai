@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Samuelk0nrad/gai/agent/summary"
 	"reflect"
 	"strings"
 	"sync"
@@ -33,7 +34,7 @@ func TestPlainSavedAndGeneratedSummariesFitTightBudget(t *testing.T) {
 				if generated {
 					store.state.Turns = []modelinput.Turn{{ID: "old", Count: 1, UserMessage: &modelinput.StoredMessage{Message: ai.TextMessage(ai.RoleUser, strings.Repeat("old ", 40))}}}
 					model = &mocks.MockModel{Responses: []mocks.MockModelResponse{{Res: ai.AIResponse{Message: ai.TextMessage(ai.RoleAssistant, "x")}}}}
-					compactor, err := history.NewCompactor("session", store, history.CompactorDefinition{Amount: 1, Model: model})
+					compactor, err := history.NewCompactor("session", store, history.CompactorDefinition{Amount: 1, Summarizer: summary.New(model)})
 					if err != nil {
 						t.Fatal(err)
 					}

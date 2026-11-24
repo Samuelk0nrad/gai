@@ -108,6 +108,10 @@ func (s *chatService) Run(ctx context.Context, sessionID, text string) (agent.Wo
 		return result, fmt.Errorf("%w: current input and output reserve exceed window", ai.ErrRequestBudgetExceeded)
 	}
 	historyBudget := s.requestWindow - outputReserve - fixed.InputTokens
+	// This example compacts before the run with a separate summary prompt.
+	// To reuse the provider's prompt cache instead, compact after persisting
+	// the turn: history.WithPrefix(result.Primary.Transcript) with
+	// history.WithExpectedRevision for the committed revision.
 	if s.compaction != nil {
 		definition := *s.compaction
 		definition.TokenCounter = counter

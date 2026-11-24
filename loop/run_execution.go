@@ -137,7 +137,7 @@ func (l *Loop) executeRun(ctx context.Context, events chan<- Event) {
 			return
 		}
 		if l.durable.finished() {
-			_ = sendEvent(run.ctx, events, DoneEvent())
+			_ = sendEvent(run.ctx, events, run.doneEvent(nil))
 			return
 		}
 		start = l.durable.state.NextIteration - 1
@@ -199,6 +199,9 @@ func (r *runExecution) prepareValidatedRun() bool {
 			sendLoopError(r.ctx, r.events, r.state, err)
 		}
 		return false
+	}
+	if setter, ok := r.owner.PromptBuilder.(RequestTemplateSetter); ok {
+		setter.SetRequestTemplate(r.owner.requestSettings(r.toolDefinitions, true).Copy(), r.budget)
 	}
 	if _, err = r.owner.PromptBuilder.BuildContext(r.ctx); err != nil {
 		if cancelErr := cancellationError(r.ctx, err); cancelErr != nil {
@@ -292,6 +295,10 @@ func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferToken
 	attempt.modelName = ai.ModelName(attempt.model)
 	attempt.counterID = ai.RequestEstimateID + ":" + r.counter.ID()
 	activeBudget := r.budget.Limit > 0 || r.budget.InputLimit > 0 || r.budget.Mode == ai.RequestCountAccurate
+	// The request also becomes the run's transcript when this attempt ends it.
+	// Only a budget checkpoint needs an independent copy; the transcript is
+	// copied once, when the run ends.
+	attempt.request = request
 	if activeBudget {
 		attempt.request = request.Copy()
 	}
@@ -595,7 +602,7 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		attempt.cancelAttempt()
 		attempt.state.markFinal()
 		attempt.finish(nil)
-		if err := sendEvent(r.ctx, r.events, DoneEvent()); err != nil {
+		if err := sendEvent(r.ctx, r.events, r.doneEvent(attempt)); err != nil {
 			if cancelErr := cancellationError(r.ctx, err); cancelErr != nil {
 				sendLoopCanceled(r.ctx, r.events, r.state, cancelErr)
 			}
@@ -668,4 +675,25 @@ func combineCancel(cancel ...context.CancelFunc) context.CancelFunc {
 			}
 		}
 	}
+}
+
+// doneEvent reports completion with the run's transcript: the request the next
+// generation would send, which is the final request plus every accepted
+// message, including the final answer, with the final settings. An attempt that
+// generated in this execution supplies it without rebuilding the prompt; a
+// resumed pending plan has no request, so the prompt is rendered again.
+func (r *runExecution) doneEvent(attempt *attemptExecution) Event {
+	event := DoneEvent()
+	if attempt != nil && len(attempt.request.Messages) > 0 {
+		transcript := r.owner.requestSettings(r.toolDefinitions, r.requiredToolCallSatisfied)
+		messages := attempt.request.Messages
+		transcript.Messages = append(messages[:len(messages):len(messages)], attempt.iteration.DeltaMessages()...)
+		transcript = transcript.Copy()
+		if transcript.Validate() == nil {
+			event.Transcript = &transcript
+		}
+	} else if transcript, err := r.owner.buildAttemptRequest(r.ctx, r.toolDefinitions, r.requiredToolCallSatisfied); err == nil {
+		event.Transcript = &transcript
+	}
+	return event
 }

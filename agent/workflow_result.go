@@ -16,12 +16,21 @@ type AgentResult struct {
 	AttemptedTokens []ai.Token
 	AttemptedText   string
 	Messages        []ai.Message
-	Iterations      []loop.Iteration
-	Usage           ai.Usage
-	BilledUsage     ai.Usage
-	Errors          []error
-	Canceled        bool
-	CancellationErr error
+	// Transcript is the request the next generation would have sent: the
+	// stage's prompt, every accepted message including the final answer, and
+	// the final request settings. Pass it to history.WithPrefix to summarize
+	// history from the run's cached prompt. It is nil unless the stage
+	// completed in this execution.
+	Transcript *ai.AIRequest
+	// HistoryCompaction reports run-start history compaction, one entry per
+	// compacted history source.
+	HistoryCompaction []HistoryCompactionReport
+	Iterations        []loop.Iteration
+	Usage             ai.Usage
+	BilledUsage       ai.Usage
+	Errors            []error
+	Canceled          bool
+	CancellationErr   error
 }
 
 // StageResult is the named result produced by agent middleware.

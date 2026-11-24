@@ -36,27 +36,23 @@ func selectHistory(ctx context.Context, state *HistoryState, tokenBudget int, co
 			return selected, err
 		}
 		// Count the same prefixed summary message returned in the prompt.
-		summaryParts := ai.TextParts("Conversation summary:\n" + state.Summary.Content.Text)
-		if len(state.Summary.Content.Extensions) > 0 {
-			// Opaque state belongs to the original part, whose text must stay
-			// unchanged. Only plain summaries can coalesce the prefix.
-			summaryParts = ai.TextParts("Conversation summary:\n")
-			summaryParts = append(summaryParts, ai.CloneParts([]ai.ContentPart{state.Summary.Content})...)
-		}
-		summaryPart := Part{Messages: []ai.Message{{Role: ai.RoleUser, Parts: summaryParts}}}
+		summaryPart := Part{Messages: []ai.Message{summaryMessage(state.Summary)}}
 		summaryTokenCount, err := summaryPart.Tokens(ctx, counter)
 		if err != nil {
 			selected.summaryFailed = true
 			return selected, err
 		}
 		if selected.tokens+summaryTokenCount > tokenBudget {
+			// The summary is the oldest history, so it is trimmed first. The
+			// newest turns that fit are still selected: losing them too would
+			// leave the prompt with no conversation at all.
 			selected.budgetReached = true
-			return selected, nil
+		} else {
+			selected.summaryIncluded = true
+			selected.part.Messages = append(selected.part.Messages, summaryPart.Messages...)
+			selected.tokens += summaryTokenCount
+			selected.summaryTokens = summaryTokenCount
 		}
-		selected.summaryIncluded = true
-		selected.part.Messages = append(selected.part.Messages, summaryPart.Messages...)
-		selected.tokens += summaryTokenCount
-		selected.summaryTokens = summaryTokenCount
 	}
 
 	firstIncluded := len(turns)
@@ -101,7 +97,7 @@ func selectHistory(ctx context.Context, state *HistoryState, tokenBudget int, co
 		}
 	}
 
-	selected.budgetReached = budgetReached
+	selected.budgetReached = selected.budgetReached || budgetReached
 	return selected, nil
 }
 

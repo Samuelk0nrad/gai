@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Samuelk0nrad/gai/agent/summary"
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/modelinput"
 )
@@ -62,61 +61,79 @@ func NewSummary(id, startTurnID, endTurnID string, startTurnCount, endTurnCount 
 	}
 }
 
+// summaryRequest carries the per-operation summary settings.
+type summaryRequest struct {
+	amount         float32
+	maxTokens      int
+	prefix         *ai.AIRequest
+	responseFormat SummaryResponseFormat
+	requestBudget  ai.RequestBudgetConfig
+	counter        ai.TokenCounter
+}
+
+// summaryOutcome is a summarized candidate and the summary call's accounting.
+type summaryOutcome struct {
+	state           *HistoryState
+	summarizedTurns int
+	usage           ai.Usage
+	usageReported   bool
+}
+
 // summarizeHistory creates a detached replacement without accessing a store.
-func summarizeHistory(ctx context.Context, state *HistoryState, summarizer *summary.Summarizer, counter ai.TokenCounter, amount float32, summaryMaxTokens int, obs *historyObserver) (*HistoryState, bool, error) {
+func summarizeHistory(ctx context.Context, state *HistoryState, summarizer Summarizer, req summaryRequest, obs *historyObserver) (summaryOutcome, bool, error) {
 	var err error
 	if state == nil {
 		err = ErrHistoryStateRequired
-		return nil, false, err
+		return summaryOutcome{}, false, err
 	}
 	if summarizer == nil {
 		err = ErrSummarizerMissing
-		return nil, false, err
+		return summaryOutcome{}, false, err
+	}
+	counter := req.counter
+	if counter == nil {
+		counter = ai.TextTokenEstimator{}
 	}
 	obs.ObserveState(len(state.Turns), state.Summary != nil)
 	obs.SetTokenCounterID(counter.ID())
 	if len(state.Turns) == 0 {
 		obs.SummarySkippedNoTurns(ctx)
-		return nil, false, nil
+		return summaryOutcome{}, false, nil
 	}
 
 	state = state.Clone()
 	state.Turns = sortTurnsByCount(state.Turns)
 
-	var builder strings.Builder
-
-	if state.Summary != nil {
-		text, renderErr := ai.RenderMessages(ctx, []ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{state.Summary.Content}}})
-		if renderErr != nil {
-			err = renderErr
-			return nil, false, err
-		}
-		builder.WriteString(text)
-		builder.WriteString("\n")
-	}
-
-	summarizedTurnCount := summaryTurnCount(len(state.Turns), amount)
+	summarizedTurnCount := summaryTurnCount(len(state.Turns), req.amount)
 	if summarizedTurnCount == 0 {
 		obs.SummarySkippedAmountZero(ctx)
-		return nil, false, nil
+		return summaryOutcome{}, false, nil
+	}
+	res, err := summarizer.SummarizeHistory(ctx, SummaryInput{
+		Prefix:          req.prefix,
+		PreviousSummary: state.Summary,
+		Turns:           state.Turns[:summarizedTurnCount],
+		Kept:            state.Turns[summarizedTurnCount:],
+		MaxTokens:       req.maxTokens,
+		ResponseFormat:  req.responseFormat,
+		RequestBudget:   req.requestBudget,
+		Counter:         counter,
+	})
+	// A failed call can still have been billed; keep its usage.
+	billed := summaryOutcome{usage: res.Usage, usageReported: res.UsageReported}
+	if err != nil {
+		return billed, false, err
+	}
+	if res.FoldedTurns < 0 || res.FoldedTurns > summarizedTurnCount {
+		return billed, false, fmt.Errorf("%w: summarizer folded %d of %d turns", ErrInvalidSummaryReply, res.FoldedTurns, summarizedTurnCount)
+	}
+	if res.FoldedTurns > 0 {
+		summarizedTurnCount = res.FoldedTurns
+	}
+	if strings.TrimSpace(res.Text) == "" {
+		return billed, false, fmt.Errorf("%w: empty summary", ErrInvalidSummaryReply)
 	}
 	summarizedTurns := state.Turns[:summarizedTurnCount]
-	for i := range summarizedTurns {
-		if err = writeTurn(ctx, &builder, &summarizedTurns[i]); err != nil {
-			return nil, false, err
-		}
-	}
-
-	req := summary.Request{
-		ID:        "history",
-		Text:      builder.String(),
-		MaxTokens: summaryMaxTokens,
-	}
-
-	res, err := summarizer.Summarize(ctx, req)
-	if err != nil {
-		return nil, false, err
-	}
 
 	firstTurn := summarizedTurns[0]
 	lastTurn := summarizedTurns[len(summarizedTurns)-1]
@@ -125,7 +142,7 @@ func summarizeHistory(ctx context.Context, state *HistoryState, summarizer *summ
 		EndTurnID:      lastTurn.ID,
 		StartTurnCount: firstTurn.Count,
 		EndTurnCount:   lastTurn.Count,
-		Content:        ai.ContentPart{Kind: ai.ContentText, Text: res},
+		Content:        ai.ContentPart{Kind: ai.ContentText, Text: res.Text},
 	}
 	if state.Summary != nil {
 		nextSummary.StartTurnID = state.Summary.StartTurnID
@@ -134,7 +151,7 @@ func summarizeHistory(ctx context.Context, state *HistoryState, summarizer *summ
 	tokenCount, err := counter.CountTokens(ctx, nextSummary.Content.Text)
 	if err != nil {
 		obs.SummaryTokenCountFailed(ctx, nextSummary, err)
-		return nil, false, err
+		return billed, false, err
 	}
 	obs.SummaryGenerated(ctx, nextSummary, tokenCount, summarizedTurnCount, len(state.Turns)-summarizedTurnCount, state.Summary != nil)
 
@@ -143,7 +160,29 @@ func summarizeHistory(ctx context.Context, state *HistoryState, summarizer *summ
 		Summary:       nextSummary,
 		Turns:         append([]modelinput.Turn(nil), state.Turns[summarizedTurnCount:]...),
 	}
-	return nextState, true, nil
+	return summaryOutcome{state: nextState, summarizedTurns: summarizedTurnCount, usage: res.Usage, usageReported: res.UsageReported}, true, nil
+}
+
+// RenderSummaryText renders an earlier summary and turns as one text document,
+// the input of summarizers with their own prompt. Provider state, such as
+// reasoning items, signatures, hosted tool calls and citations, has no text
+// form and is dropped. Media and unknown required state are rejected.
+func RenderSummaryText(ctx context.Context, previous *Summary, turns []modelinput.Turn) (string, error) {
+	var builder strings.Builder
+	if previous != nil {
+		text, err := ai.RenderMessages(ctx, []ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{previous.Content}}})
+		if err != nil {
+			return "", err
+		}
+		builder.WriteString(text)
+		builder.WriteString("\n")
+	}
+	for i := range turns {
+		if err := writeTurn(ctx, &builder, &turns[i]); err != nil {
+			return "", err
+		}
+	}
+	return builder.String(), nil
 }
 
 func summaryTurnCount(turnCount int, amount float32) int {

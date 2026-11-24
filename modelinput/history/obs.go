@@ -363,6 +363,7 @@ func (o *historyObserver) CompactionConflict(ctx context.Context, conflict *Revi
 }
 
 func (o *historyObserver) CompactionFinished(ctx context.Context, result CompactionResult, err error) {
-	o.operation.Set(attribute.Bool("context.history.state_saved", result.Changed), attribute.Bool("context.history.pressure_remaining", result.PressureRemaining))
-	o.emit(ctx, "history_compactor_finished", map[string]any{"session_id": o.sessionID, "changed": result.Changed, "pressure_remaining": result.PressureRemaining}, err)
+	o.operation.Set(attribute.Bool("context.history.state_saved", result.Changed), attribute.Bool("context.history.pressure_remaining", result.PressureRemaining),
+		attribute.Bool("context.history.early", result.Early))
+	o.emit(ctx, "history_compactor_finished", map[string]any{"session_id": o.sessionID, "changed": result.Changed, "pressure_remaining": result.PressureRemaining, "early": result.Early}, err)
 }

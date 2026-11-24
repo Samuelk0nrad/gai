@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/Samuelk0nrad/gai/agent"
+	"github.com/Samuelk0nrad/gai/agent/summary"
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/loop"
 	"github.com/Samuelk0nrad/gai/modelinput"
@@ -59,8 +62,10 @@ func autoText(text string) []ai.Token {
 	return []ai.Token{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: text}}}
 }
 
+// autoHistoryDefinition uses the separate text summarizer, so these tests
+// exercise orchestration without the continuation request budget.
 func autoHistoryDefinition(model ai.Model, store history.HistoryReader) agent.Definition {
-	return agent.Definition{Model: model, AutoCompactHistory: true, TokenCounter: ai.TextTokenEstimator{},
+	return agent.Definition{Model: model, HistoryCompaction: &agent.HistoryCompactionPolicy{Summarizer: summary.New(model)}, TokenCounter: ai.TextTokenEstimator{},
 		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 			return modelinput.New(modelinput.Definition{TokenBudget: 256, ContextSources: []modelinput.ContextSource{history.NewHistory("s", store)}}), nil
 		},
@@ -107,39 +112,186 @@ func TestAutoCompactHistoryOnlyUnderPressureAndOnlyAtRunStart(t *testing.T) {
 	}
 }
 
-func TestAutoCompactHistoryFailureStopsBeforeAnswer(t *testing.T) {
+func TestAutoCompactHistoryFailureStopsOrContinues(t *testing.T) {
 	failure := errors.New("failed summary")
 	conflict := &history.RevisionConflictError{SessionID: "s", Expected: "1", Actual: "2"}
+	for _, mode := range []agent.HistoryCompactionFailure{agent.HistoryCompactionStop, agent.HistoryCompactionContinue} {
+		for _, tc := range []struct {
+			name                     string
+			loadErr, commitErr, want error
+			summary                  []ai.Token
+			writes, calls            int
+		}{
+			{"load", failure, nil, failure, nil, 0, 0},
+			{"summary", nil, nil, failure, []ai.Token{{Err: failure}}, 0, 1},
+			{"conflict", nil, conflict, conflict, autoText("short"), 1, 1},
+			{"remaining pressure", nil, nil, history.ErrHistoryPressureRemaining, autoText(strings.Repeat("huge summary ", 500)), 1, 1},
+		} {
+			t.Run(fmt.Sprint(mode, "/", tc.name), func(t *testing.T) {
+				store := autoHistory(strings.Repeat("old context ", 500))
+				store.loadErr, store.commitErr = tc.loadErr, tc.commitErr
+				model := &scriptedWorkflowModel{scripts: [][]ai.Token{tc.summary, autoText("answer")}}
+				if tc.loadErr != nil {
+					// The failed load leaves no summary call.
+					model.scripts = [][]ai.Token{autoText("answer")}
+				}
+				def := autoHistoryDefinition(model, store)
+				def.HistoryCompaction.OnFailure = mode
+				workflow, err := agent.New(def).NewRun(t.Context(), textRunInput("question"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, err := workflow.Run(t.Context())
+				if mode == agent.HistoryCompactionStop {
+					if !errors.Is(err, tc.want) || result.Text != "" || store.writes != tc.writes || len(model.Requests()) != tc.calls {
+						t.Fatalf("run: err=%v result=%+v writes=%d calls=%d", err, result, store.writes, len(model.Requests()))
+					}
+				} else if tc.loadErr != nil {
+					// Selection reloads after a continued compaction failure,
+					// so a broken store still ends the run there.
+					if !errors.Is(err, failure) || len(model.Requests()) != 0 {
+						t.Fatalf("run: err=%v calls=%d", err, len(model.Requests()))
+					}
+				} else if err != nil || result.Text != "answer" || store.writes != tc.writes || len(model.Requests()) != tc.calls+1 {
+					t.Fatalf("continue: err=%v result=%+v writes=%d calls=%d", err, result, store.writes, len(model.Requests()))
+				}
+				reports := result.Primary.HistoryCompaction
+				if len(reports) != 1 || !errors.Is(reports[0].Err, tc.want) || reports[0].Continued != (mode == agent.HistoryCompactionContinue) || reports[0].Source != "history" {
+					t.Fatalf("reports = %+v", reports)
+				}
+				if tc.want == conflict {
+					var got *history.RevisionConflictError
+					if !errors.As(reports[0].Err, &got) || store.snapshot.Revision != "1" {
+						t.Fatal("conflict lost or storage overwritten")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestHistoryCompactionEarlyFailuresAndCancellation(t *testing.T) {
+	failure := errors.New("summary failed")
+	early := history.CompactionResult{Early: true}
 	for _, tc := range []struct {
-		name                     string
-		loadErr, commitErr, want error
-		summary                  []ai.Token
-		writes, calls            int
+		name      string
+		mode      agent.HistoryCompactionFailure
+		result    history.CompactionResult
+		err       error
+		continued bool
 	}{
-		{"load", failure, nil, failure, nil, 0, 0},
-		{"summary", nil, nil, failure, []ai.Token{{Err: failure}}, 0, 1},
-		{"conflict", nil, conflict, conflict, autoText("short"), 1, 1},
-		{"remaining pressure", nil, nil, history.ErrHistoryPressureRemaining, autoText(strings.Repeat("huge summary ", 500)), 1, 1},
+		// History that still fits never ends the run, even under Stop.
+		{"early failure under stop", agent.HistoryCompactionStop, early, failure, true},
+		{"failure over the allocation under stop", agent.HistoryCompactionStop, history.CompactionResult{}, failure, false},
+		// A deadline the summarizer set for itself is a summary failure.
+		{"summarizer deadline under continue", agent.HistoryCompactionContinue, history.CompactionResult{}, context.DeadlineExceeded, true},
+		// Cancellation ends the run even while the run's context is live.
+		{"summarizer cancellation under continue", agent.HistoryCompactionContinue, history.CompactionResult{}, context.Canceled, false},
+		{"early cancellation", agent.HistoryCompactionStop, early, context.Canceled, false},
+		{"early configuration error", agent.HistoryCompactionStop, early, history.ErrSummaryPrefixRequired, false},
+		// Another writer changed the history, which may no longer fit.
+		{"early conflict under stop", agent.HistoryCompactionStop, early, &history.RevisionConflictError{SessionID: "s", Expected: "1", Actual: "2"}, false},
+		{"early conflict under continue", agent.HistoryCompactionContinue, early, &history.RevisionConflictError{SessionID: "s", Expected: "1", Actual: "2"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store := autoHistory(strings.Repeat("old context ", 500))
-			store.loadErr, store.commitErr = tc.loadErr, tc.commitErr
-			model := &scriptedWorkflowModel{scripts: [][]ai.Token{tc.summary, autoText("must not answer")}}
-			workflow, err := agent.New(autoHistoryDefinition(model, store)).NewRun(t.Context(), textRunInput("question"))
+			probe := &compactionProbe{result: tc.result, err: tc.err}
+			model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}
+			a := agent.New(agent.Definition{Model: model, TokenCounter: ai.TextTokenEstimator{},
+				HistoryCompaction: &agent.HistoryCompactionPolicy{OnFailure: tc.mode, Threshold: .6},
+				Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+					return modelinput.New(modelinput.Definition{TokenBudget: 256, ContextSources: []modelinput.ContextSource{probe}}), nil
+				}})
+			workflow, err := a.NewRun(t.Context(), textRunInput("q"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			result, err := workflow.Run(t.Context())
-			if !errors.Is(err, tc.want) || result.Text != "" || store.writes != tc.writes || len(model.Requests()) != tc.calls {
-				t.Fatalf("run: err=%v result=%+v writes=%d calls=%d", err, result, store.writes, len(model.Requests()))
+			if probe.threshold != .6 {
+				t.Fatalf("threshold = %v", probe.threshold)
 			}
-			if tc.want == conflict {
-				var got *history.RevisionConflictError
-				if !errors.As(err, &got) || store.snapshot.Revision != "1" {
-					t.Fatal("conflict lost or storage overwritten")
+			if tc.continued {
+				if err != nil || result.Text != "answer" {
+					t.Fatalf("run: %v %+v", err, result)
 				}
+			} else if !errors.Is(err, tc.err) || len(model.Requests()) != 0 {
+				t.Fatalf("run: err=%v calls=%d", err, len(model.Requests()))
+			}
+			reports := result.Primary.HistoryCompaction
+			if len(reports) != 1 || reports[0].Continued != tc.continued || !errors.Is(reports[0].Err, tc.err) || reports[0].Result.Early != tc.result.Early {
+				t.Fatalf("reports = %+v", reports)
 			}
 		})
+	}
+}
+
+func TestEarlyCompactionLeavingPressureFollowsStop(t *testing.T) {
+	// The committed summary replaced history that fit with history that does
+	// not, so the fit no longer excuses the failure.
+	probe := &compactionProbe{result: history.CompactionResult{Early: true, Changed: true, PressureRemaining: true, Revision: "2"}}
+	model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}
+	a := agent.New(agent.Definition{Model: model, TokenCounter: ai.TextTokenEstimator{}, HistoryCompaction: &agent.HistoryCompactionPolicy{},
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{TokenBudget: 256, ContextSources: []modelinput.ContextSource{probe}}), nil
+		}})
+	workflow, err := a.NewRun(t.Context(), textRunInput("q"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := workflow.Run(t.Context())
+	if !errors.Is(err, history.ErrHistoryPressureRemaining) || len(model.Requests()) != 0 {
+		t.Fatalf("err=%v calls=%d", err, len(model.Requests()))
+	}
+	if reports := result.Primary.HistoryCompaction; len(reports) != 1 || reports[0].Continued {
+		t.Fatalf("reports = %+v", reports)
+	}
+}
+
+func TestHistoryCompactionTimeoutFailsTheRunWithoutCanceling(t *testing.T) {
+	probe := &compactionProbe{err: fmt.Errorf("summary call: %w", context.DeadlineExceeded)}
+	model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}
+	a := agent.New(agent.Definition{Model: model, TokenCounter: ai.TextTokenEstimator{}, HistoryCompaction: &agent.HistoryCompactionPolicy{},
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{TokenBudget: 256, ContextSources: []modelinput.ContextSource{probe}}), nil
+		}})
+	workflow, err := a.NewRun(t.Context(), textRunInput("q"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := workflow.Run(t.Context())
+	// The summarizer's own deadline is a failure, not a cancellation.
+	if !errors.Is(err, agent.ErrHistoryCompactionTimeout) || errors.Is(err, context.DeadlineExceeded) || result.Canceled || result.Primary.Canceled {
+		t.Fatalf("err=%v canceled=%v", err, result.Canceled)
+	}
+	if reports := result.Primary.HistoryCompaction; len(reports) != 1 || !errors.Is(reports[0].Err, context.DeadlineExceeded) {
+		t.Fatalf("reports = %+v", reports)
+	}
+}
+
+func TestAutoCompactHistoryConfigurationErrorsStopUnderContinue(t *testing.T) {
+	model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}
+	def := autoHistoryDefinition(model, localCountHistoryStore{})
+	def.HistoryCompaction.OnFailure = agent.HistoryCompactionContinue
+	workflow, err := agent.New(def).NewRun(t.Context(), textRunInput("question"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = workflow.Run(t.Context()); !errors.Is(err, history.ErrHistoryStoreRequired) || len(model.Requests()) != 0 {
+		t.Fatalf("err=%v calls=%d", err, len(model.Requests()))
+	}
+}
+
+func TestHistoryCompactionPolicyValidation(t *testing.T) {
+	nan := float32(math.NaN())
+	for _, policy := range []agent.HistoryCompactionPolicy{
+		{OnFailure: 9}, {Amount: -1}, {Amount: 2}, {Amount: nan}, {SummaryMaxTokens: -1}, {ResponseFormat: 9},
+		{Threshold: -.1}, {Threshold: 1.5}, {Threshold: nan},
+		{Summarizer: (*history.ContinuationSummarizer)(nil)},
+	} {
+		def := autoHistoryDefinition(&scriptedWorkflowModel{}, autoHistory("x"))
+		def.HistoryCompaction = &policy
+		if _, err := agent.New(def).NewRun(t.Context(), textRunInput("q")); !errors.Is(err, agent.ErrInvalidExecutionConfig) {
+			t.Fatalf("policy %+v: %v", policy, err)
+		}
 	}
 }
 
@@ -147,20 +299,22 @@ func TestAutoCompactHistoryOptInAndDisabledBudgets(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		enabled        bool
-		override       *bool
+		override       bool
 		disabledBudget bool
 	}{
 		{name: "default off"},
-		{name: "override off", enabled: true, override: new(bool)},
+		{name: "override off", enabled: true, override: true},
 		{name: "disabled window", enabled: true, disabledBudget: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := autoHistory(strings.Repeat("history ", 500))
 			model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}
 			def := autoHistoryDefinition(model, store)
-			def.AutoCompactHistory = tc.enabled
+			if !tc.enabled {
+				def.HistoryCompaction = nil
+			}
 			input := textRunInput("question")
-			input.Execution = &agent.ExecutionOverrides{AutoCompactHistory: tc.override}
+			input.Execution = &agent.ExecutionOverrides{HistoryCompaction: agent.Optional[*agent.HistoryCompactionPolicy]{Set: tc.override}}
 			if tc.disabledBudget {
 				input.Execution.RequestBudget = agent.Optional[*ai.RequestBudgetConfig]{Set: true, Value: &ai.RequestBudgetConfig{}}
 			}
@@ -217,6 +371,12 @@ type compactionProbe struct {
 	prepared, selected []int
 	model              ai.Model
 	counter            ai.TokenCounter
+	prefix             ai.AIRequest
+	budget             ai.RequestBudgetConfig
+	threshold          float32
+	// result and err replace the default unchanged result when set.
+	result history.CompactionResult
+	err    error
 }
 
 func (*compactionProbe) Name() string { return "history" }
@@ -224,10 +384,18 @@ func (p *compactionProbe) Function(_ context.Context, budget int) (modelinput.Pa
 	p.selected = append(p.selected, budget)
 	return nil, nil
 }
-func (p *compactionProbe) CompactHistory(_ context.Context, budget int, model ai.Model, counter ai.TokenCounter) error {
-	p.prepared = append(p.prepared, budget)
-	p.model, p.counter = model, counter
-	return nil
+func (p *compactionProbe) CompactHistory(ctx context.Context, req history.AutoCompaction) (history.CompactionResult, error) {
+	p.prepared = append(p.prepared, req.HistoryBudget)
+	p.model, p.counter, p.budget, p.threshold = req.Model, req.Counter, req.RequestBudget, req.Threshold
+	prefix, err := req.Prefix(ctx)
+	if err != nil {
+		return history.CompactionResult{}, err
+	}
+	p.prefix = prefix
+	if p.err != nil || p.result != (history.CompactionResult{}) {
+		return p.result, p.err
+	}
+	return history.CompactionResult{Revision: "r"}, nil
 }
 
 type compactionPrefix struct{ calls int }
@@ -262,11 +430,11 @@ func TestAutoCompactHistoryUsesEffectiveRenderedAllocation(t *testing.T) {
 						SystemInstructions: []modelinput.Part{modelinput.NewTextPart("system instructions")},
 						ContextSources:     []modelinput.ContextSource{prefix, probe}}), nil
 				}}
-				enabled, output := true, 40
+				enabled, output := &agent.HistoryCompactionPolicy{}, 40
 				budget := &ai.RequestBudgetConfig{Limit: 9000, InputLimit: 8000, OutputReserve: 20, SafetyMargin: 7}
 				input := textRunInput("question")
 				input.Prompt.Context = []modelinput.Part{modelinput.NewTextPart("fixed context")}
-				input.Execution = &agent.ExecutionOverrides{AutoCompactHistory: &enabled, Model: model, Tools: []loop.Tool{loop.NewEchoTool()},
+				input.Execution = &agent.ExecutionOverrides{HistoryCompaction: agent.Optional[*agent.HistoryCompactionPolicy]{Set: true, Value: enabled}, Model: model, Tools: []loop.Tool{loop.NewEchoTool()},
 					Limits:         agent.LimitsOverrides{MaxTokens: &output},
 					TokenCounter:   agent.Optional[ai.TokenCounter]{Set: true, Value: counter},
 					RequestBudget:  agent.Optional[*ai.RequestBudgetConfig]{Set: true, Value: budget},
@@ -277,7 +445,7 @@ func TestAutoCompactHistoryUsesEffectiveRenderedAllocation(t *testing.T) {
 					t.Fatal(err)
 				}
 				// NewRun must snapshot the override rather than retaining its pointer.
-				enabled = false
+				enabled.OnFailure = 9
 				if _, err = workflow.Run(t.Context()); err != nil {
 					t.Fatal(err)
 				}
@@ -290,6 +458,13 @@ func TestAutoCompactHistoryUsesEffectiveRenderedAllocation(t *testing.T) {
 				if len(probe.prepared) != 1 || probe.prepared[0] != want || len(probe.selected) != 1 || probe.selected[0] != want || prefix.calls != 1 || probe.model != model || probe.counter.ID() != counter.ID() {
 					t.Fatalf("allocation=%v selection=%v want=%d prefixCalls=%d", probe.prepared, probe.selected, want, prefix.calls)
 				}
+				// The summary prefix is the answer request up to the history
+				// source, with the same settings.
+				wantPrefix := request.Copy()
+				wantPrefix.Messages = wantPrefix.Messages[:len(probe.prefix.Messages)]
+				if !reflect.DeepEqual(probe.prefix, wantPrefix) || len(probe.prefix.Messages) == 0 || !strings.Contains(requestText(probe.prefix), "retrieved context") || probe.budget != *budget {
+					t.Fatalf("prefix = %+v\nwant %+v", probe.prefix, wantPrefix)
+				}
 			})
 		}
 	}
@@ -300,7 +475,7 @@ func TestAutoCompactHistoryZeroAllocationAndUnfixableInput(t *testing.T) {
 		t.Run(fmt.Sprint(window), func(t *testing.T) {
 			probe := &compactionProbe{}
 			model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}
-			a := agent.New(agent.Definition{Model: model, AutoCompactHistory: true, TokenCounter: ai.TextTokenEstimator{},
+			a := agent.New(agent.Definition{Model: model, HistoryCompaction: &agent.HistoryCompactionPolicy{}, TokenCounter: ai.TextTokenEstimator{},
 				Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 					return modelinput.New(modelinput.Definition{TokenBudget: window, ContextSources: []modelinput.ContextSource{probe}}), nil
 				}})
@@ -381,5 +556,160 @@ func TestAutoCompactHistoryHonorsCanceledRun(t *testing.T) {
 	}
 	if store.writes != 0 || len(model.Requests()) != 0 {
 		t.Fatal("canceled run performed compaction")
+	}
+}
+
+func conversationHistory(turns int) *autoHistoryStore {
+	state := &history.HistoryState{SchemaVersion: history.HistorySchemaVersion}
+	for i := 1; i <= turns; i++ {
+		user := modelinput.StoredMessage{Message: ai.TextMessage(ai.RoleUser, fmt.Sprintf("Question %d about the deployment plan and its rollout order.", i))}
+		state.Turns = append(state.Turns, modelinput.Turn{ID: fmt.Sprint("t", i), Count: i, UserMessage: &user, Messages: []modelinput.StoredMessage{
+			{Message: ai.TextMessage(ai.RoleAssistant, fmt.Sprintf("Answer %d: %s", i, strings.Repeat("detail ", 30)))},
+		}})
+	}
+	return &autoHistoryStore{snapshot: history.HistorySnapshot{Revision: "1", State: state}}
+}
+
+func TestHistoryCompactionContinuesTheRunPromptByDefault(t *testing.T) {
+	store := conversationHistory(3)
+	recorder := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("short summary"), autoText("answer")}}
+	model := nativeToolWorkflowModel{recorder}
+	// The summary limit must fit the small test window.
+	def := agent.Definition{Model: model, HistoryCompaction: &agent.HistoryCompactionPolicy{SummaryMaxTokens: 100}, TokenCounter: ai.TextTokenEstimator{},
+		Tools: []loop.Tool{loop.NewEchoTool()},
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{TokenBudget: 1000,
+				SystemInstructions: []modelinput.Part{modelinput.NewTextPart("system instructions")},
+				ContextSources:     []modelinput.ContextSource{history.NewHistory("s", store)}}), nil
+		},
+	}
+	// A long question leaves too little room for the stored history, while
+	// the summary request, which does not contain it, still fits.
+	workflow, err := agent.New(def).NewRun(t.Context(), textRunInput(strings.Repeat("word ", 640)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := workflow.Run(t.Context())
+	if err != nil || result.Text != "answer" {
+		t.Fatalf("run: %v %+v", err, result)
+	}
+	requests := recorder.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("requests = %d", len(requests))
+	}
+	summaryRequest, answer := requests[0], requests[1]
+	// System prompt, three stored turns and one instruction.
+	if len(summaryRequest.Messages) != 8 || summaryRequest.Messages[0].Role != ai.RoleSystem {
+		t.Fatalf("summary request = %+v", summaryRequest.Messages)
+	}
+	if !reflect.DeepEqual(summaryRequest.Messages[0], answer.Messages[0]) || !reflect.DeepEqual(summaryRequest.Tools, answer.Tools) || len(answer.Tools) == 0 ||
+		!reflect.DeepEqual(summaryRequest.ToolChoice, answer.ToolChoice) || !reflect.DeepEqual(summaryRequest.Reasoning, answer.Reasoning) {
+		t.Fatal("summary request settings differ from the run's")
+	}
+	instruction := summaryRequest.Messages[7].Text()
+	if !strings.Contains(instruction, `"Question 3 about the deployment plan`) {
+		t.Fatalf("instruction = %q", instruction)
+	}
+	if !strings.Contains(requestText(answer), "Conversation summary:\nshort summary") {
+		t.Fatal("answer did not use the committed summary")
+	}
+	reports := result.Primary.HistoryCompaction
+	if len(reports) != 1 || !reports[0].Result.Changed || reports[0].Result.Revision != "2" || reports[0].Result.SummarizedTurns != 2 || reports[0].Err != nil {
+		t.Fatalf("reports = %+v", reports)
+	}
+}
+
+func TestTranscriptContinuesIntoEndOfRunCompaction(t *testing.T) {
+	store := conversationHistory(3)
+	recorder := &scriptedWorkflowModel{scripts: [][]ai.Token{
+		{{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "c1", Type: "function", Name: "echo", Args: []byte(`{"text":"hello"}`)}}}},
+		autoText("final answer"),
+		autoText("end of run summary"),
+	}}
+	model := nativeToolWorkflowModel{recorder}
+	def := agent.Definition{Model: model, TokenCounter: ai.TextTokenEstimator{}, Tools: []loop.Tool{loop.NewEchoTool()},
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{TokenBudget: 4000,
+				SystemInstructions: []modelinput.Part{modelinput.NewTextPart("system instructions")},
+				ContextSources:     []modelinput.ContextSource{history.NewHistory("s", store)}}), nil
+		},
+	}
+	workflow, err := agent.New(def).NewRun(t.Context(), textRunInput("Question 4: what changed?"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := workflow.Run(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transcript := result.Primary.Transcript
+	last := recorder.Requests()[1]
+	if transcript == nil || len(transcript.Messages) != len(last.Messages)+1 ||
+		!reflect.DeepEqual(transcript.Messages[:len(last.Messages)], last.Messages) ||
+		transcript.Messages[len(last.Messages)].Text() != "final answer" || !reflect.DeepEqual(transcript.Tools, last.Tools) {
+		t.Fatalf("transcript = %+v", transcript)
+	}
+
+	// The application persists the accepted turn, then compacts from the
+	// run's transcript against the revision it committed.
+	next := store.snapshot.State.Clone()
+	turn := modelinput.Turn{ID: "t4", Count: 4}
+	for i, message := range result.Primary.Messages {
+		stored := modelinput.StoredMessage{Message: message}
+		if i == 0 {
+			turn.UserMessage = &stored
+			continue
+		}
+		turn.Messages = append(turn.Messages, stored)
+	}
+	next.Turns = append(next.Turns, turn)
+	revision, err := store.CompareAndSwapHistory(t.Context(), "s", "1", next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactor, err := history.NewCompactor("s", store, history.CompactorDefinition{Model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compacted, err := compactor.Compact(t.Context(), 50, history.WithPrefix(transcript), history.WithExpectedRevision(revision))
+	if err != nil || !compacted.Changed {
+		t.Fatalf("compact: %+v %v", compacted, err)
+	}
+	summaryRequest := recorder.Requests()[2]
+	if len(summaryRequest.Messages) != len(transcript.Messages)+1 || !reflect.DeepEqual(summaryRequest.Messages[:len(transcript.Messages)], transcript.Messages) ||
+		!reflect.DeepEqual(summaryRequest.Tools, transcript.Tools) {
+		t.Fatal("end-of-run summary does not continue the transcript")
+	}
+	if !strings.Contains(summaryRequest.Messages[len(summaryRequest.Messages)-1].Text(), `"Question 3 about the deployment plan`) {
+		t.Fatalf("instruction = %q", summaryRequest.Messages[len(summaryRequest.Messages)-1].Text())
+	}
+	if got := store.snapshot.State; got.Summary == nil || got.Summary.Content.Text != "end of run summary" || len(got.Turns) != 2 || got.Turns[0].ID != "t3" || got.Turns[1].ID != "t4" {
+		t.Fatalf("stored = %+v", got)
+	}
+}
+
+func TestTranscriptWithoutRequestBudget(t *testing.T) {
+	recorder := &scriptedWorkflowModel{scripts: [][]ai.Token{
+		{{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "c1", Type: "function", Name: "echo", Args: []byte(`{"text":"hello"}`)}}}},
+		autoText("final answer"),
+	}}
+	def := agent.Definition{Model: nativeToolWorkflowModel{recorder}, Tools: []loop.Tool{loop.NewEchoTool()},
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{SystemInstructions: []modelinput.Part{modelinput.NewTextPart("system instructions")}}), nil
+		},
+	}
+	workflow, err := agent.New(def).NewRun(t.Context(), textRunInput("question"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := workflow.Run(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := recorder.Requests()[1]
+	transcript := result.Primary.Transcript
+	if transcript == nil || len(transcript.Messages) != len(last.Messages)+1 || !reflect.DeepEqual(transcript.Messages[:len(last.Messages)], last.Messages) ||
+		transcript.Messages[0].Role != ai.RoleSystem || transcript.Messages[len(last.Messages)].Text() != "final answer" {
+		t.Fatalf("transcript = %+v", transcript)
 	}
 }

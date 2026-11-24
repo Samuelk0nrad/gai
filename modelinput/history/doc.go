@@ -13,17 +13,22 @@
 // history allocation, not the model's full request budget, and makes at most one
 // summarization attempt and one CAS. It returns without writing when no compaction
 // is needed or no turns remain. PressureRemaining can be true after a successful
-// commit. Built-in text summarization rejects media or opaque provider state
-// rather than silently dropping it. Configured summarizer retries remain explicit
-// summarizer policy; a revision conflict never restarts the compaction or agent.
+// commit. A Model alone selects NewContinuationSummarizer, which continues the
+// request passed with WithPrefix, such as an agent run's transcript, so the
+// provider can serve the shared prefix from its prompt cache. WithExpectedRevision
+// ties that summary to the state the request belongs to. Configured summarizer
+// retries remain explicit summarizer policy; a revision conflict never restarts the
+// compaction or agent.
 //
-// agent.Definition.AutoCompactHistory opts into the agent's preparation wrapper.
+// agent.Definition.HistoryCompaction opts into the agent's preparation wrapper.
 // It calls HistorySource.CompactHistory once before selection at workflow start,
-// using the effective run model/counter and remaining allocation. Disabled budgets
-// skip preparation. Conflicts or ErrHistoryPressureRemaining stop the answer;
-// compaction may have committed before remaining pressure or a later run failure.
-// This flag does not serialize sessions or persist accepted new turns. Keep
-// explicit orchestration when pinning a snapshot revision for accepted-turn CAS.
+// using the effective run model/counter, remaining allocation, and the run's own
+// prompt as the summary prefix. Disabled budgets skip preparation. Its OnFailure
+// mode either stops the run on conflicts, summary errors and remaining pressure,
+// or reports them and continues with the uncompacted history. Compaction may have
+// committed before remaining pressure or a later run failure. The policy does not
+// serialize sessions or persist accepted new turns. Keep explicit orchestration
+// when pinning a snapshot revision for accepted-turn CAS.
 //
 // HistoryReader returns coherent detached snapshots. HistoryStore compares and
 // writes atomically, returning a fresh opaque Revision or *RevisionConflictError.
