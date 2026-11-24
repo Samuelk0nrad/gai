@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/Samuelk0nrad/gai/ai"
@@ -158,19 +159,23 @@ func previewToolResult(toolResult *ai.ToolResult, limit int) {
 }
 
 // previewedLength returns the preview length a projected tool result was cut
-// at, or false when it carries no truncation marker.
+// at, or false when it carries no truncation marker. The preview writes the
+// marker whole into one part and empties the plain text after it, so the last
+// nonempty plain-text part must end with it. Runes are counted per part, as
+// previewToolResult counts them, without joining the text.
 func previewedLength(toolResult *ai.ToolResult) (int, bool) {
-	text := ""
+	runes, last := 0, ""
 	for i := range toolResult.Parts {
 		part := &toolResult.Parts[i]
-		if previewableText(part) {
-			text += part.Text
+		if previewableText(part) && part.Text != "" {
+			runes += utf8.RuneCountInString(part.Text)
+			last = part.Text
 		}
 	}
-	if len(text) < len(toolResultTruncatedMarker) || text[len(text)-len(toolResultTruncatedMarker):] != toolResultTruncatedMarker {
+	if !strings.HasSuffix(last, toolResultTruncatedMarker) {
 		return 0, false
 	}
-	return utf8.RuneCountInString(text[:len(text)-len(toolResultTruncatedMarker)]), true
+	return runes - utf8.RuneCountInString(toolResultTruncatedMarker), true
 }
 
 func (p *Part) Render(ctx context.Context) (modelinput.RenderNode, error) {

@@ -225,3 +225,30 @@ func storedAll(messages []ai.Message) []modelinput.StoredMessage {
 	}
 	return out
 }
+
+func TestContinuationMatchesMultipartPreviews(t *testing.T) {
+	t.Parallel()
+	var parts []ai.ContentPart
+	for i := 0; i < 50; i++ {
+		parts = append(parts, ai.TextParts(strings.Repeat("界", 10))...)
+	}
+	state := toolResultState("placeholder", "short")
+	state.Turns[0].Messages[1].Message.Parts[0].ToolResult.Parts = parts
+	// 120 ends on a part boundary, so the marker fills a part of its own;
+	// 125 cuts inside a part.
+	for _, runes := range []int{120, 125, 499} {
+		t.Run(fmt.Sprint(runes), func(t *testing.T) {
+			t.Parallel()
+			prefix := transcriptFor(state)
+			copy(prefix.Messages[1:5], previewMessagesAt(t, prefix.Messages[1:5], runes))
+			if !strings.HasSuffix(prefix.Messages[3].ToolResults()[0].Text(), truncatedMarker) {
+				t.Fatal("test prefix is not previewed")
+			}
+			store := &sharedHistoryStore{state: state.Clone()}
+			model := &recordingModel{reply: textReply("summary")}
+			if _, err := continuationCompactor(t, store, model, history.CompactorDefinition{Amount: .5}).Compact(t.Context(), 10, history.WithPrefix(&prefix)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
