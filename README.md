@@ -400,7 +400,7 @@ revision conflict. The policy does not persist new turns
 or provide session locking. See [automatic compaction](docs/history.md#automatic-compaction-in-agents).
 
 Use `history.NewCompactor(sessionID, store, history.CompactorDefinition{Model: model})`
-and call `Compact(ctx, historyBudget, history.WithPrefix(*result.Primary.Transcript))`
+and call `Compact(ctx, historyBudget, history.WithPrefix(result.Primary.Transcript))`
 after persisting a turn to summarize older completed turns from that run's cached
 prompt. Stores load revisioned snapshots and commit through atomic compare-and-swap;
 conflicts are returned to the application without retrying. See

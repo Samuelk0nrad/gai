@@ -98,6 +98,13 @@ func continuationCompactor(t *testing.T, store history.HistoryStore, model ai.Mo
 	return compactor
 }
 
+func ref[T any](v T) *T { return &v }
+
+// fixedPrefix is an AutoCompaction prefix that renders request.
+func fixedPrefix(request ai.AIRequest) func(context.Context) (ai.AIRequest, error) {
+	return func(context.Context) (ai.AIRequest, error) { return request, nil }
+}
+
 func lastText(request ai.AIRequest) string {
 	return request.Messages[len(request.Messages)-1].Text()
 }
@@ -110,7 +117,7 @@ func TestContinuationSummaryAppendsOneInstructionToTheUnchangedPrefix(t *testing
 	prefix.ResponseFormat = ai.ResponseFormat{Type: ai.ResponseFormatJSONObject}
 	compactor := continuationCompactor(t, store, model, history.CompactorDefinition{})
 
-	result, err := compactor.Compact(t.Context(), 10, history.WithPrefix(prefix), history.WithExpectedRevision("1"))
+	result, err := compactor.Compact(t.Context(), 10, history.WithPrefix(&prefix), history.WithExpectedRevision("1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +128,9 @@ func TestContinuationSummaryAppendsOneInstructionToTheUnchangedPrefix(t *testing
 	request := calls[0]
 	want := prefix.Copy()
 	want.ResponseFormat = ai.ResponseFormat{} // omitted by default
+	// The summary has its own output limit, not the answer's; the limit
+	// does not affect the prompt cache.
+	want.MaxTokens = summaryReserve(prefix)
 	got := request.Copy()
 	got.Messages = got.Messages[:len(prefix.Messages)]
 	if !reflect.DeepEqual(got, want) || len(request.Messages) != len(prefix.Messages)+1 {
@@ -149,7 +159,7 @@ func TestContinuationSummaryMergesTheEarlierSummary(t *testing.T) {
 			if !present {
 				prefix.Messages = append(prefix.Messages[:1], prefix.Messages[2:]...)
 			}
-			_, err := continuationCompactor(t, store, model, history.CompactorDefinition{}).Compact(t.Context(), 10, history.WithPrefix(prefix))
+			_, err := continuationCompactor(t, store, model, history.CompactorDefinition{}).Compact(t.Context(), 10, history.WithPrefix(&prefix))
 			if !present {
 				if !errors.Is(err, history.ErrSummaryPrefixMismatch) || len(model.calls()) != 0 || store.casCalls != 0 {
 					t.Fatalf("err=%v calls=%d writes=%d", err, len(model.calls()), store.casCalls)
@@ -196,7 +206,7 @@ func TestContinuationMatchesStoredTurnsAfterRoundTripsAndPreviews(t *testing.T) 
 			}
 			store := &sharedHistoryStore{state: state.Clone()}
 			model := &recordingModel{reply: textReply("summary")}
-			if _, err := continuationCompactor(t, store, model, history.CompactorDefinition{Amount: .5}).Compact(t.Context(), 10, history.WithPrefix(prefix)); err != nil {
+			if _, err := continuationCompactor(t, store, model, history.CompactorDefinition{Amount: .5}).Compact(t.Context(), 10, history.WithPrefix(&prefix)); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -205,7 +215,7 @@ func TestContinuationMatchesStoredTurnsAfterRoundTripsAndPreviews(t *testing.T) 
 		prefix := transcriptFor(&history.HistoryState{Turns: []modelinput.Turn{toolTurn(`{"a":"<x>","b":2}`, long), state.Turns[1]}})
 		store := &sharedHistoryStore{state: state.Clone()}
 		model := &recordingModel{reply: textReply("summary")}
-		_, err := continuationCompactor(t, store, model, history.CompactorDefinition{Amount: .5}).Compact(t.Context(), 10, history.WithPrefix(prefix))
+		_, err := continuationCompactor(t, store, model, history.CompactorDefinition{Amount: .5}).Compact(t.Context(), 10, history.WithPrefix(&prefix))
 		if !errors.Is(err, history.ErrSummaryPrefixMismatch) || len(model.calls()) != 0 {
 			t.Fatalf("err=%v calls=%d", err, len(model.calls()))
 		}
@@ -224,10 +234,12 @@ func TestContinuationCompactValidatesBeforeModelWork(t *testing.T) {
 		load bool
 	}{
 		{"no prefix", history.CompactorDefinition{}, nil, history.ErrSummaryPrefixRequired, false},
-		{"empty expected revision", history.CompactorDefinition{}, []history.CompactOption{history.WithPrefix(transcriptFor(state)), history.WithExpectedRevision("")}, history.ErrInvalidExpectedRevision, false},
-		{"stale expected revision", history.CompactorDefinition{}, []history.CompactOption{history.WithPrefix(transcriptFor(state)), history.WithExpectedRevision("0")}, &history.RevisionConflictError{}, true},
-		{"rejected response format", history.CompactorDefinition{ResponseFormat: history.SummaryResponseFormatReject}, []history.CompactOption{history.WithPrefix(structured)}, history.ErrInvalidSummaryPrefix, true},
-		{"too small", history.CompactorDefinition{}, []history.CompactOption{history.WithPrefix(transcriptFor(state)), history.WithRequestBudget(ai.RequestBudgetConfig{Limit: 20})}, history.ErrSummaryRequestTooLarge, true},
+		// The transcript of a run that did not complete is nil.
+		{"nil prefix", history.CompactorDefinition{}, []history.CompactOption{history.WithPrefix(nil)}, history.ErrSummaryPrefixRequired, false},
+		{"empty expected revision", history.CompactorDefinition{}, []history.CompactOption{history.WithPrefix(ref(transcriptFor(state))), history.WithExpectedRevision("")}, history.ErrInvalidExpectedRevision, false},
+		{"stale expected revision", history.CompactorDefinition{}, []history.CompactOption{history.WithPrefix(ref(transcriptFor(state))), history.WithExpectedRevision("0")}, &history.RevisionConflictError{}, true},
+		{"rejected response format", history.CompactorDefinition{ResponseFormat: history.SummaryResponseFormatReject}, []history.CompactOption{history.WithPrefix(&structured)}, history.ErrInvalidSummaryPrefix, true},
+		{"too small", history.CompactorDefinition{}, []history.CompactOption{history.WithPrefix(ref(transcriptFor(state))), history.WithRequestBudget(ai.RequestBudgetConfig{Limit: 20})}, history.ErrSummaryRequestTooLarge, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &sharedHistoryStore{state: state.Clone()}
@@ -257,7 +269,7 @@ func TestContinuationSendsARequiredToolChoiceAsAuto(t *testing.T) {
 	prefix.ToolChoice = ai.ToolChoice{Mode: ai.ToolChoiceRequired, Names: []string{"lookup"}}
 	store := &sharedHistoryStore{state: state.Clone()}
 	model := &recordingModel{reply: textReply("summary")}
-	if _, err := continuationCompactor(t, store, model, history.CompactorDefinition{}).Compact(t.Context(), 10, history.WithPrefix(prefix)); err != nil {
+	if _, err := continuationCompactor(t, store, model, history.CompactorDefinition{}).Compact(t.Context(), 10, history.WithPrefix(&prefix)); err != nil {
 		t.Fatal(err)
 	}
 	if choice := model.calls()[0].ToolChoice; choice.Mode != ai.ToolChoiceAuto || len(choice.Names) != 0 {
@@ -276,7 +288,7 @@ func TestContinuationKeepsResponseFormatAndAddsReasoningBudget(t *testing.T) {
 		return []ai.Token{{Part: &part}, {Completion: &ai.Completion{FinishReason: "end_turn"}}}
 	}}
 	def := history.CompactorDefinition{ResponseFormat: history.SummaryResponseFormatKeep, SummaryMaxTokens: 100}
-	if _, err := continuationCompactor(t, store, model, def).Compact(t.Context(), 10, history.WithPrefix(prefix)); err != nil {
+	if _, err := continuationCompactor(t, store, model, def).Compact(t.Context(), 10, history.WithPrefix(&prefix)); err != nil {
 		t.Fatal(err)
 	}
 	request := model.calls()[0]
@@ -286,6 +298,11 @@ func TestContinuationKeepsResponseFormatAndAddsReasoningBudget(t *testing.T) {
 	if got := store.state.Summary.Content.Text; got != `{"summary":"x"}` {
 		t.Fatalf("summary = %q", got)
 	}
+}
+
+// summaryReserve is the output a default continuation summary reserves.
+func summaryReserve(prefix ai.AIRequest) int {
+	return history.DefaultSummaryMaxTokens + prefix.Reasoning.BudgetTokens
 }
 
 func TestContinuationCutsThePrefixWhenItDoesNotFit(t *testing.T) {
@@ -311,7 +328,7 @@ func TestContinuationCutsThePrefixWhenItDoesNotFit(t *testing.T) {
 		messages int
 	}{
 		// System, t1 and t2 plus the instruction.
-		{"fold every selected turn", full.InputTokens + prefix.MaxTokens - 100, 2, 6},
+		{"fold every selected turn", full.InputTokens + summaryReserve(prefix) - 100, 2, 6},
 		// System and t1 plus the instruction.
 		{"fold fewer turns", 0, 1, 4},
 	} {
@@ -325,11 +342,11 @@ func TestContinuationCutsThePrefixWhenItDoesNotFit(t *testing.T) {
 					t.Fatal(err)
 				}
 				// Room for the instruction, not for the padded second turn.
-				limit = estimate.InputTokens + prefix.MaxTokens + 300
+				limit = estimate.InputTokens + summaryReserve(prefix) + 300
 			}
 			store := &sharedHistoryStore{state: state.Clone()}
 			model := &recordingModel{reply: textReply("summary")}
-			result, err := continuationCompactor(t, store, model, history.CompactorDefinition{}).Compact(t.Context(), 10, history.WithPrefix(prefix), history.WithRequestBudget(ai.RequestBudgetConfig{Limit: limit}))
+			result, err := continuationCompactor(t, store, model, history.CompactorDefinition{}).Compact(t.Context(), 10, history.WithPrefix(&prefix), history.WithRequestBudget(ai.RequestBudgetConfig{Limit: limit}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -378,7 +395,7 @@ func TestContinuationFoldsTheMostTurnsThatFitWithFewEstimates(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Room for fit turns and the instruction, not for one more turn.
-	limit := estimate.InputTokens + prefix.MaxTokens + 50
+	limit := estimate.InputTokens + summaryReserve(prefix) + 50
 	counter := &instructionCounter{}
 	model := &recordingModel{reply: textReply("summary")}
 	output, err := history.NewContinuationSummarizer(model).SummarizeHistory(t.Context(), history.SummaryInput{
@@ -404,11 +421,24 @@ func TestContinuationCutsThePrefixWhenTheBoundaryIsAmbiguous(t *testing.T) {
 	state.Turns[2].UserMessage.Message = ai.TextMessage(ai.RoleUser, "Continue.")
 	store := &sharedHistoryStore{state: state.Clone()}
 	model := &recordingModel{reply: textReply("summary")}
-	if _, err := continuationCompactor(t, store, model, history.CompactorDefinition{}).Compact(t.Context(), 10, history.WithPrefix(transcriptFor(state))); err != nil {
+	if _, err := continuationCompactor(t, store, model, history.CompactorDefinition{}).Compact(t.Context(), 10, history.WithPrefix(ref(transcriptFor(state)))); err != nil {
 		t.Fatal(err)
 	}
 	if request := model.calls()[0]; len(request.Messages) != 6 || !strings.Contains(lastText(request), "the whole conversation above") {
 		t.Fatalf("request = %+v", request.Messages)
+	}
+}
+
+func TestCompactionKeepsTheUsageOfAFailedSummaryCall(t *testing.T) {
+	state := threeTurnState()
+	store := &sharedHistoryStore{state: state.Clone()}
+	model := &recordingModel{reply: func(ai.AIRequest) []ai.Token {
+		part := ai.ContentPart{Kind: ai.ContentText, Text: "cut off"}
+		return []ai.Token{{Part: &part}, {Completion: &ai.Completion{FinishReason: "max_tokens", UsageReported: true, Usage: ai.Usage{InputTokens: 900, CachedTokens: 850, OutputTokens: 2048}}}}
+	}}
+	result, err := continuationCompactor(t, store, model, history.CompactorDefinition{}).Compact(t.Context(), 10, history.WithPrefix(ref(transcriptFor(state))))
+	if !errors.Is(err, history.ErrInvalidSummaryReply) || !result.UsageReported || result.Usage.InputTokens != 900 || result.Usage.OutputTokens != 2048 || result.Changed {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
 
@@ -427,7 +457,7 @@ func TestContinuationRejectsInvalidReplies(t *testing.T) {
 			state := threeTurnState()
 			store := &sharedHistoryStore{state: state.Clone()}
 			model := &recordingModel{reply: func(ai.AIRequest) []ai.Token { return tokens }}
-			_, err := continuationCompactor(t, store, model, history.CompactorDefinition{}).Compact(t.Context(), 10, history.WithPrefix(transcriptFor(state)))
+			_, err := continuationCompactor(t, store, model, history.CompactorDefinition{}).Compact(t.Context(), 10, history.WithPrefix(ref(transcriptFor(state))))
 			if !errors.Is(err, history.ErrInvalidSummaryReply) && !errors.Is(err, failure) {
 				t.Fatalf("err = %v", err)
 			}
@@ -453,7 +483,7 @@ func TestAutoCompactionAppendsTheFullStoredHistory(t *testing.T) {
 	model := &recordingModel{reply: textReply("summary")}
 	source := history.NewHistory("s", store)
 	preceding := ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleSystem, "system")}}
-	result, err := source.CompactHistory(t.Context(), history.AutoCompaction{HistoryBudget: 10, Model: model, Counter: ai.TextTokenEstimator{}, Prefix: preceding})
+	result, err := source.CompactHistory(t.Context(), history.AutoCompaction{HistoryBudget: 10, Model: model, Counter: ai.TextTokenEstimator{}, Prefix: fixedPrefix(preceding)})
 	if err != nil || !result.Changed || !result.PressureRemaining {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}

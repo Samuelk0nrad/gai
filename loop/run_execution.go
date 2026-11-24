@@ -296,7 +296,12 @@ func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferToken
 	attempt.counterID = ai.RequestEstimateID + ":" + r.counter.ID()
 	activeBudget := r.budget.Limit > 0 || r.budget.InputLimit > 0 || r.budget.Mode == ai.RequestCountAccurate
 	// The request also becomes the run's transcript when this attempt ends it.
-	attempt.request = request.Copy()
+	// Only a budget checkpoint needs an independent copy; the transcript is
+	// copied once, when the run ends.
+	attempt.request = request
+	if activeBudget {
+		attempt.request = request.Copy()
+	}
 	budget, err := r.checkRequestBudget(attemptCtx, request)
 	if activeBudget {
 		attempt.iteration.RequestBudget = &budget
@@ -681,7 +686,8 @@ func (r *runExecution) doneEvent(attempt *attemptExecution) Event {
 	event := DoneEvent()
 	if attempt != nil && len(attempt.request.Messages) > 0 {
 		transcript := r.owner.requestSettings(r.toolDefinitions, r.requiredToolCallSatisfied)
-		transcript.Messages = append(ai.CloneMessages(attempt.request.Messages), attempt.iteration.DeltaMessages()...)
+		messages := attempt.request.Messages
+		transcript.Messages = append(messages[:len(messages):len(messages)], attempt.iteration.DeltaMessages()...)
 		transcript = transcript.Copy()
 		if transcript.Validate() == nil {
 			event.Transcript = &transcript

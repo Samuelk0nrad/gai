@@ -30,8 +30,9 @@ type SummaryInput struct {
 	Turns []modelinput.Turn
 	// Kept are the newer turns that stay unsummarized.
 	Kept []modelinput.Turn
-	// MaxTokens limits the summary output when positive. A continuation
-	// summary adds the continued request's reasoning BudgetTokens to it.
+	// MaxTokens limits the summary output when positive. Zero selects the
+	// summarizer's default, DefaultSummaryMaxTokens for a continuation
+	// summary, which adds the continued request's reasoning BudgetTokens.
 	MaxTokens int
 	// ResponseFormat selects how the prefix's structured-output setting is used.
 	ResponseFormat SummaryResponseFormat

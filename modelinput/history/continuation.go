@@ -18,6 +18,11 @@ Do not invent details.
 Leave out system instructions, tool definitions, and reference context that is not part of the conversation.
 Return only the summary text.`
 
+// DefaultSummaryMaxTokens limits a continuation summary's output when
+// SummaryInput.MaxTokens is zero. The continued request's own limit is the
+// answer's and does not apply to the summary.
+const DefaultSummaryMaxTokens = 2048
+
 const (
 	quoteMinRunes  = 60
 	quoteStepRunes = 20
@@ -98,7 +103,7 @@ func (s *ContinuationSummarizer) SummarizeHistory(ctx context.Context, input Sum
 	// Full prefix: the cache-friendly request.
 	if quote, ok := boundaryQuote(base.Messages, layout.firstKeptUser); ok {
 		request := withInstruction(base, len(base.Messages), s.instruction(quote, merge))
-		fits, err := fitsBudget(ctx, request, input.RequestBudget, counter, input.MaxTokens > 0)
+		fits, err := fitsBudget(ctx, request, input.RequestBudget, counter)
 		if err != nil {
 			return SummaryOutput{}, err
 		}
@@ -111,7 +116,7 @@ func (s *ContinuationSummarizer) SummarizeHistory(ctx context.Context, input Sum
 	// finds that count with a logarithmic number of estimates.
 	cut := func(folded int) (ai.AIRequest, bool, error) {
 		request := withInstruction(base, layout.turnEnds[folded-1], s.instruction("", merge))
-		fits, err := fitsBudget(ctx, request, input.RequestBudget, counter, input.MaxTokens > 0)
+		fits, err := fitsBudget(ctx, request, input.RequestBudget, counter)
 		return request, fits, err
 	}
 	request, fits, err := cut(len(input.Turns))
@@ -167,13 +172,15 @@ func (s *ContinuationSummarizer) baseRequest(prefix ai.AIRequest, input SummaryI
 			return ai.AIRequest{}, fmt.Errorf("%w: prefix requests structured output", ErrInvalidSummaryPrefix)
 		}
 	}
-	if input.MaxTokens > 0 {
-		request.MaxTokens = input.MaxTokens
-		if request.Reasoning.BudgetTokens > 0 {
-			// Providers reject a thinking budget that is not below max tokens.
-			// The summary limit applies to the visible text.
-			request.MaxTokens += request.Reasoning.BudgetTokens
-		}
+	// The output limit does not affect the prompt cache.
+	request.MaxTokens = input.MaxTokens
+	if request.MaxTokens == 0 {
+		request.MaxTokens = DefaultSummaryMaxTokens
+	}
+	if request.Reasoning.BudgetTokens > 0 {
+		// Providers reject a thinking budget that is not below max tokens.
+		// The summary limit applies to the visible text.
+		request.MaxTokens += request.Reasoning.BudgetTokens
 	}
 	return request, nil
 }
@@ -300,9 +307,9 @@ func normalizeQuoteText(text string) string {
 }
 
 // fitsBudget estimates the request locally. Accurate counting mode is not
-// used for summary requests; a zero budget skips the check. With an explicit
-// summary limit, only that limit is reserved for output, not the run's reserve.
-func fitsBudget(ctx context.Context, request ai.AIRequest, budget ai.RequestBudgetConfig, counter ai.TokenCounter, ownLimit bool) (bool, error) {
+// used for summary requests; a zero budget skips the check. Only the summary's
+// own output limit is reserved for output, not the run's reserve.
+func fitsBudget(ctx context.Context, request ai.AIRequest, budget ai.RequestBudgetConfig, counter ai.TokenCounter) (bool, error) {
 	if budget.Limit == 0 && budget.InputLimit == 0 {
 		return true, nil
 	}
@@ -311,11 +318,7 @@ func fitsBudget(ctx context.Context, request ai.AIRequest, budget ai.RequestBudg
 		return false, err
 	}
 	input := estimate.InputTokens + budget.SafetyMargin
-	reserve := max(budget.OutputReserve, request.MaxTokens)
-	if ownLimit {
-		reserve = request.MaxTokens
-	}
-	total := input + reserve
+	total := input + request.MaxTokens
 	return (budget.Limit == 0 || total <= budget.Limit) && (budget.InputLimit == 0 || input <= budget.InputLimit), nil
 }
 

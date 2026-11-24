@@ -18,7 +18,11 @@ var (
 	ErrHistoryPressureRemaining = errors.New("history still exceeds its allocation after compaction")
 	// ErrSummaryPrefixRequired means a continuation summarizer has no request
 	// to continue. Pass WithPrefix to Compact, or configure another Summarizer.
-	ErrSummaryPrefixRequired = errors.New("continuation summary requires a prefix request")
+	// ErrSummaryPrefixRequired means a continuation summarizer, the default
+	// for a CompactorDefinition with only a Model, got no WithPrefix. Pass the
+	// run's transcript, or set Summarizer: summary.New(model) for a summary
+	// with its own prompt.
+	ErrSummaryPrefixRequired = errors.New("continuation summary requires a prefix request: pass history.WithPrefix, or set CompactorDefinition.Summarizer to summary.New(model) for a separate summary prompt")
 	// ErrSummaryPrefixMismatch means the continued request does not contain
 	// the stored summary or a turn to fold, so the model would not see it.
 	ErrSummaryPrefixMismatch = errors.New("continuation prefix does not contain the history to summarize")

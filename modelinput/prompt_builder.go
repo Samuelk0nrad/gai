@@ -394,7 +394,8 @@ func (b *Builder) buildContext(ctx context.Context, prepare func(context.Context
 			setter.SetTokenCounter(b.counter)
 		}
 		if prepare != nil && limit > 0 {
-			preceding := append([]Part(nil), contextParts...)
+			// Later sources only append, so this view stays fixed without a copy.
+			preceding := contextParts[:len(contextParts):len(contextParts)]
 			err = prepare(ctx, SourcePreparation{
 				Source: source, Remaining: stats.RemainingTokens, Counter: b.counter,
 				Preceding: func(ctx context.Context) ([]ai.Message, error) { return b.prefixMessages(ctx, preceding) },

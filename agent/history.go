@@ -17,6 +17,12 @@ import (
 // enabled with a prompt builder other than the standard *modelinput.Builder.
 var ErrHistoryCompactionNotConfigurable = errors.New("automatic history compaction requires *context.Builder")
 
+// ErrHistoryCompactionTimeout ends a run whose compaction failed because the
+// summarizer or store hit a deadline it set for itself. The run fails with it
+// instead of context.DeadlineExceeded, which would report the run as canceled.
+// The HistoryCompactionReport keeps the original error.
+var ErrHistoryCompactionTimeout = errors.New("history compaction timed out")
+
 // HistoryCompactionFailure selects what a run does when run-start history
 // compaction fails.
 type HistoryCompactionFailure uint8
@@ -27,7 +33,8 @@ type HistoryCompactionFailure uint8
 // another writer changed the history; it follows the mode. Under either mode,
 // cancellation (the run's context ending, or a context.Canceled error) and
 // configuration errors end the run. A deadline that the summarizer or store
-// sets for itself is an ordinary failure.
+// sets for itself is an ordinary failure; when it ends the run, the run fails
+// with ErrHistoryCompactionTimeout.
 const (
 	// HistoryCompactionStop ends the run with the compaction error. Remaining
 	// pressure after a successful compaction is an error too.
@@ -65,7 +72,9 @@ type HistoryCompactionPolicy struct {
 	// Amount is the oldest fraction of turns to summarize, in (0,1]. Zero
 	// selects the default 0.7.
 	Amount float32
-	// SummaryMaxTokens limits the summary output; zero inherits the run's.
+	// SummaryMaxTokens limits the summary output. Zero selects the
+	// summarizer's default, history.DefaultSummaryMaxTokens for the
+	// continuation summarizer; the run's answer limit does not apply.
 	SummaryMaxTokens int
 	// ResponseFormat selects how the summary treats the run's structured
 	// output setting. The zero value omits it.
@@ -152,14 +161,19 @@ func (b *compactingPromptBuilder) BuildContext(ctx context.Context) ([]modelinpu
 		if !ok {
 			return nil
 		}
-		preceding, err := prep.Preceding(ctx)
-		if err != nil {
-			return err
-		}
 		b.mu.Lock()
-		prefix, budget := b.template.Copy(), b.budget
+		template, budget := b.template.Copy(), b.budget
 		b.mu.Unlock()
-		prefix.Messages = preceding
+		// The prefix is rendered only when compaction is needed.
+		prefix := func(ctx context.Context) (ai.AIRequest, error) {
+			preceding, err := prep.Preceding(ctx)
+			if err != nil {
+				return ai.AIRequest{}, err
+			}
+			request := template // a copy, and this runs at most once
+			request.Messages = preceding
+			return request, nil
+		}
 		result, err := source.CompactHistory(ctx, history.AutoCompaction{
 			HistoryBudget: prep.Remaining, Threshold: b.policy.Threshold, Model: b.model, Counter: prep.Counter,
 			Summarizer: b.policy.Summarizer, Amount: b.policy.Amount,
@@ -175,6 +189,10 @@ func (b *compactingPromptBuilder) BuildContext(ctx context.Context) ([]modelinpu
 		}
 		b.record(ctx, report)
 		if err != nil && !report.Continued {
+			if !canceled(ctx, err) && errors.Is(err, context.DeadlineExceeded) {
+				// The loop reports any deadline error as cancellation.
+				return fmt.Errorf("%w: %s: %v", ErrHistoryCompactionTimeout, report.Source, err)
+			}
 			return err
 		}
 		return nil

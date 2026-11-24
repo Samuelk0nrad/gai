@@ -30,10 +30,12 @@ type AutoCompaction struct {
 	Amount           float32
 	SummaryMaxTokens int
 	ResponseFormat   SummaryResponseFormat
-	// Prefix holds the run's request settings and the messages that precede
-	// this source. CompactHistory appends the full stored history to it, so the
-	// summary request continues the previous run's cached prompt.
-	Prefix ai.AIRequest
+	// Prefix renders the run's request settings and the messages that precede
+	// this source. CompactHistory calls it only when compaction is needed and
+	// appends the full stored history, so the summary request continues the
+	// previous run's cached prompt. A nil Prefix is ErrSummaryPrefixRequired
+	// for the continuation summarizer.
+	Prefix func(context.Context) (ai.AIRequest, error)
 	// RequestBudget limits the summary request; zero skips the check.
 	RequestBudget ai.RequestBudgetConfig
 }
@@ -65,8 +67,7 @@ func (s *HistorySource) CompactHistory(ctx context.Context, req AutoCompaction) 
 	if threshold == 0 {
 		threshold = DefaultCompactionThreshold
 	}
-	prefix := req.Prefix.Copy()
 	return compactor.compact(ctx, req.HistoryBudget, compactOptions{
-		prefix: &prefix, projectHistory: true, requestBudget: req.RequestBudget, threshold: threshold,
+		prefixFunc: req.Prefix, projectHistory: true, requestBudget: req.RequestBudget, threshold: threshold,
 	})
 }

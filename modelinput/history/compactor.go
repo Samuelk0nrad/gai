@@ -34,8 +34,8 @@ type CompactorDefinition struct {
 }
 
 // CompactionResult describes a successfully completed compaction operation.
-// On error the result is zero except Early: the candidate must not be treated
-// as committed.
+// On error the result is zero except Early and the summary call's Usage: the
+// candidate must not be treated as committed.
 type CompactionResult struct {
 	// Changed is true only after a successful CAS commit.
 	Changed bool
@@ -49,8 +49,9 @@ type CompactionResult struct {
 	Early bool
 	// SummarizedTurns is how many turns the committed summary folded.
 	SummarizedTurns int
-	// Usage is the provider usage of the summary request, when reported. It
-	// is not part of any agent run's usage.
+	// Usage is the provider usage of the summary request, when reported, also
+	// when compaction failed after the call. It is not part of any agent
+	// run's usage.
 	Usage         ai.Usage
 	UsageReported bool
 }
@@ -59,7 +60,9 @@ type CompactionResult struct {
 type CompactOption func(*compactOptions)
 
 type compactOptions struct {
-	prefix         *ai.AIRequest
+	prefix *ai.AIRequest
+	// prefixFunc renders the prefix only once compaction is needed.
+	prefixFunc     func(context.Context) (ai.AIRequest, error)
 	projectHistory bool
 	expected       Revision
 	expectedSet    bool
@@ -73,8 +76,14 @@ type compactOptions struct {
 // AgentResult.Transcript of the run that produced the newest turn. It must
 // contain the stored summary and the turns to fold, as that run sent them.
 // Pair it with WithExpectedRevision, so the summary applies to that state.
-func WithPrefix(request ai.AIRequest) CompactOption {
+// A nil request supplies none: the transcript is nil when the run did not
+// complete, and a continuation summarizer then returns ErrSummaryPrefixRequired.
+func WithPrefix(request *ai.AIRequest) CompactOption {
 	return func(o *compactOptions) {
+		if request == nil {
+			o.prefix = nil
+			return
+		}
 		copy := request.Copy()
 		o.prefix = &copy
 	}
@@ -180,7 +189,7 @@ func (c *Compactor) compact(ctx context.Context, historyBudget int, options comp
 	if t := float64(options.threshold); math.IsNaN(t) || t < 0 || t > 1 {
 		return result, ErrInvalidCompactionThreshold
 	}
-	if _, continuation := c.summarizer.(*ContinuationSummarizer); continuation && options.prefix == nil {
+	if _, continuation := c.summarizer.(*ContinuationSummarizer); continuation && options.prefix == nil && options.prefixFunc == nil {
 		return result, ErrSummaryPrefixRequired
 	}
 	if err = ctx.Err(); err != nil {
@@ -216,13 +225,23 @@ func (c *Compactor) compact(ctx context.Context, historyBudget int, options comp
 		if err != nil {
 			return result, err
 		}
-		trigger = early.budgetReached
+		// A stored summary that alone exceeds the threshold cannot get below
+		// it by folding turns, so it would compact on every run. It waits for
+		// real pressure instead.
+		trigger = early.budgetReached && (snapshot.State.Summary == nil || early.summaryIncluded)
 		result.Early = trigger
 	}
 	if !trigger || snapshot.State == nil || len(snapshot.State.Turns) == 0 {
 		return CompactionResult{Revision: snapshot.Revision, PressureRemaining: selected.budgetReached}, nil
 	}
 	prefix := options.prefix
+	if options.prefixFunc != nil {
+		var rendered ai.AIRequest
+		if rendered, err = options.prefixFunc(ctx); err != nil {
+			return result, err
+		}
+		prefix = &rendered
+	}
 	if prefix != nil && options.projectHistory {
 		// The prefix and the summary come from the same snapshot.
 		extended := prefix.Copy()
@@ -233,6 +252,8 @@ func (c *Compactor) compact(ctx context.Context, historyBudget int, options comp
 		amount: c.amount, maxTokens: c.summaryMaxTokens, prefix: prefix, responseFormat: c.responseFormat,
 		requestBudget: options.requestBudget, counter: c.counter,
 	}, obs)
+	// The call is billed even when compaction fails after it.
+	result.Usage, result.UsageReported = outcome.usage, outcome.usageReported
 	if err != nil {
 		return result, err
 	}
@@ -257,7 +278,7 @@ func (c *Compactor) compact(ctx context.Context, historyBudget int, options comp
 		return result, err
 	}
 	return CompactionResult{Changed: true, Revision: revision, PressureRemaining: selected.budgetReached, Early: result.Early,
-		SummarizedTurns: outcome.summarizedTurns, Usage: outcome.usage, UsageReported: outcome.usageReported}, nil
+		SummarizedTurns: outcome.summarizedTurns, Usage: result.Usage, UsageReported: result.UsageReported}, nil
 }
 
 // thresholdBudget is the largest history size that does not exceed threshold

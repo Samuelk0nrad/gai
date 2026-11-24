@@ -119,17 +119,19 @@ func summarizeHistory(ctx context.Context, state *HistoryState, summarizer Summa
 		RequestBudget:   req.requestBudget,
 		Counter:         counter,
 	})
+	// A failed call can still have been billed; keep its usage.
+	billed := summaryOutcome{usage: res.Usage, usageReported: res.UsageReported}
 	if err != nil {
-		return summaryOutcome{}, false, err
+		return billed, false, err
 	}
 	if res.FoldedTurns < 0 || res.FoldedTurns > summarizedTurnCount {
-		return summaryOutcome{}, false, fmt.Errorf("%w: summarizer folded %d of %d turns", ErrInvalidSummaryReply, res.FoldedTurns, summarizedTurnCount)
+		return billed, false, fmt.Errorf("%w: summarizer folded %d of %d turns", ErrInvalidSummaryReply, res.FoldedTurns, summarizedTurnCount)
 	}
 	if res.FoldedTurns > 0 {
 		summarizedTurnCount = res.FoldedTurns
 	}
 	if strings.TrimSpace(res.Text) == "" {
-		return summaryOutcome{}, false, fmt.Errorf("%w: empty summary", ErrInvalidSummaryReply)
+		return billed, false, fmt.Errorf("%w: empty summary", ErrInvalidSummaryReply)
 	}
 	summarizedTurns := state.Turns[:summarizedTurnCount]
 
@@ -149,7 +151,7 @@ func summarizeHistory(ctx context.Context, state *HistoryState, summarizer Summa
 	tokenCount, err := counter.CountTokens(ctx, nextSummary.Content.Text)
 	if err != nil {
 		obs.SummaryTokenCountFailed(ctx, nextSummary, err)
-		return summaryOutcome{}, false, err
+		return billed, false, err
 	}
 	obs.SummaryGenerated(ctx, nextSummary, tokenCount, summarizedTurnCount, len(state.Turns)-summarizedTurnCount, state.Summary != nil)
 

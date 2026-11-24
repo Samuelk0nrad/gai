@@ -224,6 +224,27 @@ func TestHistoryCompactionEarlyFailuresAndCancellation(t *testing.T) {
 	}
 }
 
+func TestHistoryCompactionTimeoutFailsTheRunWithoutCanceling(t *testing.T) {
+	probe := &compactionProbe{err: fmt.Errorf("summary call: %w", context.DeadlineExceeded)}
+	model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}
+	a := agent.New(agent.Definition{Model: model, TokenCounter: ai.TextTokenEstimator{}, HistoryCompaction: &agent.HistoryCompactionPolicy{},
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{TokenBudget: 256, ContextSources: []modelinput.ContextSource{probe}}), nil
+		}})
+	workflow, err := a.NewRun(t.Context(), textRunInput("q"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := workflow.Run(t.Context())
+	// The summarizer's own deadline is a failure, not a cancellation.
+	if !errors.Is(err, agent.ErrHistoryCompactionTimeout) || errors.Is(err, context.DeadlineExceeded) || result.Canceled || result.Primary.Canceled {
+		t.Fatalf("err=%v canceled=%v", err, result.Canceled)
+	}
+	if reports := result.Primary.HistoryCompaction; len(reports) != 1 || !errors.Is(reports[0].Err, context.DeadlineExceeded) {
+		t.Fatalf("reports = %+v", reports)
+	}
+}
+
 func TestAutoCompactHistoryConfigurationErrorsStopUnderContinue(t *testing.T) {
 	model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}
 	def := autoHistoryDefinition(model, localCountHistoryStore{})
@@ -341,9 +362,14 @@ func (p *compactionProbe) Function(_ context.Context, budget int) (modelinput.Pa
 	p.selected = append(p.selected, budget)
 	return nil, nil
 }
-func (p *compactionProbe) CompactHistory(_ context.Context, req history.AutoCompaction) (history.CompactionResult, error) {
+func (p *compactionProbe) CompactHistory(ctx context.Context, req history.AutoCompaction) (history.CompactionResult, error) {
 	p.prepared = append(p.prepared, req.HistoryBudget)
-	p.model, p.counter, p.prefix, p.budget, p.threshold = req.Model, req.Counter, req.Prefix, req.RequestBudget, req.Threshold
+	p.model, p.counter, p.budget, p.threshold = req.Model, req.Counter, req.RequestBudget, req.Threshold
+	prefix, err := req.Prefix(ctx)
+	if err != nil {
+		return history.CompactionResult{}, err
+	}
+	p.prefix = prefix
 	if p.err != nil || p.result != (history.CompactionResult{}) {
 		return p.result, p.err
 	}
@@ -526,7 +552,8 @@ func TestHistoryCompactionContinuesTheRunPromptByDefault(t *testing.T) {
 	store := conversationHistory(3)
 	recorder := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("short summary"), autoText("answer")}}
 	model := nativeToolWorkflowModel{recorder}
-	def := agent.Definition{Model: model, HistoryCompaction: &agent.HistoryCompactionPolicy{}, TokenCounter: ai.TextTokenEstimator{},
+	// The summary limit must fit the small test window.
+	def := agent.Definition{Model: model, HistoryCompaction: &agent.HistoryCompactionPolicy{SummaryMaxTokens: 100}, TokenCounter: ai.TextTokenEstimator{},
 		Tools: []loop.Tool{loop.NewEchoTool()},
 		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
 			return modelinput.New(modelinput.Definition{TokenBudget: 1000,
@@ -622,7 +649,7 @@ func TestTranscriptContinuesIntoEndOfRunCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	compacted, err := compactor.Compact(t.Context(), 50, history.WithPrefix(*transcript), history.WithExpectedRevision(revision))
+	compacted, err := compactor.Compact(t.Context(), 50, history.WithPrefix(transcript), history.WithExpectedRevision(revision))
 	if err != nil || !compacted.Changed {
 		t.Fatalf("compact: %+v %v", compacted, err)
 	}

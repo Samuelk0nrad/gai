@@ -4,7 +4,8 @@
 recent complete turns that fit the allocated history budget. Its source functions
 and ordinary `Builder.BuildContext` calls are read-only. Selection may omit turns from a prompt without deleting
 them from storage. Existing summary-first selection and tool-result previews are
-preserved.
+preserved. The summary is the oldest history, so it is trimmed first: when it does
+not fit, selection skips it and still selects the newest turns that fit.
 
 ## Explicit compaction
 
@@ -13,15 +14,15 @@ compactor, err := history.NewCompactor(sessionID, store, history.CompactorDefini
     Model: model,          // selects the continuation summarizer
     TokenCounter: counter, // nil selects ai.TextTokenEstimator
     Amount: 0.7,           // oldest fraction; zero selects this default
-    SummaryMaxTokens: 512,
+    SummaryMaxTokens: 512, // zero selects history.DefaultSummaryMaxTokens (2048)
 })
 if err != nil {
     return err
 }
 result, err := compactor.Compact(ctx, historyBudget,
-    history.WithPrefix(*run.Primary.Transcript), // the run that produced the newest turn
-    history.WithExpectedRevision(committed),     // the revision that turn was committed with
-    history.WithRequestBudget(requestBudget),    // the model's request budget
+    history.WithPrefix(run.Primary.Transcript), // the run that produced the newest turn
+    history.WithExpectedRevision(committed),    // the revision that turn was committed with
+    history.WithRequestBudget(requestBudget),   // the model's request budget
 )
 ```
 
@@ -36,8 +37,9 @@ revision or the loaded revision for a no-op. `PressureRemaining` reports that so
 working history still cannot fit, including an oversized summary with no remaining
 turns. Compaction does not promise to eliminate pressure. `SummarizedTurns` and
 `Usage` describe the summary call; that usage is not part of any agent run's
-usage. Errors return a zero result; do not consume an uncommitted candidate or
-automatically retry it.
+usage. Errors return a zero result except for `Early` and `Usage`: a summary call
+that ran before the failure was still billed, so its usage is reported. Do not
+consume an uncommitted candidate or automatically retry it.
 
 Only completed turns belong in this working history. History is a compacted
 working representation: retain an archival transcript separately if original
@@ -70,16 +72,20 @@ provider can serve the shared prefix from its prompt cache:
   whitespace, key order and escaping may differ, and older tool results may be
   history previews. A mismatch returns `history.ErrSummaryPrefixMismatch`.
 - With `WithRequestBudget`, a request that does not fit drops its cached prefix
-  after the last folded turn and summarizes all of it, then folds fewer turns, down
-  to one. `history.ErrSummaryRequestTooLarge` means not even one turn fits.
+  after the last folded turn and summarizes all of it, else folds the most turns
+  that fit, at least one. `history.ErrSummaryRequestTooLarge` means not even one turn fits.
 - A reply that calls a tool, is empty, or stops at the output limit returns
   `history.ErrInvalidSummaryReply`. The call is one generation with no retries.
 - `SummaryMaxTokens` limits the summary output and is the output reserved in the
-  budget check. A reasoning token budget (`ai.ReasoningConfig.BudgetTokens`) is
-  added on top; reasoning controlled only by effort is not, so leave it room.
+  budget check. Zero selects `history.DefaultSummaryMaxTokens` (2048): the
+  continued request's own limit is the answer's, not the summary's, and the limit
+  does not affect the cache. A reasoning token budget
+  (`ai.ReasoningConfig.BudgetTokens`) is added on top; reasoning controlled only by
+  effort is not, so leave it room.
 
-Calling `Compact` without `WithPrefix` returns `history.ErrSummaryPrefixRequired`,
-even when no compaction is needed. To summarize without a prefix, configure the
+Calling `Compact` without `WithPrefix`, or with a nil request, returns
+`history.ErrSummaryPrefixRequired`, even when no compaction is needed, so the
+missing prefix shows up on the first call. To summarize without a prefix, configure the
 separate-prompt text summarizer from `agent/summary`:
 
 ```go
@@ -97,7 +103,9 @@ it is still valid, and the request only grows by the answer and the instruction,
 so it usually fits the window that the run's last request fit. This is the most
 reliable cache-reusing path. Use the same model as the run, because replayed
 provider state such as reasoning signatures belongs to it. The transcript is nil
-unless the stage completed in that execution.
+unless the stage completed in that execution; `WithPrefix` takes the pointer, so a
+failed, canceled or paused run returns `ErrSummaryPrefixRequired` instead of
+panicking.
 
 A transcript only contains the turns the run selected. If an earlier compaction
 failed and history selection then dropped the oldest turns or the summary, the
@@ -157,6 +165,8 @@ tool choice is sent as the auto choice the previous run ended with. The run's
 request budget limits the summary request, as described above. Set
 `HistoryCompactionPolicy.Summarizer` to use another summarizer; `Amount`,
 `SummaryMaxTokens` and `ResponseFormat` mean the same as in `CompactorDefinition`.
+The run's answer limit is not the summary limit. The system prompt and earlier
+context are rendered for the summary only when compaction runs.
 
 Compaction runs once the history exceeds `Threshold` of its allocation, 0.85 by
 default. Starting before the allocation is full matters for the cache: the summary
@@ -182,7 +192,8 @@ reported as continued. A revision conflict still follows `OnFailure`, because
 another writer changed the history, which may no longer fit. Cancellation and configuration errors, such as a read-only store,
 stop the run in all cases. Cancellation is the run's context ending or a
 `context.Canceled` error; a deadline that the summarizer or store sets for itself
-is an ordinary compaction failure. Compaction is not rolled back if the later run fails.
+is an ordinary compaction failure; when it ends the run, the run fails with
+`agent.ErrHistoryCompactionTimeout` rather than being reported as canceled. Compaction is not rolled back if the later run fails.
 Final request-budget checks, including optional provider counting, still apply and
 do not trigger another compaction.
 
@@ -262,6 +273,14 @@ This is a breaking pre-v1 change; no legacy unconditional-save adapter is provid
    `Optional`. Checkpoints written with `auto_compact_history` still resume.
    The policy now compacts at 0.85 of the allocation instead of only when history
    no longer fits; set `Threshold: 1` for the previous trigger.
+   `Builder.BuildContextWithPreparation` now passes one `modelinput.SourcePreparation`
+   instead of separate arguments: replace
+   `func(ctx, source ContextSource, remaining int, counter ai.TokenCounter) error`
+   with `func(ctx context.Context, prep modelinput.SourcePreparation) error` and read
+   `prep.Source`, `prep.Remaining` and `prep.Counter`. `prep.Preceding` renders the
+   system prompt and the sources before this one.
+   History selection now skips a summary that does not fit and keeps the newest
+   turns that do, instead of selecting nothing.
 5. Handle conflicts in application orchestration. Preserve the canonical transcript
    and accepted output; token estimates and streamed attempt events are not history.
 

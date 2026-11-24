@@ -184,10 +184,8 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 				terminal = Event{Type: EventStageFinish, Source: source, StageOutcome: StagePaused, IterationCount: low.IterationCount, AttemptID: low.AttemptID}
 			case loop.EventDone:
 				terminal = Event{Type: EventStageFinish, Source: source, StageOutcome: StageSucceeded}
-				if low.Transcript != nil {
-					transcript := low.Transcript.Copy()
-					acc.transcript = &transcript
-				}
+				// The loop built the transcript for this event alone.
+				acc.transcript = low.Transcript
 			}
 			if terminal.Type != "" {
 				terminal.GenerationID = low.GenerationID
@@ -236,7 +234,12 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 		if terminal.StageOutcome == StagePaused {
 			w.result.Status = StatusPaused
 		}
-		w.result.Primary = cloneAgentResult(primary)
+		// The transcript was built for this result alone, so only Result
+		// copies it.
+		stored := primary
+		stored.Transcript = nil
+		w.result.Primary = cloneAgentResult(stored)
+		w.result.Primary.Transcript = primary.Transcript
 		w.result.Usage = primary.Usage
 		w.result.BilledUsage = primary.BilledUsage
 		w.result.Errors = append([]error(nil), primary.Errors...)
