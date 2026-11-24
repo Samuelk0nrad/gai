@@ -489,7 +489,11 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 	execution.Output = ToolOutputAccepted
 	if processor != nil {
 		input.Call = input.Call.Clone()
-		processed, err := processor.Process(toolCtx, input, result)
+		// The processor gets its own media so in-place edits still show up
+		// as a changed output when compared with original.
+		toProcess := result
+		toProcess.Media = cloneMedia(result.Media)
+		processed, err := processor.Process(toolCtx, input, toProcess)
 		if err != nil {
 			execution.Output = ToolOutputRejected
 			return nil, duration, fmt.Errorf("%w: %w", ErrToolResultProcess, err)
