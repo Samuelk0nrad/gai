@@ -37,7 +37,9 @@ func (l *Loop) resultProcessor() ToolResultProcessor {
 // adaptToolResultMedia replaces media the model does not accept with what
 // the media policy converts it to. Converted text is appended to Text, one
 // line per part, and converted media replaces the original in Media. Media
-// that cannot be sent becomes an ErrToolMediaUnsupported tool error.
+// that cannot be sent becomes an ErrToolMediaUnsupported tool error; a
+// converter failure (*ai.MediaConversionError) is returned as a processing
+// error.
 func adaptToolResultMedia(ctx context.Context, adapter *ai.MediaAdapter, result ToolResult) (ToolResult, error) {
 	if result.Err != nil || len(result.Media) == 0 {
 		return result, nil
@@ -50,6 +52,12 @@ func adaptToolResultMedia(ctx context.Context, adapter *ai.MediaAdapter, result 
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ToolResult{}, ctxErr
+		}
+		// A failing converter is a processing error, like a failing
+		// redactor: the run stops instead of hiding the failure.
+		var conversion *ai.MediaConversionError
+		if errors.As(err, &conversion) {
+			return ToolResult{}, err
 		}
 		placeholders := make([]string, len(result.Media))
 		for i, media := range result.Media {

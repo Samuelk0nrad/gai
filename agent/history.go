@@ -266,3 +266,22 @@ func historyConfigurationError(err error) bool {
 	}
 	return false
 }
+
+// mediaPolicyModel applies the agent's media policy to requests that bypass
+// the loop, such as continuation summaries during history compaction.
+type mediaPolicyModel struct {
+	ai.Model
+	media *ai.MediaAdapter
+}
+
+func (m mediaPolicyModel) GenerateStream(ctx context.Context, request ai.AIRequest) <-chan ai.Token {
+	messages, err := m.media.Messages(ctx, request.Messages)
+	if err != nil {
+		tokens := make(chan ai.Token, 1)
+		tokens <- ai.Token{Err: err}
+		close(tokens)
+		return tokens
+	}
+	request.Messages = messages
+	return m.Model.GenerateStream(ctx, request)
+}

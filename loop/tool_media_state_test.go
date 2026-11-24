@@ -2,6 +2,7 @@ package loop
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/Samuelk0nrad/gai/ai"
@@ -32,5 +33,23 @@ func TestInPlaceMediaEditIsReportedAsChanged(t *testing.T) {
 	parts := iteration.Conversation[0].Parts[0].ToolResult.Parts
 	if len(parts) != 2 || parts[1].Media == nil || parts[1].Media.Name != "b.png" || parts[1].Media.Data[0] != 9 {
 		t.Fatalf("parts=%#v", parts)
+	}
+}
+
+// Media a processor returns is validated like the handler's.
+func TestProcessorReturningInvalidMediaIsRejected(t *testing.T) {
+	tool, err := NewTool("test", "Test.", ai.ToolParameters{}, func(context.Context, ai.ToolCall) (string, error) { return "ok", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor := ToolResultProcessorFunc(func(_ context.Context, _ ToolPolicyInput, result ToolResult) (ToolResult, error) {
+		result.Media = []ai.MediaPart{{MIMEType: "image/png"}} // neither URI nor Data
+		return result, nil
+	})
+	l := &Loop{Tools: []Tool{tool}, ToolResultProcessor: processor}
+	iteration, calls := schedulerCalls("test")
+	err = l.executeToolCalls(t.Context(), iteration, calls, l.Tools, make(chan Event, 8), 1, 1, 0)
+	if !errors.Is(err, ErrToolResultProcess) {
+		t.Fatalf("err = %v", err)
 	}
 }

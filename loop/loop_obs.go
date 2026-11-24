@@ -499,6 +499,12 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 			return nil, duration, fmt.Errorf("%w: %w", ErrToolResultProcess, err)
 		}
 		result = processed.normalized()
+		// The handler's media was validated when it returned; a processor
+		// may return new media, which must be valid before it is recorded.
+		if err := validateMedia(result.Media); err != nil {
+			execution.Output = ToolOutputRejected
+			return nil, duration, fmt.Errorf("%w: %w", ErrToolResultProcess, err)
+		}
 	}
 	execution.Output = outputState(original, &result)
 	return &result, duration, nil

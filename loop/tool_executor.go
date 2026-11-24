@@ -474,6 +474,9 @@ func (l *Loop) processUninvoked(ctx context.Context, task scheduledTool) (respon
 			return nil, fmt.Errorf("%w: %w", ErrToolResultProcess, err)
 		}
 		result = processed.normalized()
+		if err := validateMedia(result.Media); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrToolResultProcess, err)
+		}
 	}
 	result = preserveToolRefusal(*task.result, result)
 	return &result, nil

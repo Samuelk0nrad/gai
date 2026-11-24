@@ -76,8 +76,10 @@ def.Media = ai.MediaPolicy{
 
 - **Converter.** Returns replacement parts: text, JSON, or media the model
   accepts. `accepts` checks a candidate against the model, so one converter
-  can pick a target per provider. Return `ai.ErrMediaNotConverted` to decline;
-  any other error is a `*ai.MediaConversionError`. GAI ships no converters,
+  can pick a target per provider. An empty result removes the file. Return
+  `ai.ErrMediaNotConverted` to decline; any other error is a
+  `*ai.MediaConversionError` and stops the run. Concurrent requests for the
+  same file share one conversion. GAI ships no converters,
   because they need tools such as LibreOffice, ffmpeg or a speech-to-text
   service.
 - **Fallback.** For media no converter handled. `ai.MediaFallbackError` (the
@@ -89,10 +91,20 @@ def.Media = ai.MediaPolicy{
   the original, so events, checkpoints and history keep the converted form.
   Media that still cannot be sent becomes a tool error matching
   `loop.ErrToolMediaUnsupported`: the model sees which file it could not read,
-  and the run continues instead of failing on every later request.
-- **User and history messages** are adapted in every request, before the
-  request budget check. Each distinct file is converted once per run and the
-  result reused, so a rebuilt conversation does not convert it again.
+  and the run continues instead of failing on every later request. A
+  converter failure stops the run with `loop.ErrToolResultProcess`.
+- **The run's user input** is converted when the agent creates the run,
+  before the prompt is built, so request budgets and history compaction count
+  the converted content.
+- **History and other messages** are adapted in every request, before the
+  request budget check, and in history-compaction summary requests. Each
+  distinct file is converted once per run and the result reused.
+- **Acceptance is checked locally**: `AcceptsMedia` also decodes `data:` URIs
+  and checks that text files are UTF-8, so an unreadable file reaches the
+  converter or fallback instead of failing when the request is mapped.
+- **Required extensions.** A media part with a required extension is never
+  replaced, because the extension would be lost; it fails with an
+  `*ai.UnsupportedContentError`.
 - **Models without `ai.MediaAcceptor`**, such as custom test models, are sent
   media unchanged.
 

@@ -99,7 +99,8 @@ type Loop struct {
 	// Media controls media the Model does not accept, when the Model is an
 	// ai.MediaAcceptor. Tool results are adapted once, after
 	// ToolResultProcessor; media the model cannot read there becomes an
-	// ErrToolMediaUnsupported tool error. Every request is adapted before
+	// ErrToolMediaUnsupported tool error, and a converter failure stops the
+	// run with ErrToolResultProcess. Every request is adapted before
 	// its budget check; each distinct file is converted once per run.
 	Media ai.MediaPolicy
 	// mediaAdapter applies Media for the current run.

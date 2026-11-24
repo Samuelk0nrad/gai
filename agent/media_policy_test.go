@@ -99,7 +99,7 @@ func TestUnconvertedToolMediaBecomesToolError(t *testing.T) {
 	}
 }
 
-func TestUnsupportedUserMediaFailsBeforeTheRequest(t *testing.T) {
+func TestFailingConverterStopsTheRunBeforeTheRequest(t *testing.T) {
 	model := pngOnlyModel{&durableModel{responses: [][]ai.Token{response("unused")}}}
 	def := durableDefinition(model)
 	def.Media = ai.MediaPolicy{Converter: ai.MediaConverterFunc(func(context.Context, ai.MediaPart, func(ai.MediaPart) error) ([]ai.ContentPart, error) {
@@ -108,13 +108,56 @@ func TestUnsupportedUserMediaFailsBeforeTheRequest(t *testing.T) {
 	input := agent.RunInput{Prompt: modelinput.PromptInput{User: []ai.ContentPart{
 		{Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: "audio/mpeg", Data: []byte{1}}},
 	}}}
+	// The user's media is converted when the run is created, before the
+	// prompt is built.
+	_, err := agent.New(def).NewRun(t.Context(), input)
+	var conversion *ai.MediaConversionError
+	if !errors.As(err, &conversion) || model.count() != 0 {
+		t.Fatalf("error = %v, requests = %d", err, model.count())
+	}
+}
+
+// A large file the converter shrinks must fit the request budget, which
+// counts the prompt before the loop sends it.
+func TestConvertedUserMediaFitsTheRequestBudget(t *testing.T) {
+	model := pngOnlyModel{&durableModel{responses: [][]ai.Token{response("done")}}}
+	var conversions atomic.Int32
+	def := durableDefinition(model)
+	def.Media = ai.MediaPolicy{Converter: textOfDocx(&conversions)}
+	def.HistoryCompaction = &agent.HistoryCompactionPolicy{}
+	def.RequestBudget = &ai.RequestBudgetConfig{Limit: 4000, InputLimit: 3000}
+	big := make([]byte, 200_000) // about 50,000 tokens if counted raw
+	input := agent.RunInput{Prompt: modelinput.PromptInput{User: []ai.ContentPart{
+		{Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: docxMIME, Data: big, Name: "big.docx"}},
+	}}}
 	w, err := agent.New(def).NewRun(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := w.Run(t.Context())
+	if err != nil || result.Status != agent.StatusSucceeded {
+		t.Fatalf("result = %+v, error = %v", result, err)
+	}
+	if got := model.requests[0].Messages[1].Text(); got != "<text of big.docx>" {
+		t.Fatalf("user message = %q", got)
+	}
+}
+
+// A converter that fails on a tool result stops the run instead of
+// turning the failure into a generic tool error.
+func TestFailingConverterOnToolResultStopsTheRun(t *testing.T) {
+	model := pngOnlyModel{&durableModel{responses: [][]ai.Token{calls("open_file"), response("unused")}}}
+	def := durableDefinition(model, docxTool(t))
+	def.Media = ai.MediaPolicy{Converter: ai.MediaConverterFunc(func(context.Context, ai.MediaPart, func(ai.MediaPart) error) ([]ai.ContentPart, error) {
+		return nil, errors.New("transcriber down")
+	})}
+	w, err := agent.New(def).NewRun(t.Context(), textRunInput("open it"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = w.Run(t.Context())
 	var conversion *ai.MediaConversionError
-	if !errors.As(err, &conversion) || model.count() != 0 {
+	if !errors.Is(err, loop.ErrToolResultProcess) || !errors.As(err, &conversion) || model.count() != 1 {
 		t.Fatalf("error = %v, requests = %d", err, model.count())
 	}
 }

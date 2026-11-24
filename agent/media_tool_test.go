@@ -3,6 +3,7 @@ package agent_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"strconv"
 	"strings"
@@ -155,7 +156,7 @@ func TestResultToolMediaIsNotCapturedInTraces(t *testing.T) {
 	for _, span := range recorder.Ended() {
 		for key, value := range obstest.Attributes(span) {
 			text := value.String()
-			for _, leak := range []string{"receipt-secret", "UE5HLXJlY2VpcHQtc2VjcmV0", "X-Amz-Signature", "files.example.test"} {
+			for _, leak := range []string{"receipt-secret", base64.StdEncoding.EncodeToString(receiptPNG), "X-Amz-Signature", "files.example.test"} {
 				if strings.Contains(text, leak) {
 					t.Fatalf("span %q attribute %s leaks %q: %s", span.Name(), key, leak, text)
 				}

@@ -237,7 +237,16 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 		return nil, loop.ErrPromptNotConfigured
 	}
 	nativeTools := execution.nativeTools
-	promptBuilder, err := a.def.Prompt(ctx, cloneRunInput(input))
+	// Convert the user's media before the prompt is built, so request
+	// budgets and history compaction count what the model will receive.
+	media := ai.NewMediaAdapter(execution.model, a.def.Media)
+	input = cloneRunInput(input)
+	user, err := media.Parts(ctx, input.Prompt.User, ai.MediaInUserMessage)
+	if err != nil {
+		return nil, err
+	}
+	input.Prompt.User = user
+	promptBuilder, err := a.def.Prompt(ctx, input)
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +311,11 @@ func (a *Agent) newLoop(ctx context.Context, input RunInput, execution resolvedE
 		if !ok {
 			return nil, ErrHistoryCompactionNotConfigurable
 		}
-		promptBuilder = &compactingPromptBuilder{Builder: builder, model: execution.model, policy: *execution.historyCompaction, sink: a.def.ObservationSink}
+		compactionModel := execution.model
+		if _, ok := compactionModel.(ai.MediaAcceptor); ok {
+			compactionModel = mediaPolicyModel{Model: compactionModel, media: media}
+		}
+		promptBuilder = &compactingPromptBuilder{Builder: builder, model: compactionModel, policy: *execution.historyCompaction, sink: a.def.ObservationSink}
 	}
 
 	l := loop.New(execution.model, execution.tools, promptBuilder, execution.toolResultProcessor)
