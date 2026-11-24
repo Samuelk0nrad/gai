@@ -34,7 +34,9 @@
 // precedence. Workflow middleware is not this authorization boundary. Policies
 // can allow, deny, or require approval. Result processors run after invocation and
 // before any outer result publication; ChainToolResultProcessors composes them.
-// RedactToolResult sanitizes errors as well as text. Put LimitToolResultBytes last.
+// RedactToolResult sanitizes errors as well as text. Put LimitToolResultBytes,
+// or TruncateToolResultBytes to keep the start of oversized output with a note
+// instead of rejecting it, last.
 // ToolExecution records authorization, invocation, and output disposition
 // independently: rejected output never undoes a successful external side effect.
 //

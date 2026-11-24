@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"unicode/utf8"
 )
 
 // ChainToolResultProcessors transforms output in declaration order. Each callback
@@ -83,18 +84,78 @@ func LimitToolResultBytes(maxBytes int) (ToolResultProcessor, error) {
 	}
 	return ToolResultProcessorFunc(func(_ context.Context, _ ToolPolicyInput, result ToolResult) (ToolResult, error) {
 		if maxBytes > 0 && len(result.String()) > maxBytes {
-			message := "tool output too large"
-			kinds := []error{ErrToolOutputLimit}
-			for _, refusal := range []error{ErrToolDenied, ErrToolApprovalRequired} {
-				if errors.Is(result.Err, refusal) {
-					kinds = append(kinds, refusal)
-					message = refusal.Error()
-				}
-			}
-			return ToolResult{Err: safeToolError{text: message, kind: errors.Join(kinds...)}}, nil
+			return rejectOversizedToolResult(result), nil
 		}
 		return result, nil
 	}), nil
+}
+
+// MinTruncateToolResultBytes is the smallest supported nonzero budget for
+// TruncateToolResultBytes. It fits the longest truncation note with room left
+// for the start of the result.
+const MinTruncateToolResultBytes = 128
+
+// TruncateToolResultBytes cuts oversized successful output instead of
+// rejecting it. It keeps the start of the text, cut on a UTF-8 boundary, and
+// appends a note with the kept and original sizes:
+//
+//	\n\n[tool result truncated: showing first K of N bytes]
+//
+// The note counts toward maxBytes, so the result never exceeds it. The cut is
+// plain text: a cut JSON result is no longer valid JSON. Put a structure-aware
+// processor before this one to shorten JSON by fields instead. The same input
+// always produces the same output, and output that already fits is unchanged,
+// so applying the processor again to stored results is a no-op.
+//
+// Oversized error text, including ErrToolDenied and ErrToolApprovalRequired
+// refusals, is handled exactly like LimitToolResultBytes: it is replaced with a
+// safe ErrToolOutputLimit or refusal message rather than cut. Zero disables the
+// limit; positive budgets below MinTruncateToolResultBytes are invalid. Put it
+// last in ChainToolResultProcessors, after redaction. Like LimitToolResultBytes,
+// it cannot bound allocations already made by a handler.
+func TruncateToolResultBytes(maxBytes int) (ToolResultProcessor, error) {
+	if maxBytes < 0 || (maxBytes > 0 && maxBytes < MinTruncateToolResultBytes) {
+		return nil, fmt.Errorf("%w: result truncation limit must be zero or at least %d", ErrToolResultProcess, MinTruncateToolResultBytes)
+	}
+	return ToolResultProcessorFunc(func(_ context.Context, _ ToolPolicyInput, result ToolResult) (ToolResult, error) {
+		if maxBytes == 0 || len(result.String()) <= maxBytes {
+			return result, nil
+		}
+		if result.Err != nil {
+			return rejectOversizedToolResult(result), nil
+		}
+		return ToolResult{Text: truncateToolText(result.Text, maxBytes)}, nil
+	}), nil
+}
+
+// truncateToolText keeps the longest UTF-8-aligned prefix that fits maxBytes
+// together with its note. len(text) must exceed maxBytes.
+func truncateToolText(text string, maxBytes int) string {
+	// The kept size never exceeds maxBytes, so a note sized with maxBytes is at
+	// least as long as the final note; cutting to fit it always leaves room.
+	keep := maxBytes - len(truncationNote(maxBytes, len(text)))
+	for i := 0; i < utf8.UTFMax-1 && keep > 0 && !utf8.RuneStart(text[keep]); i++ {
+		keep--
+	}
+	return text[:keep] + truncationNote(keep, len(text))
+}
+
+func truncationNote(kept, original int) string {
+	return fmt.Sprintf("\n\n[tool result truncated: showing first %d of %d bytes]", kept, original)
+}
+
+// rejectOversizedToolResult replaces output with a complete safe diagnostic,
+// preserving framework refusal classifications.
+func rejectOversizedToolResult(result ToolResult) ToolResult {
+	message := "tool output too large"
+	kinds := []error{ErrToolOutputLimit}
+	for _, refusal := range []error{ErrToolDenied, ErrToolApprovalRequired} {
+		if errors.Is(result.Err, refusal) {
+			kinds = append(kinds, refusal)
+			message = refusal.Error()
+		}
+	}
+	return ToolResult{Err: safeToolError{text: message, kind: errors.Join(kinds...)}}
 }
 
 // safeToolErrorKinds retains framework classifications without arbitrary error causes.
