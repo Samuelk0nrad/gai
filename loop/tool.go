@@ -19,8 +19,9 @@ import (
 // Text in the canonical tool result, as ai.ContentMedia parts, and reach the
 // model only through providers that accept media in tool results. Processors
 // receive and return Media: a processor that builds a new ToolResult must copy
-// Media to keep it. Text processors such as RedactToolResult and
-// LimitToolResultBytes see only Text; media bytes are not redacted or limited.
+// Media to keep it. Text processors such as RedactToolResult,
+// LimitToolResultBytes and TruncateToolResultBytes see only Text; media bytes
+// are not redacted, limited or truncated.
 type ToolResult struct {
 	Text  string
 	Media []ai.MediaPart

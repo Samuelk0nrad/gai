@@ -67,8 +67,12 @@ openFile, err := loop.NewResultTool("open_file", "Open a stored file", params,
 - **Canonical result.** A result without media keeps its single text part. With
   media, non-empty text comes first, then one `ai.ContentMedia` part per media
   item. Checkpoints keep the parts, so a resumed run replays them.
-- **Providers.** The provider must accept media in tool results. The OpenAI
-  Responses transport does; other adapters return `ai.ErrUnsupportedCapability`.
+- **Providers.** The provider must accept media in tool results. Only the
+  OpenAI Responses transport does. Anthropic, Gemini, Mistral and OpenAI Chat
+  Completions return `ai.ErrUnsupportedCapability` when the next request is
+  built, after the tool has already run. The checkpoint keeps the media, so
+  resuming the run with the same provider fails the same way. Register
+  `NewResultTool` tools only on agents that use the Responses transport.
 - **Telemetry.** Captured tool output shows each media part as a placeholder
   with its size, such as `[image: a.png, image/png, 2048 bytes]`. Bytes and
   URIs are never captured.
@@ -301,9 +305,54 @@ but the executor preserves the original denial or approval-required classificati
 and the model-facing error flag. Filtering cannot turn an unapproved call into a
 successful invocation.
 
+### Truncate instead of rejecting
+
+`LimitToolResultBytes` hides an oversized result from the model entirely. To
+keep the start of a large result (a web page, a long search list) instead, use
+`TruncateToolResultBytes` as the last processor:
+
+```go
+truncate, err := loop.TruncateToolResultBytes(16 * 1024) // about 4,000 tokens
+if err != nil { return err }
+processor, err := loop.ChainToolResultProcessors(redact, truncate)
+if err != nil { return err }
+```
+
+An oversized successful result keeps its start, cut on a UTF-8 boundary, and
+ends with a note that counts toward the limit:
+
+```text
+<first K bytes>
+
+[tool result truncated: showing first K of N bytes]
+```
+
+- The cut is plain text. A cut JSON result is no longer valid JSON; providers
+  send tool results as text, and models read the prefix and note well. To
+  shorten JSON by its structure (drop fields, cap arrays), put your own
+  processor before the truncation.
+- The limit is in bytes, not tokens, so the same result is always cut the same
+  way, whatever the model or tokenizer. Output that already fits is unchanged,
+  so a cut result stored in history and replayed with the same or a larger
+  limit stays the same, which keeps prompt-cache prefixes stable. If the limit
+  is later lowered, a stored cut is cut again from its kept text and keeps the
+  original size in its single note, giving the same text as cutting the
+  original once at the new limit.
+- Oversized error text, including `ErrToolDenied` and `ErrToolApprovalRequired`
+  refusals, is never cut: it is replaced exactly as `LimitToolResultBytes` does.
+- Media is kept unchanged; only the text is cut. Media bytes do not count
+  toward the limit.
+- Zero disables truncation. Positive limits must be at least
+  `loop.MinTruncateToolResultBytes` (128 bytes) so the note always fits.
+- Events, the conversation, retained results, and tool spans all see the cut
+  text with its note; the full original is never captured by loop telemetry.
+  The execution's output state is `changed`, and tool spans record it as
+  `gai.tool.output=changed`.
+
 A custom processor returns `ToolResult{Text: ..., Media: ..., Err: ...}` as a
 replacement; copy `Media` from its input to keep the files. The built-in
-processors keep media. Redaction and the byte limit apply to text only.
+processors keep media. Redaction, the byte limit and truncation apply to text
+only.
 Use `RejectToolResult("safe reason")` to withhold output while continuing the run
 with a model-visible error. A processing error or panic terminates the run and
 withholds the raw output. Error implementations retained in snapshots must be

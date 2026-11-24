@@ -39,6 +39,15 @@ func TestTextProcessorsKeepMedia(t *testing.T) {
 	if got, err := limit.Process(t.Context(), input, loop.ToolResult{Text: "ok", Media: big}); err != nil || got.Err != nil || len(got.Media) != 1 {
 		t.Fatalf("limit = %+v, %v", got, err)
 	}
+	// Truncation cuts the text and keeps the media.
+	truncate, err := loop.TruncateToolResultBytes(loop.MinTruncateToolResultBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = truncate.Process(t.Context(), input, loop.ToolResult{Text: strings.Repeat("x", 1024), Media: media})
+	if err != nil || got.Err != nil || len(got.Text) > loop.MinTruncateToolResultBytes || !strings.Contains(got.Text, "[tool result truncated") || !reflect.DeepEqual(got.Media, media) {
+		t.Fatalf("truncate = %+v, %v", got, err)
+	}
 }
 
 func TestResultToolFunctionReturnsTextOnly(t *testing.T) {
