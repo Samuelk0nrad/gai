@@ -85,12 +85,29 @@ a one-token generation request to count input. Application overrides on this pat
 must likewise be cheap and local.
 
 `ai.EstimateRequestTokens` versions its portable projection with
-`gai.request/canonical-messages-v1`. Plain text parts in a message are concatenated
+`gai.request/canonical-messages-v2`. Plain text parts in a message are concatenated
 literally, with four estimated framing tokens per message and three for the reply
 prefix. Structured or extension-bearing messages use their canonical JSON
 envelope, which already includes framing. Native tool schemas and non-default
 response/tool/reasoning options are counted separately once. Text tool protocols
 already live in rendered messages and incur no additional native-schema cost.
+
+### Media
+
+A message with media, including media inside tool results, is counted as its
+canonical JSON envelope without the media bytes (MIME type, URI and name stay),
+plus a fixed local allowance per media part. The allowances are deliberately
+high, so budgets do not underestimate:
+
+| Media | Allowance |
+| --- | --- |
+| Image (`image/*`) | 1,600 tokens. OpenAI's tile accounting caps a high-detail image near 1,450 tokens, and its patch accounting at 1,536 patches before model multipliers. |
+| PDF (`application/pdf`) | 1,500 tokens per page. Inline PDFs read the page count from the page tree, or assume one page per 64 KiB when the tree is compressed. A PDF given by URL counts as 10 pages. |
+| Text (`text/*`, JSON) as bytes | The decoded text, counted with the selected counter. |
+| Other media | One token per four bytes, at least 1,600 tokens. |
+
+Version 1 of the projection counted media bytes as base64 JSON text, which
+inflated estimates by orders of magnitude.
 
 During request-budget allocation, the standard builder reserves fixed system and
 input context using the same rendered or canonical messages as `BuildRequest`,
