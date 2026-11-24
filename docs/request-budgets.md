@@ -95,14 +95,16 @@ already live in rendered messages and incur no additional native-schema cost.
 ### Media
 
 A message with media, including media inside tool results, is counted as its
-canonical JSON envelope without the media bytes (MIME type, URI and name stay),
-plus a fixed local allowance per media part. The allowances are deliberately
-high, so budgets do not underestimate:
+canonical JSON envelope without the media bytes (MIME type, URI and name stay;
+a base64 `data:` URI keeps only its header), plus a fixed local allowance per
+media part. A `data:` URI is decoded and estimated like the same bytes in
+`Data`. The allowances are sized for the OpenAI Responses transport, the only
+adapter that sends PDFs, text files and media in tool results:
 
 | Media | Allowance |
 | --- | --- |
 | Image (`image/*`) | 1,600 tokens. OpenAI's tile accounting caps a high-detail image near 1,450 tokens, and its patch accounting at 1,536 patches before model multipliers. |
-| PDF (`application/pdf`) | 1,500 tokens per page. Inline PDFs read the page count from the page tree, or assume one page per 64 KiB when the tree is compressed. A PDF given by URL counts as 10 pages. |
+| PDF (`application/pdf`) | 1,500 tokens per page. Inline PDFs read the page count from the page tree (outline `/Count` values are ignored), or assume one page per 64 KiB when the tree is compressed. A PDF given by URL counts as 10 pages. |
 | Text (`text/*`, JSON) as bytes | The decoded text, counted with the selected counter. |
 | Other media | One token per four bytes, at least 1,600 tokens. |
 

@@ -2,6 +2,7 @@ package ai
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -11,6 +12,14 @@ func TestRequestEstimateCountsMediaWithoutEncodedBytes(t *testing.T) {
 	image := bytes.Repeat([]byte{0x89}, 1<<20)
 	pdf := []byte("%PDF-1.7 1 0 obj << /Type /Pages /Kids [2 0 R 3 0 R 4 0 R] /Count 3 >> endobj 2 0 obj << /Type /Page >> endobj 3 0 obj << /Type/Page >> endobj")
 	compressedPDF := bytes.Repeat([]byte{0}, 3*mediaPDFBytesPerPage+1)
+	// Outline dictionaries also carry /Count; only the page tree counts.
+	bookmarkedPDF := []byte("%PDF-1.7 1 0 obj << /Type /Catalog /Pages 2 0 R /Outlines 5 0 R >> endobj " +
+		"2 0 obj << /Kids [3 0 R 4 0 R] /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Type /Pages /Count 2 >> endobj " +
+		"3 0 obj << /Type /Page /Parent 2 0 R >> endobj 4 0 obj << /Type /Page /Parent 2 0 R >> endobj " +
+		"5 0 obj << /Type /Outlines /First 7 0 R /Count 400 >> endobj")
+	dataURI := func(mimeType string, data []byte) string {
+		return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
+	}
 	media := func(m MediaPart) ContentPart { return ContentPart{Kind: ContentMedia, Media: &m} }
 	tests := []struct {
 		name  string
@@ -19,6 +28,10 @@ func TestRequestEstimateCountsMediaWithoutEncodedBytes(t *testing.T) {
 	}{
 		{"image bytes", media(MediaPart{MIMEType: "image/png", Data: image, Name: "cat.png"}), mediaImageTokens},
 		{"image URL", media(MediaPart{MIMEType: "image/jpeg", URI: "https://example.com/cat.jpg"}), mediaImageTokens},
+		{"image data URL", media(MediaPart{MIMEType: "image/png", URI: dataURI("image/png", image)}), mediaImageTokens},
+		{"PDF with outlines", media(MediaPart{MIMEType: "application/pdf", Data: bookmarkedPDF}), 2 * mediaPDFPageTokens},
+		{"PDF data URL", media(MediaPart{MIMEType: "application/pdf", URI: dataURI("application/pdf", pdf)}), 3 * mediaPDFPageTokens},
+		{"text data URL", media(MediaPart{MIMEType: "application/json", URI: dataURI("application/json", []byte(`{"a":1}`))}), len(`{"a":1}`)},
 		{"PDF page tree", media(MediaPart{MIMEType: "application/pdf", Data: pdf}), 3 * mediaPDFPageTokens},
 		{"compressed PDF", media(MediaPart{MIMEType: "application/pdf", Data: compressedPDF}), 4 * mediaPDFPageTokens},
 		{"PDF URL", media(MediaPart{MIMEType: "application/pdf", URI: "https://example.com/a.pdf"}), mediaPDFUnknownPages * mediaPDFPageTokens},
@@ -46,7 +59,7 @@ func TestRequestEstimateCountsMediaWithoutEncodedBytes(t *testing.T) {
 				t.Fatalf("tokens = %d, want envelope %d + media %d", got, len(envelope), tc.extra)
 			}
 			for _, text := range counter.texts {
-				if strings.Contains(text, `"data"`) {
+				if strings.Contains(text, `"data"`) || strings.Contains(text, "base64,") && !strings.Contains(text, `base64,"`) {
 					t.Fatalf("counted encoded media bytes: %.80s", text)
 				}
 			}
