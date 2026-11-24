@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -54,7 +52,11 @@ func estimateMediaTokens(ctx context.Context, media *MediaPart, counter TokenCou
 	case strings.HasPrefix(mimeType, "image/"):
 		return mediaImageTokens, nil
 	case mimeType == "application/pdf":
-		return AddTokenCounts(pdfPageEstimate(media.inlineData()) * mediaPDFPageTokens)
+		pages, err := pdfPageEstimate(ctx, media.inlineData())
+		if err != nil {
+			return 0, err
+		}
+		return AddTokenCounts(pages * mediaPDFPageTokens)
 	case IsTextMIME(mimeType):
 		data := media.inlineData()
 		if len(data) == 0 {
@@ -108,72 +110,114 @@ func splitDataURI(uri string) (header, payload string, ok bool) {
 	return strings.Cut(uri[len("data:"):], ",")
 }
 
-var (
-	pdfPageObject = regexp.MustCompile(`/Type\s*/Page\b`)
-	pdfPagesTree  = regexp.MustCompile(`/Type\s*/Pages\b`)
-	pdfPageCount  = regexp.MustCompile(`/Count\s+(\d+)`)
-)
-
 // pdfPageEstimate reads the page count from an uncompressed page tree: the
-// larger of the page objects found and the /Count of any /Type /Pages node.
-// Other dictionaries, such as outlines, also carry /Count and are ignored.
-// When the tree sits in a compressed object stream it falls back to the file
-// size. A PDF without local data counts as mediaPDFUnknownPages.
-func pdfPageEstimate(data []byte) int {
+// larger of the /Type /Page dictionaries found and the /Count of any
+// /Type /Pages dictionary. Only a dictionary's own /Count counts, so outline
+// and nested resource dictionaries are ignored. When the tree sits in a
+// compressed object stream it falls back to the file size. A PDF without
+// local data counts as mediaPDFUnknownPages.
+//
+// It scans the file once, skipping stream bodies, and checks ctx every MiB.
+func pdfPageEstimate(ctx context.Context, data []byte) (int, error) {
 	if len(data) == 0 {
-		return mediaPDFUnknownPages
+		return mediaPDFUnknownPages, nil
 	}
-	pages := len(pdfPageObject.FindAllIndex(data, -1))
-	for _, loc := range pdfPagesTree.FindAllIndex(data, -1) {
-		start, end := pdfEnclosingDict(data, loc[0])
-		if start < 0 {
-			continue
-		}
-		for _, match := range pdfPageCount.FindAllSubmatch(data[start:end], -1) {
-			if n, err := strconv.Atoi(string(match[1])); err == nil && n > pages && n < 1_000_000 {
-				pages = n
+	type dict struct {
+		typ      string
+		count    int
+		hasCount bool
+	}
+	var stack []dict
+	pages, treeCount := 0, 0
+	for i := 0; i < len(data); i++ {
+		if i&(1<<20-1) == 0 {
+			if err := ctx.Err(); err != nil {
+				return 0, err
 			}
 		}
+		switch c := data[i]; {
+		case c == '<' && i+1 < len(data) && data[i+1] == '<':
+			stack = append(stack, dict{})
+			i++
+		case c == '>' && i+1 < len(data) && data[i+1] == '>':
+			if n := len(stack); n > 0 {
+				d := stack[n-1]
+				stack = stack[:n-1]
+				switch {
+				case d.typ == "Page":
+					pages++
+				case d.typ == "Pages" && d.hasCount:
+					treeCount = max(treeCount, d.count)
+				}
+			}
+			i++
+		case c == '/' && len(stack) > 0:
+			name, next := pdfName(data, i+1)
+			top := &stack[len(stack)-1]
+			j := pdfSkipSpace(data, next)
+			switch {
+			case name == "Type" && j < len(data) && data[j] == '/':
+				top.typ, next = pdfName(data, j+1)
+			case name == "Count":
+				if n, end := pdfUint(data, j); end > j {
+					top.count, top.hasCount, next = n, true, end
+				}
+			}
+			i = next - 1
+		case c == 's' && len(stack) == 0 && bytes.HasPrefix(data[i:], []byte("stream")):
+			// Stream bodies are binary and may hold any bytes; skip them.
+			end := bytes.Index(data[i+len("stream"):], []byte("endstream"))
+			if end < 0 {
+				i = len(data)
+				break
+			}
+			i += len("stream") + end + len("endstream") - 1
+		}
 	}
+	pages = max(pages, treeCount)
 	if pages == 0 {
 		pages = (len(data) + mediaPDFBytesPerPage - 1) / mediaPDFBytesPerPage
 	}
-	return max(pages, 1)
+	return max(pages, 1), nil
 }
 
-// pdfEnclosingDict returns the bounds of the innermost "<<...>>" dictionary
-// around offset, skipping nested dictionaries, or -1 when there is none.
-func pdfEnclosingDict(data []byte, offset int) (start, end int) {
-	start = -1
-	for i, depth := offset-1, 0; i > 0; i-- {
-		if data[i-1] == '>' && data[i] == '>' {
-			depth++
-			i--
-		} else if data[i-1] == '<' && data[i] == '<' {
-			if depth == 0 {
-				start = i - 1
-				break
-			}
-			depth--
-			i--
-		}
+// pdfName reads a PDF name after its slash and returns it with the index
+// after it.
+func pdfName(data []byte, i int) (string, int) {
+	start := i
+	for i < len(data) && !pdfDelimiter(data[i]) {
+		i++
 	}
-	if start < 0 {
-		return -1, -1
+	return string(data[start:i]), i
+}
+
+// pdfUint reads a non-negative integer below one million; end equals i when
+// there is none.
+func pdfUint(data []byte, i int) (n, end int) {
+	end = i
+	for end < len(data) && data[end] >= '0' && data[end] <= '9' && end-i < 7 {
+		n = n*10 + int(data[end]-'0')
+		end++
 	}
-	for i, depth := offset, 0; i+1 < len(data); i++ {
-		if bytes.HasPrefix(data[i:], []byte("<<")) {
-			depth++
-			i++
-		} else if bytes.HasPrefix(data[i:], []byte(">>")) {
-			if depth == 0 {
-				return start, i + 2
-			}
-			depth--
-			i++
-		}
+	if end < len(data) && data[end] >= '0' && data[end] <= '9' {
+		return 0, i
 	}
-	return -1, -1
+	return n, end
+}
+
+func pdfSkipSpace(data []byte, i int) int {
+	for i < len(data) && pdfSpace(data[i]) {
+		i++
+	}
+	return i
+}
+
+func pdfSpace(c byte) bool {
+	return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f' || c == 0
+}
+
+func pdfDelimiter(c byte) bool {
+	return pdfSpace(c) || strings.IndexByte("()<>[]{}/%", c) >= 0
 }
 
 // IsTextMIME reports whether a MIME type carries plain UTF-8 text that a

@@ -2,10 +2,13 @@ package ai
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRequestEstimateCountsMediaWithoutEncodedBytes(t *testing.T) {
@@ -98,5 +101,30 @@ func TestMediaPlaceholder(t *testing.T) {
 		if got := media.Placeholder(); got != want {
 			t.Errorf("Placeholder() = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestPDFPageEstimateReadsOnlyThePageTreeCount(t *testing.T) {
+	nested := []byte("%PDF-1.7 1 0 obj << /Type /Pages /Count 2 /Kids [2 0 R 3 0 R] " +
+		"/Resources << /Properties << /P1 << /Count 400 >> >> >> >> endobj")
+	if got, err := pdfPageEstimate(t.Context(), nested); err != nil || got != 2 {
+		t.Fatalf("nested dictionary: pages = %d, %v", got, err)
+	}
+	// Stream bodies are skipped, so page-tree text inside them is ignored and
+	// a large file is scanned once.
+	fake := bytes.Repeat([]byte("<< /Type /Pages /Count 999 >> << /Type /Page >> "), 200_000)
+	pdf := append([]byte("%PDF-1.7 1 0 obj << /Type /Pages /Count 3 >> endobj 2 0 obj << /Length 1 >>\nstream\n"), fake...)
+	pdf = append(pdf, []byte("\nendstream endobj")...)
+	started := time.Now()
+	if got, err := pdfPageEstimate(t.Context(), pdf); err != nil || got != 3 {
+		t.Fatalf("stream: pages = %d, %v", got, err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("scan took %v", elapsed)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := pdfPageEstimate(ctx, pdf); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled: err = %v", err)
 	}
 }
