@@ -11,6 +11,7 @@ import (
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/loop"
 	"github.com/Samuelk0nrad/gai/modelinput"
+	"github.com/Samuelk0nrad/gai/modelinput/history"
 )
 
 // pngOnlyModel is a durableModel whose adapter accepts only image/png.
@@ -159,5 +160,42 @@ func TestFailingConverterOnToolResultStopsTheRun(t *testing.T) {
 	var conversion *ai.MediaConversionError
 	if !errors.Is(err, loop.ErrToolResultProcess) || !errors.As(err, &conversion) || model.count() != 1 {
 		t.Fatalf("error = %v, requests = %d", err, model.count())
+	}
+}
+
+// The history-compaction summary counts stored media after conversion, so a
+// large file the converter shrinks does not make the summary too large.
+func TestCompactionSummaryBudgetsConvertedMedia(t *testing.T) {
+	store := conversationHistory(3)
+	first := &store.snapshot.State.Turns[0].UserMessage.Message
+	first.Parts = append(first.Parts, ai.ContentPart{Kind: ai.ContentMedia, Media: &ai.MediaPart{
+		MIMEType: docxMIME, Data: make([]byte, 400_000), Name: "plan.docx", // about 100,000 tokens if counted raw
+	}})
+	model := pngOnlyModel{&durableModel{responses: [][]ai.Token{autoText("short summary"), autoText("answer")}}}
+	var conversions atomic.Int32
+	def := agent.Definition{Model: model, TokenCounter: ai.TextTokenEstimator{},
+		HistoryCompaction: &agent.HistoryCompactionPolicy{SummaryMaxTokens: 100},
+		RequestBudget:     &ai.RequestBudgetConfig{Limit: 4000},
+		Media:             ai.MediaPolicy{Converter: textOfDocx(&conversions)},
+		Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+			return modelinput.New(modelinput.Definition{TokenBudget: 1000,
+				SystemInstructions: []modelinput.Part{modelinput.NewTextPart("system instructions")},
+				ContextSources:     []modelinput.ContextSource{history.NewHistory("s", store)}}), nil
+		},
+	}
+	w, err := agent.New(def).NewRun(t.Context(), textRunInput(strings.Repeat("word ", 640)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := w.Run(t.Context())
+	if err != nil || result.Text != "answer" {
+		t.Fatalf("result = %+v, error = %v", result, err)
+	}
+	summary := model.requests[0]
+	if got := summary.Messages[1].Text(); !strings.HasSuffix(got, "<text of plan.docx>") {
+		t.Fatalf("summary request first question = %q", got)
+	}
+	if reports := result.Primary.HistoryCompaction; len(reports) != 1 || !reports[0].Result.Changed {
+		t.Fatalf("reports = %+v", reports)
 	}
 }
