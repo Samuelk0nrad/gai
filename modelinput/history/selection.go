@@ -19,8 +19,9 @@ type selection struct {
 
 // selectHistory only reads a stable state. It owns its sorted slice and returned
 // messages, and has no persistence, model-call, or observation side effects.
-func selectHistory(ctx context.Context, state *HistoryState, tokenBudget int, counter ai.TokenCounter) (selection, error) {
-	var selected selection
+// previewRunes is the tool-result preview, encoded as in Part.
+func selectHistory(ctx context.Context, state *HistoryState, tokenBudget int, counter ai.TokenCounter, previewRunes int) (selection, error) {
+	selected := selection{part: Part{previewRunes: previewRunes}}
 	if err := ctx.Err(); err != nil {
 		return selected, err
 	}
@@ -62,7 +63,7 @@ func selectHistory(ctx context.Context, state *HistoryState, tokenBudget int, co
 		selected.turnsVisited++
 		// Selection and final accounting use the same preview projection. The
 		// candidate owns no token cache and only reads the stored messages.
-		candidate := Part{}
+		candidate := Part{previewRunes: previewRunes}
 		if turn.UserMessage != nil {
 			candidate.Messages = append(candidate.Messages, turn.UserMessage.Message)
 		}

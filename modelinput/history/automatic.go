@@ -64,6 +64,8 @@ func (s *HistorySource) CompactHistory(ctx context.Context, req AutoCompaction) 
 	if err != nil {
 		return CompactionResult{}, err
 	}
+	// The compactor selects and projects the history this source puts in prompts.
+	compactor.options = s.options
 	threshold := req.Threshold
 	if threshold == 0 {
 		threshold = DefaultCompactionThreshold

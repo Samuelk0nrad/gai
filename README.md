@@ -381,7 +381,9 @@ See [request budgets and migration](docs/request-budgets.md).
 
 `history.NewHistory(sessionID, reader)` supplies read-only, budgeted history selection.
 Ordinary context builds never invoke a summarizer or write history. Token counts are local
-and are not persisted.
+and are not persisted. Earlier plain-text tool results are cut to a 500-rune preview;
+`history.WithToolResultPreview(n)` changes that length, and `0` keeps them whole
+(see [history](docs/history.md#tool-result-previews)).
 
 To compact automatically before an agent answers, set
 `HistoryCompaction: &agent.HistoryCompactionPolicy{}` on `agent.Definition`. Return a

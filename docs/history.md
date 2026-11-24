@@ -7,6 +7,28 @@ them from storage. Existing summary-first selection and tool-result previews are
 preserved. The summary is the oldest history, so it is trimmed first: when it does
 not fit, selection skips it and still selects the newest turns that fit.
 
+## Tool result previews
+
+Each plain-text tool result in selected history is cut to
+`history.DefaultToolResultPreviewRunes` (500) runes, followed by
+`[tool result truncated]`. Error results, JSON, media and parts with extensions
+stay whole. Storage keeps the full result; selection, token counting and
+rendering use the same preview.
+
+Applications that keep full transcripts can change the length, or keep results
+whole with zero, so later runs see what earlier tools returned and the prompt
+matches the earlier run's transcript for prompt caching:
+
+```go
+source := history.NewHistory(sessionID, store, history.WithToolResultPreview(0))
+```
+
+Give an explicit compactor the same option, so it selects and counts the history
+the prompt carries: `history.NewCompactor(sessionID, store, def,
+history.WithToolResultPreview(0))`. `HistorySource.CompactHistory`, used by
+`agent.Definition.HistoryCompaction`, uses the source's value. A continuation
+prefix matches previews of any length.
+
 ## Explicit compaction
 
 ```go

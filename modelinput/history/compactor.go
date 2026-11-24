@@ -116,10 +116,13 @@ type Compactor struct {
 	summaryMaxTokens int
 	responseFormat   SummaryResponseFormat
 	sink             gai.ObservationSink
+	options          options
 }
 
 // NewCompactor validates configuration and creates an explicit compactor.
-func NewCompactor(sessionID string, store HistoryStore, def CompactorDefinition) (*Compactor, error) {
+// Give it the WithToolResultPreview value of the session's HistorySource, so
+// it selects and counts the history the prompt carries.
+func NewCompactor(sessionID string, store HistoryStore, def CompactorDefinition, opts ...Option) (*Compactor, error) {
 	if store == nil {
 		return nil, modelinput.ErrSessionStoreNotFound
 	}
@@ -149,7 +152,8 @@ func NewCompactor(sessionID string, store HistoryStore, def CompactorDefinition)
 		summarizer = NewContinuationSummarizer(def.Model)
 	}
 	return &Compactor{sessionID: sessionID, store: store, summarizer: summarizer, counter: def.TokenCounter,
-		amount: def.Amount, summaryMaxTokens: def.SummaryMaxTokens, responseFormat: def.ResponseFormat, sink: def.ObservationSink}, nil
+		amount: def.Amount, summaryMaxTokens: def.SummaryMaxTokens, responseFormat: def.ResponseFormat, sink: def.ObservationSink,
+		options: applyOptions(opts)}, nil
 }
 
 // Compact summarizes at most once and attempts at most one CAS, only if the
@@ -214,7 +218,7 @@ func (c *Compactor) compact(ctx context.Context, historyBudget int, options comp
 	if snapshot.State != nil {
 		obs.ObserveState(len(snapshot.State.Turns), snapshot.State.Summary != nil)
 	}
-	selected, err := selectHistory(ctx, snapshot.State, historyBudget, c.counter)
+	selected, err := selectHistory(ctx, snapshot.State, historyBudget, c.counter, c.options.previewRunes)
 	obs.CompactionSelection(ctx, snapshot.State, selected, err, selectionStageLoaded)
 	if err != nil {
 		return result, err
@@ -222,7 +226,7 @@ func (c *Compactor) compact(ctx context.Context, historyBudget int, options comp
 	trigger := selected.budgetReached
 	if !trigger && options.threshold > 0 && options.threshold < 1 && snapshot.State != nil && len(snapshot.State.Turns) > 0 {
 		var early selection
-		early, err = selectHistory(ctx, snapshot.State, thresholdBudget(historyBudget, options.threshold), c.counter)
+		early, err = selectHistory(ctx, snapshot.State, thresholdBudget(historyBudget, options.threshold), c.counter, c.options.previewRunes)
 		if err != nil {
 			return result, err
 		}
@@ -246,7 +250,7 @@ func (c *Compactor) compact(ctx context.Context, historyBudget int, options comp
 	if prefix != nil && options.projectHistory {
 		// The prefix and the summary come from the same snapshot.
 		extended := prefix.Copy()
-		extended.Messages = append(extended.Messages, fullProjection(snapshot.State)...)
+		extended.Messages = append(extended.Messages, fullProjection(snapshot.State, c.options.previewRunes)...)
 		prefix = &extended
 	}
 	outcome, changed, err := summarizeHistory(ctx, snapshot.State, c.summarizer, summaryRequest{
@@ -262,7 +266,7 @@ func (c *Compactor) compact(ctx context.Context, historyBudget int, options comp
 		return CompactionResult{Revision: snapshot.Revision, PressureRemaining: selected.budgetReached, Early: result.Early}, nil
 	}
 	next := outcome.state
-	selected, err = selectHistory(ctx, next, historyBudget, c.counter)
+	selected, err = selectHistory(ctx, next, historyBudget, c.counter, c.options.previewRunes)
 	obs.CompactionSelection(ctx, next, selected, err, selectionStageCandidate)
 	if err != nil {
 		return result, err
