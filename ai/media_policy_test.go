@@ -169,6 +169,22 @@ func TestMediaAdapterEmptyConversionRemovesMedia(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].Text != "see" {
 		t.Fatalf("parts = %#v, %v", got, err)
 	}
+
+	// A message needs content: one left empty keeps the placeholders.
+	adapter := ai.NewMediaAdapter(pngOnlyModel{}, ai.MediaPolicy{Converter: empty})
+	zip := mediaContent(ai.MediaPart{MIMEType: "application/zip", Data: []byte{1}, Name: "a.zip"})
+	messages, err := adapter.Messages(t.Context(), []ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{zip}}})
+	if err != nil || messages[0].Validate() != nil || messages[0].Text() != "[file: a.zip, application/zip]" {
+		t.Fatalf("messages = %#v, %v", messages, err)
+	}
+	got, err = adapter.Parts(t.Context(), []ai.ContentPart{zip}, ai.MediaInUserMessage)
+	if err != nil || len(got) != 1 || got[0].Text != "[file: a.zip, application/zip]" {
+		t.Fatalf("user parts = %#v, %v", got, err)
+	}
+	// A tool result may be empty.
+	if got, err = adapter.Parts(t.Context(), []ai.ContentPart{zip}, ai.MediaInToolResult); err != nil || len(got) != 0 {
+		t.Fatalf("tool result parts = %#v, %v", got, err)
+	}
 }
 
 func TestMediaAdapterKeepsRequiredExtensions(t *testing.T) {

@@ -76,7 +76,8 @@ def.Media = ai.MediaPolicy{
 
 - **Converter.** Returns replacement parts: text, JSON, or media the model
   accepts. `accepts` checks a candidate against the model, so one converter
-  can pick a target per provider. An empty result removes the file. Return
+  can pick a target per provider. An empty result removes the file; a user
+  message left with no content keeps the file's placeholder text. Return
   `ai.ErrMediaNotConverted` to decline; any other error is a
   `*ai.MediaConversionError` and stops the run. Concurrent requests for the
   same file share one conversion. GAI ships no converters,
@@ -97,8 +98,9 @@ def.Media = ai.MediaPolicy{
   before the prompt is built, so request budgets and history compaction count
   the converted content.
 - **History and other messages** are adapted in every request, before the
-  request budget check, and in history-compaction summary requests. Each
-  distinct file is converted once per run and the result reused.
+  request budget check, and in history-compaction summary requests, also
+  before their budget check. Each distinct file is converted once per run and
+  the result reused.
 - **Acceptance is checked locally**: `AcceptsMedia` also decodes `data:` URIs
   and checks that text files are UTF-8, so an unreadable file reaches the
   converter or fallback instead of failing when the request is mapped.

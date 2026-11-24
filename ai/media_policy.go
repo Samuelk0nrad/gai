@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -156,7 +157,7 @@ func (a *MediaAdapter) Messages(ctx context.Context, messages []Message) ([]Mess
 		if out == nil {
 			out = append([]Message(nil), messages...)
 		}
-		out[i].Parts = parts
+		out[i].Parts = keepContent(parts, message.Parts)
 	}
 	if out == nil {
 		return messages, nil
@@ -169,8 +170,26 @@ func (a *MediaAdapter) Parts(ctx context.Context, parts []ContentPart, placement
 	if a == nil || a.acceptor == nil {
 		return parts, nil
 	}
-	adapted, _, err := a.adaptParts(ctx, parts, placement)
-	return adapted, err
+	adapted, changed, err := a.adaptParts(ctx, parts, placement)
+	if err != nil || !changed || placement != MediaInUserMessage {
+		return adapted, err
+	}
+	return keepContent(adapted, parts), nil
+}
+
+// keepContent returns adapted, or, when conversion removed every part of a
+// message, the placeholders of its media, since a message needs content.
+func keepContent(adapted, original []ContentPart) []ContentPart {
+	if len(adapted) > 0 || len(original) == 0 {
+		return adapted
+	}
+	var placeholders []string
+	for _, part := range original {
+		if part.Kind == ContentMedia && part.Media != nil {
+			placeholders = append(placeholders, part.Media.Placeholder())
+		}
+	}
+	return TextParts(strings.Join(placeholders, "\n"))
 }
 
 func (a *MediaAdapter) adaptParts(ctx context.Context, parts []ContentPart, placement MediaPlacement) ([]ContentPart, bool, error) {
