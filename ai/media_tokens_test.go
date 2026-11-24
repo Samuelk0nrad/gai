@@ -68,3 +68,17 @@ func TestIsTextMIME(t *testing.T) {
 		}
 	}
 }
+
+func TestMediaPlaceholder(t *testing.T) {
+	for want, media := range map[string]MediaPart{
+		"[image: board.jpg, image/png]":       {MIMEType: "image/png", Data: []byte{1}, Name: "board.jpg"},
+		"[file: report.pdf, application/pdf]": {MIMEType: "application/pdf", URI: "https://example.com/secret", Name: " report.pdf "},
+		"[file: text/csv]":                    {MIMEType: "text/csv; charset=utf-8", Data: []byte("a,b")},
+		"[audio: audio/mpeg]":                 {MIMEType: "Audio/MPEG", URI: "https://example.com/a.mp3"},
+		"[video: two lines.mp4, video/mp4]":   {MIMEType: "video/mp4", Data: []byte{1}, Name: "two\nlines.mp4"},
+	} {
+		if got := media.Placeholder(); got != want {
+			t.Errorf("Placeholder() = %q, want %q", got, want)
+		}
+	}
+}

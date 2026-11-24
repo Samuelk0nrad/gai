@@ -142,3 +142,21 @@ func estimateMessageMedia(ctx context.Context, parts []ContentPart, counter Toke
 	}
 	return total, nil
 }
+
+// Placeholder returns a short text stand-in for media, such as
+// "[image: board.jpg, image/png]" or "[file: application/pdf]", for text-only
+// renderings like summaries. It never includes the bytes or the URI.
+func (m MediaPart) Placeholder() string {
+	mimeType := normalizedMIME(m.MIMEType)
+	kind := "file"
+	for _, prefix := range []string{"image", "audio", "video"} {
+		if strings.HasPrefix(mimeType, prefix+"/") {
+			kind = prefix
+		}
+	}
+	// Collapse whitespace so a name cannot break the placeholder's line.
+	if name := strings.Join(strings.Fields(m.Name), " "); name != "" {
+		return "[" + kind + ": " + name + ", " + mimeType + "]"
+	}
+	return "[" + kind + ": " + mimeType + "]"
+}

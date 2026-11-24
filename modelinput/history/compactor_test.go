@@ -439,13 +439,11 @@ func TestCompactionFailuresDoNotPersistCandidates(t *testing.T) {
 }
 
 func TestCompactionRejectsUnsupportedContentWithoutModelOrWrite(t *testing.T) {
-	for _, kind := range []string{"media", "opaque message", "opaque summary"} {
+	for _, kind := range []string{"opaque message", "opaque summary"} {
 		t.Run(kind, func(t *testing.T) {
 			state := oldHistory()
 			ext := ai.Extension{Namespace: "provider", Type: "state", Data: []byte(`"opaque"`), Required: true}
 			switch kind {
-			case "media":
-				state.Turns[0].UserMessage.Message.Parts = append(state.Turns[0].UserMessage.Message.Parts, ai.ContentPart{Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: "image/png", URI: "https://example.test/image.png"}})
 			case "opaque message":
 				state.Turns[0].UserMessage.Message.Extensions = []ai.Extension{ext}
 			case "opaque summary":
@@ -461,6 +459,50 @@ func TestCompactionRejectsUnsupportedContentWithoutModelOrWrite(t *testing.T) {
 				t.Fatal("unsupported content was changed/sent")
 			}
 		})
+	}
+}
+
+// TestCompactionSummarizesMediaAsPlaceholders checks that the text
+// summarizer folds turns with media, in user messages and tool results, and
+// sends placeholders instead of the bytes or URLs.
+func TestCompactionSummarizesMediaAsPlaceholders(t *testing.T) {
+	state := oldHistory()
+	user := &state.Turns[0].UserMessage.Message
+	user.Parts = append(user.Parts,
+		ai.ContentPart{Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: "image/png", URI: "https://example.test/image.png?signature=secret", Name: "board.jpg"}},
+		ai.ContentPart{Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: "application/pdf", Data: []byte("%PDF-secret")}},
+	)
+	result := ai.ToolResult{ToolCallID: "call_1", Name: "open_file", Parts: []ai.ContentPart{
+		{Kind: ai.ContentText, Text: "opened"},
+		{Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: "image/jpeg", Data: []byte("jpeg-secret"), Name: "receipt.jpg"}},
+	}}
+	state.Turns[0].Messages = []modelinput.StoredMessage{
+		{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call_1", Type: "function", Name: "open_file", Args: json.RawMessage(`{}`)}}}}},
+		{Message: ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &result}}}},
+		{Message: ai.TextMessage(ai.RoleAssistant, "It is a receipt.")},
+	}
+	before := state.Clone()
+	var prompt string
+	model := &historyModel{respond: func(_ context.Context, req ai.AIRequest) (string, error) {
+		prompt = req.Messages[len(req.Messages)-1].Text()
+		return "short summary", nil
+	}}
+	store := &sharedHistoryStore{state: state}
+	if _, err := newCompactor(t, store, model).Compact(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[image: board.jpg, image/png]", "[file: application/pdf]", "opened[image: receipt.jpg, image/jpeg]", "It is a receipt."} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("summary prompt lacks %q:\n%s", want, prompt)
+		}
+	}
+	for _, leak := range []string{"secret", "example.test"} {
+		if strings.Contains(prompt, leak) {
+			t.Fatalf("summary prompt leaks %q:\n%s", leak, prompt)
+		}
+	}
+	if !reflect.DeepEqual(state, before) {
+		t.Fatal("rendering changed the stored history")
 	}
 }
 
@@ -582,5 +624,32 @@ func TestCompactionSummarizesReasoningTurns(t *testing.T) {
 	result, err := newCompactor(t, store, summaryModel()).Compact(t.Context(), 1)
 	if err != nil || !result.Changed {
 		t.Fatalf("result = %+v, error = %v", result, err)
+	}
+}
+
+func TestRenderSummaryTextUsesMediaPlaceholders(t *testing.T) {
+	result := ai.ToolResult{ToolCallID: "c", Name: "open_file", Parts: []ai.ContentPart{
+		{Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: "application/pdf", URI: "https://example.test/secret.pdf", Name: "report.pdf"}},
+	}}
+	turns := []modelinput.Turn{{ID: "t", Count: 1,
+		UserMessage: &modelinput.StoredMessage{Message: ai.Message{Role: ai.RoleUser, Parts: []ai.ContentPart{
+			{Kind: ai.ContentText, Text: "see "},
+			{Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: "image/png", Data: []byte("secret")}},
+		}}},
+		Messages: []modelinput.StoredMessage{
+			{Message: ai.Message{Role: ai.RoleAssistant, Parts: []ai.ContentPart{{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "c", Type: "function", Name: "open_file", Args: json.RawMessage(`{}`)}}}}},
+			{Message: ai.Message{Role: ai.RoleTool, Parts: []ai.ContentPart{{Kind: ai.ContentToolResult, ToolResult: &result}}}},
+		},
+	}}
+	text, err := history.RenderSummaryText(t.Context(), nil, turns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "<user>\nsee \n[image: image/png]\n</user>\n<assistant>\n<tool_call id=\"c\" name=\"open_file\">{}</tool_call>\n</assistant>\n<tool>\n<tool_result id=\"c\" name=\"open_file\" is_error=\"false\">[file: report.pdf, application/pdf]</tool_result>\n</tool>\n\n"
+	if text != want {
+		t.Fatalf("rendered\n%q\nwant\n%q", text, want)
+	}
+	if turns[0].UserMessage.Message.Parts[1].Media == nil {
+		t.Fatal("rendering changed the turn")
 	}
 }

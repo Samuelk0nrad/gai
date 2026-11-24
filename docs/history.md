@@ -93,8 +93,10 @@ history.CompactorDefinition{Summarizer: summary.New(model)}
 ```
 
 It renders the turns as one text message under its own system prompt, so it shares
-no cached prefix with the conversation. It rejects media and drops provider replay
-state, which has no text form.
+no cached prefix with the conversation. Each media part, including media in tool
+results, is rendered as a placeholder such as `[image: board.jpg, image/png]`
+or `[file: report.pdf, application/pdf]`. It drops provider replay state, which
+has no text form.
 
 `AgentResult.Transcript` is the request the run's next generation would have
 sent: the full prompt, every accepted message including the final answer, and the

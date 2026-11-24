@@ -410,8 +410,8 @@ store contract, compaction results, and session ordering. The
 application lifecycle and concurrent-session tests.
 
 The separate-prompt text summarizer, `summary.New(model)` from `agent/summary`, renders
-the turns as text instead. If they contain media, it returns
-`ai.ErrUnsupportedCapability` instead of dropping that content.
+the turns as text instead. Media parts become placeholders such as
+`[image: board.jpg, image/png]`.
 
 ## Canonical messages
 
