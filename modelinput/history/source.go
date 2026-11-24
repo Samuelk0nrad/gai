@@ -12,6 +12,7 @@ import (
 type HistorySource struct {
 	historyStateStore HistoryReader
 	sessionID         string
+	options           options
 
 	debug   gai.ObservationSink
 	counter ai.TokenCounter
@@ -20,8 +21,9 @@ type HistorySource struct {
 // NewHistory creates a read-only history source. Its ordinary source functions
 // never run a summarizer or persist state. Use NewCompactor for explicit
 // compaction or agent.Definition.HistoryCompaction for preparation at run start.
-func NewHistory(sessionID string, reader HistoryReader) *HistorySource {
-	return &HistorySource{historyStateStore: reader, sessionID: sessionID}
+// WithToolResultPreview sets how much of each earlier tool result it keeps.
+func NewHistory(sessionID string, reader HistoryReader, opts ...Option) *HistorySource {
+	return &HistorySource{historyStateStore: reader, sessionID: sessionID, options: applyOptions(opts)}
 }
 
 func (p *HistorySource) Name() string {
@@ -88,7 +90,7 @@ func (s *HistorySource) build(ctx context.Context, tokenBudget int) (result mode
 	} else {
 		obs.MarkStatePresent()
 	}
-	selected, err := selectHistory(ctx, state, tokenBudget, s.counter)
+	selected, err := selectHistory(ctx, state, tokenBudget, s.counter, s.options.previewRunes)
 	obs.Selection(ctx, state, selected, err)
 	if err != nil {
 		return nil, 0, err
