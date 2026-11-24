@@ -167,6 +167,7 @@ type checkpointOverrides struct {
 type checkpointHistoryCompaction struct {
 	Disabled         bool                          `json:"disabled,omitempty"`
 	OnFailure        HistoryCompactionFailure      `json:"on_failure,omitempty"`
+	Threshold        float32                       `json:"threshold,omitempty"`
 	Amount           float32                       `json:"amount,omitempty"`
 	SummaryMaxTokens int                           `json:"summary_max_tokens,omitempty"`
 	ResponseFormat   history.SummaryResponseFormat `json:"response_format,omitempty"`
@@ -180,7 +181,7 @@ func snapshotHistoryCompaction(o Optional[*HistoryCompactionPolicy]) *checkpoint
 		return &checkpointHistoryCompaction{Disabled: true}
 	}
 	p := o.Value
-	return &checkpointHistoryCompaction{OnFailure: p.OnFailure, Amount: p.Amount, SummaryMaxTokens: p.SummaryMaxTokens, ResponseFormat: p.ResponseFormat}
+	return &checkpointHistoryCompaction{OnFailure: p.OnFailure, Threshold: p.Threshold, Amount: p.Amount, SummaryMaxTokens: p.SummaryMaxTokens, ResponseFormat: p.ResponseFormat}
 }
 
 func restoreHistoryCompaction(o *checkpointOverrides) Optional[*HistoryCompactionPolicy] {
@@ -189,7 +190,7 @@ func restoreHistoryCompaction(o *checkpointOverrides) Optional[*HistoryCompactio
 		return Optional[*HistoryCompactionPolicy]{Set: true}
 	case o.HistoryCompaction != nil:
 		c := o.HistoryCompaction
-		return Optional[*HistoryCompactionPolicy]{Set: true, Value: &HistoryCompactionPolicy{OnFailure: c.OnFailure, Amount: c.Amount, SummaryMaxTokens: c.SummaryMaxTokens, ResponseFormat: c.ResponseFormat}}
+		return Optional[*HistoryCompactionPolicy]{Set: true, Value: &HistoryCompactionPolicy{OnFailure: c.OnFailure, Threshold: c.Threshold, Amount: c.Amount, SummaryMaxTokens: c.SummaryMaxTokens, ResponseFormat: c.ResponseFormat}}
 	case o.AutoCompactHistory != nil && *o.AutoCompactHistory:
 		return Optional[*HistoryCompactionPolicy]{Set: true, Value: &HistoryCompactionPolicy{}}
 	case o.AutoCompactHistory != nil:

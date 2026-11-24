@@ -21,23 +21,29 @@ var ErrHistoryCompactionNotConfigurable = errors.New("automatic history compacti
 // compaction fails.
 type HistoryCompactionFailure uint8
 
+// A compaction that started early, below the allocation, does not end the run
+// when it fails: the failure is reported and the run continues with the
+// history, which still fits. A revision conflict is the exception, since
+// another writer changed the history; it follows the mode. Under either mode,
+// cancellation (the run's context ending, or a context.Canceled error) and
+// configuration errors end the run. A deadline that the summarizer or store
+// sets for itself is an ordinary failure.
 const (
 	// HistoryCompactionStop ends the run with the compaction error. Remaining
 	// pressure after a successful compaction is an error too.
 	HistoryCompactionStop HistoryCompactionFailure = iota
 	// HistoryCompactionContinue reports the failure and builds the prompt from
 	// the uncompacted history, which selection still trims to its allocation.
-	// Cancellation and configuration errors still end the run.
 	HistoryCompactionContinue
 )
 
 // HistoryCompactionPolicy enables persistent history compaction at workflow
 // start, before history selection. It requires a *modelinput.Builder and
 // history sources backed by a writable history.HistoryStore. Compaction runs
-// only under pressure, uses the effective run model and counter and the source's
-// remaining allocation, and is skipped when budgets are disabled. It runs at
-// most once per workflow and is never retried. Applications still own session
-// ordering and accepted-turn writes.
+// once the history exceeds Threshold of the source's remaining allocation,
+// uses the effective run model and counter, and is skipped when budgets are
+// disabled. It runs at most once per workflow and is never retried.
+// Applications still own session ordering and accepted-turn writes.
 //
 // By default the summary continues the run's own prompt: the system prompt,
 // the context before the history source, and the full stored history, with the
@@ -46,6 +52,13 @@ const (
 // serve it from its prompt cache while the cache is still valid.
 type HistoryCompactionPolicy struct {
 	OnFailure HistoryCompactionFailure
+	// Threshold is the fraction of the history allocation above which history
+	// is compacted, in [0,1]. Zero selects history.DefaultCompactionThreshold
+	// (0.85); 1 compacts only history that no longer fits. Compacting early
+	// leaves the summary request, which repeats the previous run's prompt and
+	// adds an instruction, room within the request budget, so it can reuse the
+	// provider's prompt cache instead of falling back to a cut request.
+	Threshold float32
 	// Summarizer replaces the default continuation summarizer. It must
 	// support concurrent use and cannot be set in durable run overrides.
 	Summarizer history.Summarizer
@@ -65,6 +78,9 @@ func (p *HistoryCompactionPolicy) validate() error {
 	}
 	if p.OnFailure > HistoryCompactionContinue {
 		return fmt.Errorf("%w: unknown history compaction failure mode %d", ErrInvalidExecutionConfig, p.OnFailure)
+	}
+	if math.IsNaN(float64(p.Threshold)) || p.Threshold < 0 || p.Threshold > 1 {
+		return fmt.Errorf("%w: %w", ErrInvalidExecutionConfig, history.ErrInvalidCompactionThreshold)
 	}
 	if math.IsNaN(float64(p.Amount)) || math.IsInf(float64(p.Amount), 0) || p.Amount < 0 || p.Amount > 1 {
 		return fmt.Errorf("%w: %w", ErrInvalidExecutionConfig, history.ErrInvalidSummaryAmount)
@@ -95,7 +111,9 @@ type HistoryCompactionReport struct {
 	Result history.CompactionResult
 	// Err is the failure, including history.ErrHistoryPressureRemaining.
 	Err error
-	// Continued is true when the run went on despite Err.
+	// Continued is true when the run went on despite Err: under
+	// HistoryCompactionContinue, or after an early compaction (Result.Early)
+	// that failed for a reason other than a revision conflict.
 	Continued bool
 }
 
@@ -143,7 +161,7 @@ func (b *compactingPromptBuilder) BuildContext(ctx context.Context) ([]modelinpu
 		b.mu.Unlock()
 		prefix.Messages = preceding
 		result, err := source.CompactHistory(ctx, history.AutoCompaction{
-			HistoryBudget: prep.Remaining, Model: b.model, Counter: prep.Counter,
+			HistoryBudget: prep.Remaining, Threshold: b.policy.Threshold, Model: b.model, Counter: prep.Counter,
 			Summarizer: b.policy.Summarizer, Amount: b.policy.Amount,
 			SummaryMaxTokens: b.policy.SummaryMaxTokens, ResponseFormat: b.policy.ResponseFormat,
 			Prefix: prefix, RequestBudget: budget,
@@ -152,7 +170,7 @@ func (b *compactingPromptBuilder) BuildContext(ctx context.Context) ([]modelinpu
 			err = history.ErrHistoryPressureRemaining
 		}
 		report := HistoryCompactionReport{Source: prep.Source.Name(), Result: result, Err: err}
-		if err != nil && b.policy.OnFailure == HistoryCompactionContinue && ctx.Err() == nil && !historyConfigurationError(err) {
+		if err != nil && (b.policy.OnFailure == HistoryCompactionContinue || earlyFailure(result, err)) && !canceled(ctx, err) && !historyConfigurationError(err) {
 			report.Continued = true
 		}
 		b.record(ctx, report)
@@ -182,7 +200,7 @@ func (b *compactingPromptBuilder) record(ctx context.Context, report HistoryComp
 		Fields: map[string]any{
 			"source": report.Source, "outcome": outcome, "continued": report.Continued,
 			"changed": result.Changed, "revision": string(result.Revision),
-			"pressure_remaining": result.PressureRemaining, "summarized_turns": result.SummarizedTurns,
+			"pressure_remaining": result.PressureRemaining, "early": result.Early, "summarized_turns": result.SummarizedTurns,
 			"usage_reported": result.UsageReported, "input_tokens": result.Usage.InputTokens,
 			"output_tokens": result.Usage.OutputTokens, "cached_tokens": result.Usage.CachedTokens,
 			"cache_creation_tokens": result.Usage.CacheCreationTokens,
@@ -199,13 +217,28 @@ func (b *compactingPromptBuilder) compactionReports() []HistoryCompactionReport 
 	return append([]HistoryCompactionReport(nil), b.reports...)
 }
 
+// earlyFailure reports a failed compaction that started while the history still
+// fit, which the run can continue past. After a conflict, another writer has
+// changed the history, which may no longer fit.
+func earlyFailure(result history.CompactionResult, err error) bool {
+	var conflict *history.RevisionConflictError
+	return result.Early && !errors.As(err, &conflict)
+}
+
+// canceled reports whether the run was canceled. A summarizer or store can
+// return context.Canceled from a context of its own; a deadline it set for
+// itself is a compaction failure, not a cancellation.
+func canceled(ctx context.Context, err error) bool {
+	return ctx.Err() != nil || errors.Is(err, context.Canceled)
+}
+
 // historyConfigurationError reports errors that compaction would hit on every
 // run. Continuing past them would silently disable compaction.
 func historyConfigurationError(err error) bool {
 	for _, target := range []error{
 		history.ErrHistoryStoreRequired, history.ErrSummaryPrefixRequired, history.ErrSummarizerRequired,
 		history.ErrInvalidSummaryAmount, history.ErrInvalidSummaryMaxTokens, history.ErrInvalidSummaryResponseFormat,
-		history.ErrInvalidSummaryPrefix,
+		history.ErrInvalidSummaryPrefix, history.ErrInvalidCompactionThreshold,
 	} {
 		if errors.Is(err, target) {
 			return true

@@ -115,6 +115,7 @@ assistant := agent.New(agent.Definition{
     Model: model,
     HistoryCompaction: &agent.HistoryCompactionPolicy{
         OnFailure: agent.HistoryCompactionContinue, // default: HistoryCompactionStop
+        Threshold: 0.85,                            // default when zero
     },
     RequestBudget: &ai.RequestBudgetConfig{Limit: 128000, OutputReserve: 4096},
     Prompt: func(ctx context.Context, input agent.RunInput) (modelinput.PromptBuilder, error) {
@@ -157,9 +158,16 @@ request budget limits the summary request, as described above. Set
 `HistoryCompactionPolicy.Summarizer` to use another summarizer; `Amount`,
 `SummaryMaxTokens` and `ResponseFormat` mean the same as in `CompactorDefinition`.
 
-Compaction only runs under pressure. Disabled budgets skip it. A zero remaining
-allocation is still a real budget. Required input or earlier context that already
-exceeds the window stops preparation; compacting history cannot fix it.
+Compaction runs once the history exceeds `Threshold` of its allocation, 0.85 by
+default. Starting before the allocation is full matters for the cache: the summary
+request is the previous request plus its answer and the instruction, so it fits
+the request budget only while the history leaves that much room. Once the history
+outgrows its allocation, the summary falls back to a request cut after the folded
+turns, which misses the cache. `Threshold: 1` compacts only history that no longer
+fits. Pressure left after compaction is measured against the whole allocation.
+Disabled budgets skip compaction. A zero remaining allocation is still a real
+budget. Required input or earlier context that already exceeds the window stops
+preparation; compacting history cannot fix it.
 
 The agent attempts at most one compaction per history source during the initial
 build. It does not compact again for model retries or tool iterations. No-op
@@ -168,8 +176,13 @@ conflicts, summary failures and `history.ErrHistoryPressureRemaining` stop befor
 the main answer; with remaining pressure a smaller summary may already have been
 committed. With `HistoryCompactionContinue`, these failures are reported and the
 run builds its prompt from the history as stored, which selection trims to its
-allocation. Cancellation and configuration errors, such as a read-only store,
-stop the run in both modes. Compaction is not rolled back if the later run fails.
+allocation. A compaction that started early, while the history still fit, does
+not stop the run when it fails: `CompactionResult.Early` is set and the failure is
+reported as continued. A revision conflict still follows `OnFailure`, because
+another writer changed the history, which may no longer fit. Cancellation and configuration errors, such as a read-only store,
+stop the run in all cases. Cancellation is the run's context ending or a
+`context.Canceled` error; a deadline that the summarizer or store sets for itself
+is an ordinary compaction failure. Compaction is not rolled back if the later run fails.
 Final request-budget checks, including optional provider counting, still apply and
 do not trigger another compaction.
 
@@ -247,6 +260,8 @@ This is a breaking pre-v1 change; no legacy unconditional-save adapter is provid
    `HistoryCompaction: &agent.HistoryCompactionPolicy{}`, and the
    `ExecutionOverrides.AutoCompactHistory` pointer with the `HistoryCompaction`
    `Optional`. Checkpoints written with `auto_compact_history` still resume.
+   The policy now compacts at 0.85 of the allocation instead of only when history
+   no longer fits; set `Threshold: 1` for the previous trigger.
 5. Handle conflicts in application orchestration. Preserve the canonical transcript
    and accepted output; token estimates and streamed attempt events are not history.
 

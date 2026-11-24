@@ -66,3 +66,17 @@ func (s *stubSummarizer) SummarizeHistory(_ context.Context, input SummaryInput)
 	s.input = input
 	return SummaryOutput{Text: s.text}, nil
 }
+
+func TestThresholdBudgetAbsorbsFloat32Error(t *testing.T) {
+	for _, tc := range []struct {
+		budget    int
+		threshold float32
+		want      int
+	}{
+		{100, .7, 70}, {100, .9, 90}, {100, .85, 85}, {100, .699, 69}, {0, .85, 0}, {3, .5, 1}, {128000, .85, 108800},
+	} {
+		if got := thresholdBudget(tc.budget, tc.threshold); got != tc.want {
+			t.Errorf("thresholdBudget(%d, %v) = %d, want %d", tc.budget, tc.threshold, got, tc.want)
+		}
+	}
+}

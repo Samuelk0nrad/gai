@@ -387,13 +387,16 @@ To compact automatically before an agent answers, set
 `HistoryCompaction: &agent.HistoryCompactionPolicy{}` on `agent.Definition`. Return a
 standard `*modelinput.Builder` containing `history.NewHistory(sessionID, store)`, with a
 writable `history.HistoryStore` and an enabled request budget. The agent uses its
-effective model and counter to compact only when history exceeds its remaining
-allocation. The summary continues the run's own prompt with one summary instruction
-appended, so the provider can serve it from the previous run's prompt cache.
-Compaction runs once at workflow start, without retries. With `OnFailure:
+effective model and counter to compact once history exceeds `Threshold` of its
+remaining allocation (0.85 by default). The summary continues the run's own prompt
+with one summary instruction appended, so the provider can serve it from the previous
+run's prompt cache; compacting before the allocation is full leaves that request room
+to fit. Compaction runs once at workflow start, without retries. With `OnFailure:
 agent.HistoryCompactionStop` (the default) conflicts, summary errors and remaining
 pressure stop the run; with `agent.HistoryCompactionContinue` the run reports them and
-builds its prompt from the uncompacted history. The policy does not persist new turns
+builds its prompt from the uncompacted history. A compaction that started while the
+history still fit stops the run only on cancellation, a configuration error or a
+revision conflict. The policy does not persist new turns
 or provide session locking. See [automatic compaction](docs/history.md#automatic-compaction-in-agents).
 
 Use `history.NewCompactor(sessionID, store, history.CompactorDefinition{Model: model})`

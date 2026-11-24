@@ -32,6 +32,7 @@ var (
 	ErrInvalidSummaryReply          = errors.New("invalid summary reply")
 	ErrInvalidSummaryResponseFormat = errors.New("unknown summary response format")
 	ErrInvalidExpectedRevision      = errors.New("expected revision must be nonempty")
+	ErrInvalidCompactionThreshold   = errors.New("compaction threshold must be in [0,1]")
 )
 
 // RevisionConflictError reports a definite rejected stale write. It may be

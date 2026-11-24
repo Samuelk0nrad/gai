@@ -270,7 +270,11 @@ func TestContinuationKeepsResponseFormatAndAddsReasoningBudget(t *testing.T) {
 	prefix := transcriptFor(state)
 	prefix.ResponseFormat = ai.ResponseFormat{Type: ai.ResponseFormatJSONObject}
 	store := &sharedHistoryStore{state: state.Clone()}
-	model := &recordingModel{reply: textReply(`{"summary":"x"}`)}
+	// A structured reply arrives as a JSON part, not text.
+	model := &recordingModel{reply: func(ai.AIRequest) []ai.Token {
+		part := ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(`{"summary":"x"}`)}
+		return []ai.Token{{Part: &part}, {Completion: &ai.Completion{FinishReason: "end_turn"}}}
+	}}
 	def := history.CompactorDefinition{ResponseFormat: history.SummaryResponseFormatKeep, SummaryMaxTokens: 100}
 	if _, err := continuationCompactor(t, store, model, def).Compact(t.Context(), 10, history.WithPrefix(prefix)); err != nil {
 		t.Fatal(err)
@@ -278,6 +282,9 @@ func TestContinuationKeepsResponseFormatAndAddsReasoningBudget(t *testing.T) {
 	request := model.calls()[0]
 	if !reflect.DeepEqual(request.ResponseFormat, prefix.ResponseFormat) || request.MaxTokens != 164 {
 		t.Fatalf("format=%+v max=%d", request.ResponseFormat, request.MaxTokens)
+	}
+	if got := store.state.Summary.Content.Text; got != `{"summary":"x"}` {
+		t.Fatalf("summary = %q", got)
 	}
 }
 
@@ -334,6 +341,60 @@ func TestContinuationCutsThePrefixWhenItDoesNotFit(t *testing.T) {
 				t.Fatalf("stored turns = %d", len(store.state.Turns))
 			}
 		})
+	}
+}
+
+// instructionCounter counts how many requests were estimated: each estimate
+// counts the summary instruction once.
+type instructionCounter struct {
+	ai.TextTokenEstimator
+	mu        sync.Mutex
+	estimates int
+}
+
+func (c *instructionCounter) CountTokens(ctx context.Context, text string) (int, error) {
+	if strings.HasPrefix(text, "Stop the conversation here.") {
+		c.mu.Lock()
+		c.estimates++
+		c.mu.Unlock()
+	}
+	return c.TextTokenEstimator.CountTokens(ctx, text)
+}
+
+func TestContinuationFoldsTheMostTurnsThatFitWithFewEstimates(t *testing.T) {
+	const turns, fit = 64, 5
+	answer := strings.Repeat("answer ", 100)
+	state := &history.HistoryState{SchemaVersion: history.HistorySchemaVersion}
+	for n := 1; n <= turns; n++ {
+		state.Turns = append(state.Turns, conversationTurn(n, fmt.Sprintf("Question %d about a different part of the system.", n), answer))
+	}
+	prefix := transcriptFor(state)
+	instruction := "Stop the conversation here. Do not call any tool and do not reply to the last message.\n\n" +
+		"Write a summary that another agent will use in place of the whole conversation above.\n\n" + history.DefaultContinuationInstructions
+	cut := prefix.Copy()
+	cut.Messages = append(cut.Messages[:1+2*fit], ai.TextMessage(ai.RoleUser, instruction))
+	estimate, err := ai.EstimateRequestTokens(t.Context(), cut, ai.TextTokenEstimator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Room for fit turns and the instruction, not for one more turn.
+	limit := estimate.InputTokens + prefix.MaxTokens + 50
+	counter := &instructionCounter{}
+	model := &recordingModel{reply: textReply("summary")}
+	output, err := history.NewContinuationSummarizer(model).SummarizeHistory(t.Context(), history.SummaryInput{
+		Prefix: &prefix, Turns: state.Turns[:turns-1], Kept: state.Turns[turns-1:],
+		RequestBudget: ai.RequestBudgetConfig{Limit: limit}, Counter: counter,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.FoldedTurns != fit || len(model.calls()[0].Messages) != 2+2*fit {
+		t.Fatalf("folded=%d messages=%d", output.FoldedTurns, len(model.calls()[0].Messages))
+	}
+	// The full prefix, the cut after every folded turn, then a binary search
+	// over the 62 smaller cuts: at most 2 + 6 estimates, not 63.
+	if counter.estimates > 8 {
+		t.Fatalf("estimated %d requests", counter.estimates)
 	}
 }
 

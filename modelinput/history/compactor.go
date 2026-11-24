@@ -34,7 +34,8 @@ type CompactorDefinition struct {
 }
 
 // CompactionResult describes a successfully completed compaction operation.
-// On error the result is zero: the candidate must not be treated as committed.
+// On error the result is zero except Early: the candidate must not be treated
+// as committed.
 type CompactionResult struct {
 	// Changed is true only after a successful CAS commit.
 	Changed bool
@@ -43,6 +44,9 @@ type CompactionResult struct {
 	// PressureRemaining means some working history still does not fit the
 	// supplied history budget. Successful compaction need not eliminate it.
 	PressureRemaining bool
+	// Early means the history still fit its budget and compaction ran because
+	// it crossed the AutoCompaction threshold. It is set on errors too.
+	Early bool
 	// SummarizedTurns is how many turns the committed summary folded.
 	SummarizedTurns int
 	// Usage is the provider usage of the summary request, when reported. It
@@ -60,6 +64,9 @@ type compactOptions struct {
 	expected       Revision
 	expectedSet    bool
 	requestBudget  ai.RequestBudgetConfig
+	// threshold, when in (0,1), also compacts history that fits the budget
+	// but exceeds this fraction of it.
+	threshold float32
 }
 
 // WithPrefix supplies the request a continuation summary continues, usually
@@ -170,6 +177,9 @@ func (c *Compactor) compact(ctx context.Context, historyBudget int, options comp
 	if err = options.requestBudget.Validate(); err != nil {
 		return result, err
 	}
+	if t := float64(options.threshold); math.IsNaN(t) || t < 0 || t > 1 {
+		return result, ErrInvalidCompactionThreshold
+	}
 	if _, continuation := c.summarizer.(*ContinuationSummarizer); continuation && options.prefix == nil {
 		return result, ErrSummaryPrefixRequired
 	}
@@ -199,7 +209,17 @@ func (c *Compactor) compact(ctx context.Context, historyBudget int, options comp
 	if err != nil {
 		return result, err
 	}
-	if !selected.budgetReached || snapshot.State == nil || len(snapshot.State.Turns) == 0 {
+	trigger := selected.budgetReached
+	if !trigger && options.threshold > 0 && options.threshold < 1 && snapshot.State != nil && len(snapshot.State.Turns) > 0 {
+		var early selection
+		early, err = selectHistory(ctx, snapshot.State, thresholdBudget(historyBudget, options.threshold), c.counter)
+		if err != nil {
+			return result, err
+		}
+		trigger = early.budgetReached
+		result.Early = trigger
+	}
+	if !trigger || snapshot.State == nil || len(snapshot.State.Turns) == 0 {
 		return CompactionResult{Revision: snapshot.Revision, PressureRemaining: selected.budgetReached}, nil
 	}
 	prefix := options.prefix
@@ -217,7 +237,7 @@ func (c *Compactor) compact(ctx context.Context, historyBudget int, options comp
 		return result, err
 	}
 	if !changed {
-		return CompactionResult{Revision: snapshot.Revision, PressureRemaining: selected.budgetReached}, nil
+		return CompactionResult{Revision: snapshot.Revision, PressureRemaining: selected.budgetReached, Early: result.Early}, nil
 	}
 	next := outcome.state
 	selected, err = selectHistory(ctx, next, historyBudget, c.counter)
@@ -236,8 +256,16 @@ func (c *Compactor) compact(ctx context.Context, historyBudget int, options comp
 		}
 		return result, err
 	}
-	return CompactionResult{Changed: true, Revision: revision, PressureRemaining: selected.budgetReached,
+	return CompactionResult{Changed: true, Revision: revision, PressureRemaining: selected.budgetReached, Early: result.Early,
 		SummarizedTurns: outcome.summarizedTurns, Usage: outcome.usage, UsageReported: outcome.usageReported}, nil
+}
+
+// thresholdBudget is the largest history size that does not exceed threshold
+// of budget. The tolerance absorbs float32 representation error, so 0.7 of 100
+// is 70, not 69.
+func thresholdBudget(budget int, threshold float32) int {
+	limit := float64(budget) * float64(threshold)
+	return int(math.Floor(limit + limit*1e-6))
 }
 
 func nilValue(value any) bool {

@@ -16,7 +16,7 @@ func TestCheckpointOverridesKeepHistoryCompactionPolicy(t *testing.T) {
 	}{
 		{"inherit", Optional[*HistoryCompactionPolicy]{}},
 		{"disabled", Optional[*HistoryCompactionPolicy]{Set: true}},
-		{"policy", Optional[*HistoryCompactionPolicy]{Set: true, Value: &HistoryCompactionPolicy{OnFailure: HistoryCompactionContinue, Amount: .5, SummaryMaxTokens: 300, ResponseFormat: history.SummaryResponseFormatKeep}}},
+		{"policy", Optional[*HistoryCompactionPolicy]{Set: true, Value: &HistoryCompactionPolicy{OnFailure: HistoryCompactionContinue, Threshold: .75, Amount: .5, SummaryMaxTokens: 300, ResponseFormat: history.SummaryResponseFormatKeep}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data, err := json.Marshal(snapshotOverrides(&ExecutionOverrides{HistoryCompaction: tc.in}))

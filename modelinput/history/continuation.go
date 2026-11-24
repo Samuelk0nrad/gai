@@ -65,7 +65,8 @@ func NewContinuationSummarizer(model ai.Model, opts ...ContinuationOption) *Cont
 // the first kept user message, which reuses the whole cached prompt. When that
 // message cannot be quoted unambiguously, or the request exceeds the request
 // budget, it cuts the prefix after the last folded turn and summarizes all of
-// it. When that still does not fit, it folds fewer turns, down to one.
+// it. When that still does not fit, it folds the most turns that fit, at least
+// one.
 func (s *ContinuationSummarizer) SummarizeHistory(ctx context.Context, input SummaryInput) (SummaryOutput, error) {
 	if s == nil || s.model == nil {
 		return SummaryOutput{}, ErrSummarizerMissing
@@ -105,21 +106,40 @@ func (s *ContinuationSummarizer) SummarizeHistory(ctx context.Context, input Sum
 			return s.generate(ctx, request, 0)
 		}
 	}
-	// Cut prefixes: fold every turn, then fewer, oldest first.
-	for folded := len(input.Turns); folded >= 1; folded-- {
+	// Cut prefixes: fold every turn, else the most turns that fit, oldest
+	// first. A cut request grows with the turns it folds, so a binary search
+	// finds that count with a logarithmic number of estimates.
+	cut := func(folded int) (ai.AIRequest, bool, error) {
 		request := withInstruction(base, layout.turnEnds[folded-1], s.instruction("", merge))
 		fits, err := fitsBudget(ctx, request, input.RequestBudget, counter, input.MaxTokens > 0)
+		return request, fits, err
+	}
+	request, fits, err := cut(len(input.Turns))
+	if err != nil {
+		return SummaryOutput{}, err
+	}
+	if fits {
+		return s.generate(ctx, request, 0)
+	}
+	// Invariant: lo turns fit (or lo is zero) and hi turns do not.
+	lo, hi := 0, len(input.Turns)
+	var best ai.AIRequest
+	for lo+1 < hi {
+		mid := lo + (hi-lo)/2
+		request, fits, err := cut(mid)
 		if err != nil {
 			return SummaryOutput{}, err
 		}
 		if fits {
-			if folded == len(input.Turns) {
-				folded = 0
-			}
-			return s.generate(ctx, request, folded)
+			lo, best = mid, request
+		} else {
+			hi = mid
 		}
 	}
-	return SummaryOutput{}, ErrSummaryRequestTooLarge
+	if lo == 0 {
+		return SummaryOutput{}, ErrSummaryRequestTooLarge
+	}
+	return s.generate(ctx, best, lo)
 }
 
 // baseRequest applies the summary settings that do not depend on the cut.
@@ -205,19 +225,16 @@ func (s *ContinuationSummarizer) generate(ctx context.Context, request ai.AIRequ
 	if err := ctx.Err(); err != nil {
 		return output, err
 	}
-	var text strings.Builder
 	for _, part := range response.Message.Parts {
-		switch part.Kind {
-		case ai.ContentToolCall, ai.ContentToolResult:
+		if part.Kind == ai.ContentToolCall || part.Kind == ai.ContentToolResult {
 			return output, fmt.Errorf("%w: the model called a tool", ErrInvalidSummaryReply)
-		case ai.ContentText:
-			text.WriteString(part.Text)
 		}
 	}
 	if truncatedFinish(response.FinishReason) {
 		return output, fmt.Errorf("%w: summary stopped at the output limit (%s)", ErrInvalidSummaryReply, response.FinishReason)
 	}
-	output.Text = strings.TrimSpace(text.String())
+	// Text includes JSON parts, the reply of a kept structured format.
+	output.Text = strings.TrimSpace(response.Message.Text())
 	if output.Text == "" {
 		return output, fmt.Errorf("%w: empty summary", ErrInvalidSummaryReply)
 	}
@@ -232,9 +249,13 @@ func truncatedFinish(reason string) bool {
 	return false
 }
 
+// withInstruction shares the messages with base, which the summarizer owns and
+// never modifies, so trying several cuts copies no message content.
 func withInstruction(base ai.AIRequest, end int, instruction string) ai.AIRequest {
 	request := base
-	request.Messages = append(ai.CloneMessages(base.Messages[:end]), ai.TextMessage(ai.RoleUser, instruction))
+	messages := make([]ai.Message, end, end+1)
+	copy(messages, base.Messages[:end])
+	request.Messages = append(messages, ai.TextMessage(ai.RoleUser, instruction))
 	return request
 }
 

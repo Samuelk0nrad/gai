@@ -170,6 +170,60 @@ func TestAutoCompactHistoryFailureStopsOrContinues(t *testing.T) {
 	}
 }
 
+func TestHistoryCompactionEarlyFailuresAndCancellation(t *testing.T) {
+	failure := errors.New("summary failed")
+	early := history.CompactionResult{Early: true}
+	for _, tc := range []struct {
+		name      string
+		mode      agent.HistoryCompactionFailure
+		result    history.CompactionResult
+		err       error
+		continued bool
+	}{
+		// History that still fits never ends the run, even under Stop.
+		{"early failure under stop", agent.HistoryCompactionStop, early, failure, true},
+		{"failure over the allocation under stop", agent.HistoryCompactionStop, history.CompactionResult{}, failure, false},
+		// A deadline the summarizer set for itself is a summary failure.
+		{"summarizer deadline under continue", agent.HistoryCompactionContinue, history.CompactionResult{}, context.DeadlineExceeded, true},
+		// Cancellation ends the run even while the run's context is live.
+		{"summarizer cancellation under continue", agent.HistoryCompactionContinue, history.CompactionResult{}, context.Canceled, false},
+		{"early cancellation", agent.HistoryCompactionStop, early, context.Canceled, false},
+		{"early configuration error", agent.HistoryCompactionStop, early, history.ErrSummaryPrefixRequired, false},
+		// Another writer changed the history, which may no longer fit.
+		{"early conflict under stop", agent.HistoryCompactionStop, early, &history.RevisionConflictError{SessionID: "s", Expected: "1", Actual: "2"}, false},
+		{"early conflict under continue", agent.HistoryCompactionContinue, early, &history.RevisionConflictError{SessionID: "s", Expected: "1", Actual: "2"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probe := &compactionProbe{result: tc.result, err: tc.err}
+			model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}
+			a := agent.New(agent.Definition{Model: model, TokenCounter: ai.TextTokenEstimator{},
+				HistoryCompaction: &agent.HistoryCompactionPolicy{OnFailure: tc.mode, Threshold: .6},
+				Prompt: func(context.Context, agent.RunInput) (modelinput.PromptBuilder, error) {
+					return modelinput.New(modelinput.Definition{TokenBudget: 256, ContextSources: []modelinput.ContextSource{probe}}), nil
+				}})
+			workflow, err := a.NewRun(t.Context(), textRunInput("q"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := workflow.Run(t.Context())
+			if probe.threshold != .6 {
+				t.Fatalf("threshold = %v", probe.threshold)
+			}
+			if tc.continued {
+				if err != nil || result.Text != "answer" {
+					t.Fatalf("run: %v %+v", err, result)
+				}
+			} else if !errors.Is(err, tc.err) || len(model.Requests()) != 0 {
+				t.Fatalf("run: err=%v calls=%d", err, len(model.Requests()))
+			}
+			reports := result.Primary.HistoryCompaction
+			if len(reports) != 1 || reports[0].Continued != tc.continued || !errors.Is(reports[0].Err, tc.err) || reports[0].Result.Early != tc.result.Early {
+				t.Fatalf("reports = %+v", reports)
+			}
+		})
+	}
+}
+
 func TestAutoCompactHistoryConfigurationErrorsStopUnderContinue(t *testing.T) {
 	model := &scriptedWorkflowModel{scripts: [][]ai.Token{autoText("answer")}}
 	def := autoHistoryDefinition(model, localCountHistoryStore{})
@@ -187,6 +241,7 @@ func TestHistoryCompactionPolicyValidation(t *testing.T) {
 	nan := float32(math.NaN())
 	for _, policy := range []agent.HistoryCompactionPolicy{
 		{OnFailure: 9}, {Amount: -1}, {Amount: 2}, {Amount: nan}, {SummaryMaxTokens: -1}, {ResponseFormat: 9},
+		{Threshold: -.1}, {Threshold: 1.5}, {Threshold: nan},
 		{Summarizer: (*history.ContinuationSummarizer)(nil)},
 	} {
 		def := autoHistoryDefinition(&scriptedWorkflowModel{}, autoHistory("x"))
@@ -275,6 +330,10 @@ type compactionProbe struct {
 	counter            ai.TokenCounter
 	prefix             ai.AIRequest
 	budget             ai.RequestBudgetConfig
+	threshold          float32
+	// result and err replace the default unchanged result when set.
+	result history.CompactionResult
+	err    error
 }
 
 func (*compactionProbe) Name() string { return "history" }
@@ -284,7 +343,10 @@ func (p *compactionProbe) Function(_ context.Context, budget int) (modelinput.Pa
 }
 func (p *compactionProbe) CompactHistory(_ context.Context, req history.AutoCompaction) (history.CompactionResult, error) {
 	p.prepared = append(p.prepared, req.HistoryBudget)
-	p.model, p.counter, p.prefix, p.budget = req.Model, req.Counter, req.Prefix, req.RequestBudget
+	p.model, p.counter, p.prefix, p.budget, p.threshold = req.Model, req.Counter, req.Prefix, req.RequestBudget, req.Threshold
+	if p.err != nil || p.result != (history.CompactionResult{}) {
+		return p.result, p.err
+	}
 	return history.CompactionResult{Revision: "r"}, nil
 }
 
