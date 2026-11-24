@@ -35,6 +35,27 @@ effort, whatever the catalog reports.
 
 "low to max" means `low`, `medium`, `high`, `xhigh` and `max`.
 
+## Images, PDFs and text files
+
+User messages and tool results accept media parts (`ai.ContentMedia` with an
+`ai.MediaPart`). Text and media keep their order.
+
+| Media | Sent as |
+| --- | --- |
+| `image/jpeg`, `image/png`, `image/webp`, `image/gif` | `image` block. An `http(s)` URL becomes a `url` source; inline bytes and base64 `data:` URIs become a `base64` source. |
+| `application/pdf` | `document` block with a `url` or `base64` source, titled with `MediaPart.Name` when set. |
+| `text/*`, `application/json`, `+json` types | `document` block with a plain-text source, titled with `MediaPart.Name`. Only inline bytes or a base64 `data:` URI. |
+
+- **Tool results.** A tool result that contains media is a `tool_result`
+  block whose content lists text, image and document blocks in order.
+  Text-only results keep a single text block.
+- **Rejected inputs.** Other MIME types, other URI schemes (such as `s3:` or
+  `file:`), text files by URL, text that is not UTF-8, and media in system or
+  assistant messages fail with `*ai.UnsupportedContentError`. No request is
+  sent.
+- **Token counting.** `CountInputTokens` sends media to the count endpoint,
+  so counts include it.
+
 ## Reasoning
 
 `ai.ReasoningConfig` maps to `thinking` and `output_config.effort`:

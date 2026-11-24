@@ -175,9 +175,15 @@ func (b *compactingPromptBuilder) BuildContext(ctx context.Context) ([]modelinpu
 			request.Messages = preceding
 			return request, nil
 		}
+		summarizer := b.policy.Summarizer
+		if media, ok := b.model.(mediaPolicyModel); ok && summarizer == nil {
+			// Convert media before the summary's budget check, so it counts
+			// the request the model receives.
+			summarizer = history.NewContinuationSummarizer(b.model, history.WithContinuationMessages(media.media.Messages))
+		}
 		result, err := source.CompactHistory(ctx, history.AutoCompaction{
 			HistoryBudget: prep.Remaining, Threshold: b.policy.Threshold, Model: b.model, Counter: prep.Counter,
-			Summarizer: b.policy.Summarizer, Amount: b.policy.Amount,
+			Summarizer: summarizer, Amount: b.policy.Amount,
 			SummaryMaxTokens: b.policy.SummaryMaxTokens, ResponseFormat: b.policy.ResponseFormat,
 			Prefix: prefix, RequestBudget: budget,
 		})
@@ -265,4 +271,25 @@ func historyConfigurationError(err error) bool {
 		}
 	}
 	return false
+}
+
+// mediaPolicyModel applies the agent's media policy to requests that bypass
+// the loop, such as history-compaction summaries. The default continuation
+// summarizer converts media itself, before its budget check; this wrapper
+// covers custom summarizers that call the model.
+type mediaPolicyModel struct {
+	ai.Model
+	media *ai.MediaAdapter
+}
+
+func (m mediaPolicyModel) GenerateStream(ctx context.Context, request ai.AIRequest) <-chan ai.Token {
+	messages, err := m.media.Messages(ctx, request.Messages)
+	if err != nil {
+		tokens := make(chan ai.Token, 1)
+		tokens <- ai.Token{Err: err}
+		close(tokens)
+		return tokens
+	}
+	request.Messages = messages
+	return m.Model.GenerateStream(ctx, request)
 }

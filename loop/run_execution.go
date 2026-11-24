@@ -89,6 +89,7 @@ func (l *Loop) executeRun(ctx context.Context, events chan<- Event) {
 		defer totalCancel()
 	}
 	ctx, state := newLoopRunState(ctx, l)
+	l.mediaAdapter = ai.NewMediaAdapter(l.Model, l.Media)
 	run := &runExecution{
 		owner:     l,
 		callerCtx: callerCtx,

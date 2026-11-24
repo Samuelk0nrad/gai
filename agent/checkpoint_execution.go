@@ -38,6 +38,7 @@ func (a *Agent) restoreCheckpointLoop(stage StageCheckpoint) (*loop.Loop, error)
 	settings := stage.Settings
 	l := loop.New(a.def.Model, cloneTools(a.def.Tools), builder, a.def.ToolResultProcessor)
 	l.ObservationSink = a.def.ObservationSink
+	l.Media = a.def.Media
 	l.ToolPolicy = a.def.ToolPolicy
 	l.ToolApprovalResolver = a.def.ToolApprovalResolver
 	l.TokenCounter = a.def.TokenCounter

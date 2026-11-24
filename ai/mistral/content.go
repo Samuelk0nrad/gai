@@ -2,13 +2,12 @@ package mistral
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/mediainput"
 )
 
 const (
@@ -26,6 +25,10 @@ const (
 	chunkText     = "text"
 	chunkThinking = "thinking"
 	chunkImageURL = "image_url"
+	// chunkDocumentURL is a PDF by URL, for document understanding.
+	chunkDocumentURL = "document_url"
+	// chunkInputAudio is audio for audio-capable models such as Voxtral.
+	chunkInputAudio = "input_audio"
 )
 
 // chatContentChunk is one request content chunk. Only the fields of the
@@ -36,6 +39,11 @@ type chatContentChunk struct {
 	Thinking  []chatContentChunk
 	Signature string
 	ImageURL  string
+	// DocumentURL and DocumentName belong to document_url chunks.
+	DocumentURL  string
+	DocumentName string
+	// InputAudio is the base64 audio or audio URL of an input_audio chunk.
+	InputAudio string
 }
 
 func (c chatContentChunk) MarshalJSON() ([]byte, error) {
@@ -60,6 +68,17 @@ func (c chatContentChunk) MarshalJSON() ([]byte, error) {
 			Type     string `json:"type"`
 			ImageURL string `json:"image_url"`
 		}{c.Type, c.ImageURL})
+	case chunkDocumentURL:
+		return json.Marshal(struct {
+			Type         string `json:"type"`
+			DocumentURL  string `json:"document_url"`
+			DocumentName string `json:"document_name,omitempty"`
+		}{c.Type, c.DocumentURL, c.DocumentName})
+	case chunkInputAudio:
+		return json.Marshal(struct {
+			Type       string `json:"type"`
+			InputAudio string `json:"input_audio"`
+		}{c.Type, c.InputAudio})
 	default:
 		return nil, fmt.Errorf("mistral: cannot encode content chunk %q", c.Type)
 	}
@@ -72,11 +91,13 @@ func (c *chatContentChunk) UnmarshalJSON(data []byte) error {
 		Thinking  []chatContentChunk `json:"thinking"`
 		Signature *string            `json:"signature"`
 		ImageURL  json.RawMessage    `json:"image_url"`
+		Document  string             `json:"document_url"`
+		Name      string             `json:"document_name"`
 	}
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
-	*c = chatContentChunk{Type: wire.Type, Text: wire.Text, Thinking: wire.Thinking}
+	*c = chatContentChunk{Type: wire.Type, Text: wire.Text, Thinking: wire.Thinking, DocumentURL: wire.Document, DocumentName: wire.Name}
 	if wire.Signature != nil {
 		c.Signature = *wire.Signature
 	}
@@ -206,61 +227,109 @@ func signatureExtension(signature string) ai.Extension {
 	return ai.Extension{Namespace: ExtensionNamespace, Type: ExtensionThinkingSignature, Data: data}
 }
 
-// Supported inline and remote image MIME types for Mistral vision input.
-var imageMIMETypes = map[string]bool{
-	"image/jpeg": true,
-	"image/png":  true,
-	"image/webp": true,
-	"image/gif":  true,
-}
+var (
+	mistralImageTypes = mediainput.Types{"image/jpeg", "image/png", "image/webp", "image/gif"}
+	mistralAudioTypes = mediainput.Types{"audio/mpeg", "audio/wav", "audio/flac", "audio/ogg", "audio/aac", "audio/mp4", "audio/webm"}
+)
 
-// normalizeImageMIME lowercases a MIME type and maps the common image/jpg
-// alias to image/jpeg.
-func normalizeImageMIME(mimeType string) string {
-	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
-	if mimeType == "image/jpg" {
-		return "image/jpeg"
-	}
-	return mimeType
-}
+const mistralSupportedTypes = "image/jpeg, image/png, image/webp, image/gif, application/pdf by URL, audio (mp3, wav, flac, ogg, aac, m4a, webm), text/*, application/json"
 
-func imageChunk(media *ai.MediaPart) (chatContentChunk, error) {
-	mimeType := normalizeImageMIME(media.MIMEType)
-	if !imageMIMETypes[mimeType] {
-		return chatContentChunk{}, &ai.UnsupportedContentError{Provider: "mistral", Kind: ai.ContentMedia, Detail: fmt.Sprintf("MIME type %q (supported: image/jpeg, image/png, image/webp, image/gif)", media.MIMEType)}
-	}
-	if len(media.Data) > 0 {
-		return chatContentChunk{Type: chunkImageURL, ImageURL: "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(media.Data)}, nil
-	}
-	parsed, err := url.Parse(media.URI)
+// resolveMistralMedia resolves media and checks its type and source:
+//
+//   - Images (image/jpeg, image/png, image/webp, image/gif) become image_url
+//     chunks with an http(s) URL or a base64 data URL.
+//   - PDFs (application/pdf) become document_url chunks. Mistral reads PDFs
+//     by URL only; inline PDFs must be uploaded with the Files API first and
+//     sent as a signed URL.
+//   - Audio becomes input_audio chunks holding base64 data or a URL, for
+//     audio-capable models such as Voxtral.
+//   - Text media (text/*, application/json, +json) given as bytes or a base64
+//     data URI becomes a text chunk wrapped in a <file> element.
+//
+// Other MIME types, URI schemes and text by URL return
+// *ai.UnsupportedContentError.
+func resolveMistralMedia(media *ai.MediaPart) (mediainput.Source, error) {
+	source, err := mediainput.Resolve("mistral", media)
 	if err != nil {
-		return chatContentChunk{}, &ai.UnsupportedContentError{Provider: "mistral", Kind: ai.ContentMedia, Detail: "invalid image URI"}
+		return source, err
 	}
-	switch strings.ToLower(parsed.Scheme) {
-	case "http", "https":
-		if parsed.Host == "" {
-			return chatContentChunk{}, &ai.UnsupportedContentError{Provider: "mistral", Kind: ai.ContentMedia, Detail: "image URL requires a host"}
+	switch {
+	case mistralImageTypes.Has(source.MIMEType), mistralAudioTypes.Has(source.MIMEType):
+		return source, nil
+	case source.Kind == mediainput.KindPDF:
+		if source.Inline() {
+			return source, mediainput.Unsupported("mistral", "PDFs must be given by http(s) URL; upload inline PDFs with the Mistral Files API and pass a signed URL")
 		}
-	case "data":
-		header, payload, found := strings.Cut(media.URI[len("data:"):], ",")
-		uriMIME, isBase64 := strings.CutSuffix(strings.ToLower(header), ";base64")
-		if !found || !isBase64 || normalizeImageMIME(uriMIME) != mimeType {
-			return chatContentChunk{}, &ai.UnsupportedContentError{Provider: "mistral", Kind: ai.ContentMedia, Detail: "data URI must be base64 encoded and match the part MIME type"}
-		}
-		// Send the canonical MIME type so aliases such as image/jpg are accepted.
-		return chatContentChunk{Type: chunkImageURL, ImageURL: "data:" + mimeType + ";base64," + payload}, nil
+		return source, nil
+	case source.Kind == mediainput.KindText:
+		return source, source.CheckText("mistral")
 	default:
-		return chatContentChunk{}, &ai.UnsupportedContentError{Provider: "mistral", Kind: ai.ContentMedia, Detail: fmt.Sprintf("image URI scheme %q (use http, https, data, or inline bytes)", parsed.Scheme)}
+		return source, mediainput.Unsupported("mistral", "MIME type %q (supported: %s)", media.MIMEType, mistralSupportedTypes)
 	}
-	return chatContentChunk{Type: chunkImageURL, ImageURL: media.URI}, nil
 }
 
+// mediaChunk maps one media part; see resolveMistralMedia.
+func mediaChunk(media *ai.MediaPart) (chatContentChunk, error) {
+	source, err := resolveMistralMedia(media)
+	if err != nil {
+		return chatContentChunk{}, err
+	}
+	switch {
+	case source.Kind == mediainput.KindPDF:
+		return chatContentChunk{Type: chunkDocumentURL, DocumentURL: source.URL, DocumentName: source.Name}, nil
+	case source.Kind == mediainput.KindText:
+		text, err := source.TextFile("mistral")
+		if err != nil {
+			return chatContentChunk{}, err
+		}
+		return chatContentChunk{Type: chunkText, Text: text}, nil
+	case source.Kind == mediainput.KindAudio:
+		if source.Inline() {
+			return chatContentChunk{Type: chunkInputAudio, InputAudio: source.Base64()}, nil
+		}
+		return chatContentChunk{Type: chunkInputAudio, InputAudio: source.URL}, nil
+	case source.Inline():
+		// Send the canonical MIME type so aliases such as image/jpg are accepted.
+		return chatContentChunk{Type: chunkImageURL, ImageURL: source.DataURL()}, nil
+	default:
+		return chatContentChunk{Type: chunkImageURL, ImageURL: source.URL}, nil
+	}
+}
+
+// AcceptsMedia reports whether the chat mapping sends media to this model.
+// Images also need a model that the cached catalog does not mark as without
+// vision.
+func (m *Model) AcceptsMedia(media ai.MediaPart, _ ai.MediaPlacement) error {
+	source, err := resolveMistralMedia(&media)
+	if err != nil {
+		return err
+	}
+	if source.Kind == mediainput.KindImage {
+		if vision, known := m.client.visionSupport(m.name); known && !vision {
+			return &ai.UnsupportedCapabilityError{Model: m.name, Capability: "image input"}
+		}
+	}
+	return nil
+}
+
+// containsImageInput reports whether messages, including tool results, send
+// an image, which needs a vision model.
 func containsImageInput(messages []ai.Message) bool {
 	for _, message := range messages {
-		for _, part := range message.Parts {
-			if part.Kind == ai.ContentMedia {
-				return true
-			}
+		if partsContainImage(message.Parts) {
+			return true
+		}
+	}
+	return false
+}
+
+func partsContainImage(parts []ai.ContentPart) bool {
+	for _, part := range parts {
+		if part.Media != nil && mediainput.Classify(part.Media.MIMEType) == mediainput.KindImage {
+			return true
+		}
+		if part.ToolResult != nil && partsContainImage(part.ToolResult.Parts) {
+			return true
 		}
 	}
 	return false

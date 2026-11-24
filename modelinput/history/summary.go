@@ -166,7 +166,9 @@ func summarizeHistory(ctx context.Context, state *HistoryState, summarizer Summa
 // RenderSummaryText renders an earlier summary and turns as one text document,
 // the input of summarizers with their own prompt. Provider state, such as
 // reasoning items, signatures, hosted tool calls and citations, has no text
-// form and is dropped. Media and unknown required state are rejected.
+// form and is dropped. Each media part, including media in tool results,
+// becomes its ai.MediaPart.Placeholder text, such as "[image: board.jpg,
+// image/png]". Unknown required state is rejected.
 func RenderSummaryText(ctx context.Context, previous *Summary, turns []modelinput.Turn) (string, error) {
 	var builder strings.Builder
 	if previous != nil {
@@ -207,6 +209,7 @@ func writeTurn(ctx context.Context, builder *strings.Builder, turn *modelinput.T
 	// required state still does.
 	add := func(message ai.Message) {
 		if text, ok := message.WithoutProviderState(); ok {
+			text.Parts = mediaPlaceholders(text.Parts)
 			messages = append(messages, text)
 		}
 	}
@@ -223,6 +226,21 @@ func writeTurn(ctx context.Context, builder *strings.Builder, turn *modelinput.T
 	builder.WriteString(text)
 	builder.WriteString("\n")
 	return nil
+}
+
+// mediaPlaceholders replaces media parts, including those in tool results,
+// with their text placeholders. parts must be owned by the caller.
+func mediaPlaceholders(parts []ai.ContentPart) []ai.ContentPart {
+	for i := range parts {
+		part := &parts[i]
+		switch {
+		case part.Media != nil:
+			*part = ai.ContentPart{Kind: ai.ContentText, Text: part.Media.Placeholder(), Extensions: part.Extensions}
+		case part.ToolResult != nil:
+			part.ToolResult.Parts = mediaPlaceholders(part.ToolResult.Parts)
+		}
+	}
+	return parts
 }
 
 // Tokens counts the summary text on demand using the caller's context. Counting

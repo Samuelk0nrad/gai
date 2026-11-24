@@ -43,11 +43,14 @@ type Extension struct {
 }
 
 // MediaPart preserves media without requiring a provider-specific SDK type.
-// Exactly one of URI and Data must be supplied. Text renderers cannot encode media.
+// Exactly one of URI and Data must be supplied. Name is an optional file name,
+// such as "invoice.pdf", that providers may show to the model or require for
+// file input. Text renderers cannot encode media.
 type MediaPart struct {
 	MIMEType string `json:"mime_type"`
 	URI      string `json:"uri,omitempty"`
 	Data     []byte `json:"data,omitempty"`
+	Name     string `json:"name,omitempty"`
 }
 
 // ContentPart is an ordered, serializable semantic payload. Empty text is valid.

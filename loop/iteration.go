@@ -96,6 +96,7 @@ func (i Iteration) Clone() Iteration {
 		}
 		if p.ToolResp != nil {
 			r := *p.ToolResp
+			r.Media = cloneMedia(r.Media)
 			p.ToolResp = &r
 		}
 	}

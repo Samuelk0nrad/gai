@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -73,11 +74,11 @@ func TestTruncateToolResultBytesCutsSuccessfulText(t *testing.T) {
 					t.Fatalf("ascii len=%d, want exactly %d", len(result.Text), limit)
 				}
 				again, _ := processor.Process(t.Context(), ToolPolicyInput{}, result)
-				if again != result {
+				if !reflect.DeepEqual(again, result) {
 					t.Fatal("reprocessing a truncated result changed it")
 				}
 				repeat, _ := processor.Process(t.Context(), ToolPolicyInput{}, ToolResult{Text: tc.text})
-				if repeat != result {
+				if !reflect.DeepEqual(repeat, result) {
 					t.Fatal("truncation is not deterministic")
 				}
 			})
@@ -104,7 +105,7 @@ func TestTruncateToolResultBytesRecutKeepsOriginalSize(t *testing.T) {
 		small, _ := TruncateToolResultBytes(limit)
 		recut, _ := small.Process(t.Context(), ToolPolicyInput{}, stored)
 		direct, _ := small.Process(t.Context(), ToolPolicyInput{}, ToolResult{Text: text})
-		if recut != direct {
+		if !reflect.DeepEqual(recut, direct) {
 			t.Fatalf("limit %d: recut=%q\ndirect=%q", limit, recut.Text, direct.Text)
 		}
 		if strings.Count(recut.Text, "[tool result truncated:") != 1 || !strings.HasSuffix(recut.Text, fmt.Sprintf("of %d bytes]", len(text))) {
@@ -113,7 +114,7 @@ func TestTruncateToolResultBytesRecutKeepsOriginalSize(t *testing.T) {
 	}
 	// A larger limit leaves the stored cut unchanged.
 	larger, _ := TruncateToolResultBytes(64 * 1024)
-	if got, _ := larger.Process(t.Context(), ToolPolicyInput{}, stored); got != stored {
+	if got, _ := larger.Process(t.Context(), ToolPolicyInput{}, stored); !reflect.DeepEqual(got, stored) {
 		t.Fatal("larger limit changed a stored cut")
 	}
 }
@@ -148,7 +149,7 @@ func TestTruncateToolResultBytesKeepsFittingAndDisabledResults(t *testing.T) {
 		{disabled, ToolResult{Err: errors.New(strings.Repeat("x", 10*limit))}},
 	} {
 		got, err := tc.processor.Process(t.Context(), ToolPolicyInput{}, tc.result)
-		if err != nil || got != tc.result {
+		if err != nil || !reflect.DeepEqual(got, tc.result) {
 			t.Fatalf("result changed: %#v -> %#v (%v)", tc.result, got, err)
 		}
 	}

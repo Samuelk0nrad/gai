@@ -394,7 +394,7 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 					if task.options.Timeout != nil {
 						timeout = *task.options.Timeout
 					}
-					done.result, done.duration, done.err = processObservedToolExecution(invocationCtx, ToolPolicyInput{Call: task.pending.call, Traits: task.options.Traits}, []Tool{task.tool}, l.ToolResultProcessor, timeout, &done.execution, l.ObservationSink)
+					done.result, done.duration, done.err = processObservedToolExecution(invocationCtx, ToolPolicyInput{Call: task.pending.call, Traits: task.options.Traits}, []Tool{task.tool}, l.resultProcessor(), timeout, &done.execution, l.ObservationSink)
 				}(index, task, release, invocationCtx)
 			}
 		}
@@ -447,7 +447,7 @@ func (l *Loop) executeToolCalls(ctx context.Context, iteration *Iteration, calls
 		if result == nil {
 			continue
 		}
-		output := ai.ToolResult{ToolCallID: task.pending.call.ID, Name: task.pending.call.Name, Parts: ai.TextParts(result.String()), IsError: result.Err != nil}
+		output := result.canonical(task.pending.call)
 		if l.durable != nil {
 			if saved := l.durable.state.Pending.Invocations[index].Result; saved != nil {
 				output = *saved
@@ -468,12 +468,17 @@ func (l *Loop) processUninvoked(ctx context.Context, task scheduledTool) (respon
 		}
 	}()
 	result := *task.result
-	if l.ToolResultProcessor != nil {
-		processed, err := l.ToolResultProcessor.Process(ctx, ToolPolicyInput{Call: task.pending.call.Clone(), Traits: task.options.Traits}, result)
+	// The same processor as for invoked tools, so media a processor adds
+	// is adapted for the model too.
+	if processor := l.resultProcessor(); processor != nil {
+		processed, err := processor.Process(ctx, ToolPolicyInput{Call: task.pending.call.Clone(), Traits: task.options.Traits}, result)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrToolResultProcess, err)
 		}
-		result = normalizeToolResult(processed.Text, processed.Err)
+		result = processed.normalized()
+		if err := validateMedia(result.Media); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrToolResultProcess, err)
+		}
 	}
 	result = preserveToolRefusal(*task.result, result)
 	return &result, nil

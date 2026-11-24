@@ -489,12 +489,22 @@ func processObservedToolExecution(ctx context.Context, input ToolPolicyInput, to
 	execution.Output = ToolOutputAccepted
 	if processor != nil {
 		input.Call = input.Call.Clone()
-		processed, err := processor.Process(toolCtx, input, result)
+		// The processor gets its own media so in-place edits still show up
+		// as a changed output when compared with original.
+		toProcess := result
+		toProcess.Media = cloneMedia(result.Media)
+		processed, err := processor.Process(toolCtx, input, toProcess)
 		if err != nil {
 			execution.Output = ToolOutputRejected
 			return nil, duration, fmt.Errorf("%w: %w", ErrToolResultProcess, err)
 		}
-		result = normalizeToolResult(processed.Text, processed.Err)
+		result = processed.normalized()
+		// The handler's media was validated when it returned; a processor
+		// may return new media, which must be valid before it is recorded.
+		if err := validateMedia(result.Media); err != nil {
+			execution.Output = ToolOutputRejected
+			return nil, duration, fmt.Errorf("%w: %w", ErrToolResultProcess, err)
+		}
 	}
 	execution.Output = outputState(original, &result)
 	return &result, duration, nil
@@ -508,6 +518,13 @@ func (o *toolObservation) finish(response *ToolResult, duration time.Duration) {
 	o.finishOnce.Do(func() {
 		outcome, output, spanErr := toolResult(response)
 		if response != nil {
+			// Media is captured as placeholders with sizes, never as bytes or URIs.
+			if media := mediaCaptureText(response.Media); media != "" && response.Err == nil {
+				if output != "" {
+					output += "\n"
+				}
+				output += media
+			}
 			if captured, ok := gai.CaptureContent(o.ctx, gai.ContentKindToolOutput, []byte(output)); ok {
 				aliases := []string{"langfuse.observation.output"}
 				if outcome == toolOutcomeSuccess {
@@ -572,6 +589,20 @@ func toolObservationFields(call ai.ToolCall, execution *ToolExecution, outcome, 
 		fields["approval"] = string(execution.Approval.Action)
 	}
 	return fields
+}
+
+// mediaCaptureText describes media for captured tool output: one
+// placeholder line per part, such as "[image: a.png, image/png, 2048 bytes]".
+func mediaCaptureText(media []ai.MediaPart) string {
+	lines := make([]string, 0, len(media))
+	for _, part := range media {
+		placeholder := strings.TrimSuffix(part.Placeholder(), "]")
+		if len(part.Data) > 0 {
+			placeholder += fmt.Sprintf(", %d bytes", len(part.Data))
+		}
+		lines = append(lines, placeholder+"]")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // toolResult separates model-facing output from safe telemetry errors.

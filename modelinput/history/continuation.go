@@ -41,6 +41,7 @@ const (
 type ContinuationSummarizer struct {
 	model        ai.Model
 	instructions string
+	adapt        func(context.Context, []ai.Message) ([]ai.Message, error)
 }
 
 // ContinuationOption configures a ContinuationSummarizer.
@@ -50,6 +51,15 @@ type ContinuationOption func(*ContinuationSummarizer)
 // still adds which messages to cover and how to treat the earlier summary.
 func WithContinuationInstructions(instructions string) ContinuationOption {
 	return func(s *ContinuationSummarizer) { s.instructions = strings.TrimSpace(instructions) }
+}
+
+// WithContinuationMessages adapts the continued request's messages before the
+// request budget is checked and the request is sent, for example to convert
+// media the model cannot read (ai.MediaAdapter.Messages). The stored history
+// is located in the original messages, so adapt must return the same number
+// of messages in the same order.
+func WithContinuationMessages(adapt func(context.Context, []ai.Message) ([]ai.Message, error)) ContinuationOption {
+	return func(s *ContinuationSummarizer) { s.adapt = adapt }
 }
 
 // NewContinuationSummarizer creates a summarizer that continues the request
@@ -93,6 +103,17 @@ func (s *ContinuationSummarizer) SummarizeHistory(ctx context.Context, input Sum
 	layout, err := locateHistory(base.Messages, input.PreviousSummary, input.Turns, firstKept)
 	if err != nil {
 		return SummaryOutput{}, err
+	}
+	if s.adapt != nil {
+		// The budget checks and the request use the adapted messages.
+		adapted, err := s.adapt(ctx, base.Messages)
+		if err != nil {
+			return SummaryOutput{}, err
+		}
+		if len(adapted) != len(base.Messages) {
+			return SummaryOutput{}, fmt.Errorf("%w: message adapter returned %d of %d messages", ErrInvalidSummaryPrefix, len(adapted), len(base.Messages))
+		}
+		base.Messages = adapted
 	}
 	counter := input.Counter
 	if counter == nil {

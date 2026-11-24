@@ -87,6 +87,11 @@ type configuredTool struct {
 // ToolOptions returns a copy of the registration settings.
 func (t *configuredTool) ToolOptions() ToolOptions { return t.options.clone() }
 
+// FunctionResult forwards to the wrapped tool, keeping a ResultTool's media.
+func (t *configuredTool) FunctionResult(ctx context.Context, call ai.ToolCall) (ToolResult, error) {
+	return InvokeTool(ctx, t.Tool, call), nil
+}
+
 // WithToolOptions wraps a tool with validated copied options. Nested wrappers
 // replace, rather than merge, options. The handler and Guard remain shared.
 func WithToolOptions(tool Tool, options ToolOptions) (Tool, error) {

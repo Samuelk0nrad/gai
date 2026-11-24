@@ -615,7 +615,14 @@ func restoredResult(r *ai.ToolResult) *ToolResult {
 	v := &ToolResult{Text: r.Text()}
 	if r.IsError {
 		v.Err = errors.New(r.Text())
+		return v
 	}
+	for _, part := range r.Parts {
+		if part.Media != nil {
+			v.Media = append(v.Media, *part.Media)
+		}
+	}
+	v.Media = cloneMedia(v.Media)
 	return v
 }
 

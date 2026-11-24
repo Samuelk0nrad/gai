@@ -405,6 +405,8 @@ func mapNativeMessages(messages []ai.Message) ([]sdk.ChatCompletionMessageParamU
 				}
 				out = append(out, sdk.ToolMessage(content, part.ToolResult.ToolCallID))
 			case ai.ContentExtension: // Unsupported required extensions were rejected above.
+			case ai.ContentMedia:
+				return nil, unsupportedMedia("media input requires the Responses transport (WithResponsesTransport)")
 			default:
 				return nil, fmt.Errorf("%w: OpenAI chat content %q", ai.ErrUnsupportedCapability, part.Kind)
 			}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/mediainput"
 	"github.com/Samuelk0nrad/gai/internal/modelcatalog"
 	"github.com/Samuelk0nrad/gai/internal/streamtext"
 	antropic "github.com/anthropics/anthropic-sdk-go"
@@ -345,22 +346,23 @@ func mapNativeMessages(messages []ai.Message, midConversationSystem bool) ([]ant
 				if err := unsupportedExtensions(part.Extensions); err != nil {
 					return nil, err
 				}
-				r := part.ToolResult
-				var content strings.Builder
-				for _, resultPart := range r.Parts {
-					if err := unsupportedExtensions(resultPart.Extensions); err != nil {
-						return nil, err
-					}
-					switch resultPart.Kind {
-					case ai.ContentText:
-						content.WriteString(resultPart.Text)
-					case ai.ContentJSON:
-						content.Write(resultPart.JSON)
-					default:
-						return nil, fmt.Errorf("%w: Anthropic tool result %q", ai.ErrUnsupportedCapability, resultPart.Kind)
-					}
+				block, err := toolResultBlock(part.ToolResult)
+				if err != nil {
+					return nil, err
 				}
-				blocks = append(blocks, antropic.NewToolResultBlock(r.ToolCallID, content.String(), r.IsError))
+				blocks = append(blocks, block)
+			case ai.ContentMedia:
+				if err := unsupportedExtensions(part.Extensions); err != nil {
+					return nil, err
+				}
+				if m.Role != ai.RoleUser {
+					return nil, mediainput.Unsupported("anthropic", "media is only accepted in user messages and tool results, not %s messages", m.Role)
+				}
+				block, err := mediaBlock(part.Media)
+				if err != nil {
+					return nil, err
+				}
+				blocks = append(blocks, block)
 			case ai.ContentExtension:
 				raw, err := hostedBlock(part.Extensions)
 				if err != nil {

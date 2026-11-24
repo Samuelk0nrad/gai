@@ -34,6 +34,49 @@ schema; custom tool implementations own the stability of their name and schema.
 Traits are application assertions, not inferred guarantees. Idempotency is
 metadata only: GAI never automatically retries tool invocations.
 
+## Return images and files
+
+A tool that returns an image, PDF or other file uses `loop.NewResultTool`. Its
+handler returns a `loop.ToolResult` whose `Media` follows `Text` in the tool
+result the model receives:
+
+```go
+openFile, err := loop.NewResultTool("open_file", "Open a stored file", params,
+    func(ctx context.Context, call ai.ToolCall) (loop.ToolResult, error) {
+        file, err := files.Load(ctx, call) // application-owned dependency
+        if err != nil {
+            return loop.ToolResult{}, err
+        }
+        return loop.ToolResult{
+            Text:  file.Name,
+            Media: []ai.MediaPart{{MIMEType: file.MIMEType, Data: file.Bytes, Name: file.Name}},
+        }, nil
+    })
+```
+
+- **Contract.** A struct can implement `loop.ResultTool`, which adds
+  `FunctionResult(ctx, call) (loop.ToolResult, error)` to `loop.Tool`. The loop
+  calls `FunctionResult` instead of `Function`. A returned error, or `Err` in the
+  result, discards `Text` and `Media`. `Function` of a `NewResultTool` tool
+  returns only the text.
+- **Validation.** Each media part needs a MIME type and exactly one of `URI` or
+  `Data`. Invalid media becomes a model-visible tool error.
+- **Wrappers.** `WithToolOptions` keeps media. A custom wrapper that embeds a
+  `loop.Tool` must forward `FunctionResult`, for example with
+  `return loop.InvokeTool(ctx, inner, call), nil`.
+- **Canonical result.** A result without media keeps its single text part. With
+  media, non-empty text comes first, then one `ai.ContentMedia` part per media
+  item. Checkpoints keep the parts, so a resumed run replays them.
+- **Providers.** OpenAI (Responses transport), Anthropic, Gemini and Mistral
+  send tool-result media to the model; [Media](media.md) lists the accepted
+  types. Media the model does not accept is converted by `Loop.Media`
+  (`Definition.Media` on agents) right after `ToolResultProcessor`. Media that
+  still cannot be sent becomes a tool error matching
+  `loop.ErrToolMediaUnsupported`, and the run continues.
+- **Telemetry.** Captured tool output shows each media part as a placeholder
+  with its size, such as `[image: a.png, image/png, 2048 bytes]`. Bytes and
+  URIs are never captured.
+
 ## Finish with a terminal presentation batch
 
 Mark application-owned presentation tools as terminal when their successful
@@ -297,6 +340,8 @@ ends with a note that counts toward the limit:
   original once at the new limit.
 - Oversized error text, including `ErrToolDenied` and `ErrToolApprovalRequired`
   refusals, is never cut: it is replaced exactly as `LimitToolResultBytes` does.
+- Media is kept unchanged; only the text is cut. Media bytes do not count
+  toward the limit.
 - Zero disables truncation. Positive limits must be at least
   `loop.MinTruncateToolResultBytes` (128 bytes) so the note always fits.
 - Events, the conversation, retained results, and tool spans all see the cut
@@ -304,7 +349,10 @@ ends with a note that counts toward the limit:
   The execution's output state is `changed`, and tool spans record it as
   `gai.tool.output=changed`.
 
-A custom processor returns `ToolResult{Text: ..., Err: ...}` as a replacement.
+A custom processor returns `ToolResult{Text: ..., Media: ..., Err: ...}` as a
+replacement; copy `Media` from its input to keep the files. The built-in
+processors keep media. Redaction, the byte limit and truncation apply to text
+only.
 Use `RejectToolResult("safe reason")` to withhold output while continuing the run
 with a model-visible error. A processing error or panic terminates the run and
 withholds the raw output. Error implementations retained in snapshots must be

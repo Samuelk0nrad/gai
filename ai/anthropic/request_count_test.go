@@ -228,13 +228,13 @@ func TestCountInputTokensRejectsInvalidCanonicalInputBeforeTransport(t *testing.
 	}
 }
 
-func TestCountInputTokensRejectsURLMediaBeforeTransport(t *testing.T) {
+func TestCountInputTokensRejectsUnsupportedMediaBeforeTransport(t *testing.T) {
 	var calls atomic.Int32
 	model := testModel(t, func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	req := ai.AIRequest{Messages: []ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: "image/png", URI: "https://example.test/image.png"}}}}}}
+	req := ai.AIRequest{Messages: []ai.Message{{Role: ai.RoleUser, Parts: []ai.ContentPart{{Kind: ai.ContentMedia, Media: &ai.MediaPart{MIMEType: "audio/mpeg", URI: "https://example.test/clip.mp3"}}}}}}
 	if err := req.Validate(); err != nil {
 		t.Fatalf("fixture must be a valid canonical request: %v", err)
 	}

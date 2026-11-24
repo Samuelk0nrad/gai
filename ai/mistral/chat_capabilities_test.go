@@ -568,7 +568,7 @@ func TestImageInputMapsURLAndInlineBytesInOrder(t *testing.T) {
 
 func TestImageInputAcceptsJPGAliasInDataURI(t *testing.T) {
 	for _, uri := range []string{"data:image/jpg;base64,/9j/", "DATA:IMAGE/JPEG;BASE64,/9j/"} {
-		chunk, err := imageChunk(&ai.MediaPart{MIMEType: "image/jpg", URI: uri})
+		chunk, err := mediaChunk(&ai.MediaPart{MIMEType: "image/jpg", URI: uri})
 		if err != nil {
 			t.Fatalf("%s: %v", uri, err)
 		}
@@ -576,7 +576,7 @@ func TestImageInputAcceptsJPGAliasInDataURI(t *testing.T) {
 			t.Fatalf("%s: image_url = %q", uri, chunk.ImageURL)
 		}
 	}
-	if _, err := imageChunk(&ai.MediaPart{MIMEType: "image/png", URI: "data:image/png,raw"}); err == nil {
+	if _, err := mediaChunk(&ai.MediaPart{MIMEType: "image/png", URI: "data:image/png,raw"}); err == nil {
 		t.Fatal("non-base64 data URI accepted")
 	}
 }
@@ -584,7 +584,7 @@ func TestImageInputAcceptsJPGAliasInDataURI(t *testing.T) {
 func TestImageInputRejectsUnsupportedCombinations(t *testing.T) {
 	image := func(media ai.MediaPart) ai.ContentPart { return ai.ContentPart{Kind: ai.ContentMedia, Media: &media} }
 	cases := map[string]ai.Message{
-		"non-image MIME":    {Role: ai.RoleUser, Parts: []ai.ContentPart{image(ai.MediaPart{MIMEType: "application/pdf", URI: "https://example.com/a.pdf"})}},
+		"non-image MIME":    {Role: ai.RoleUser, Parts: []ai.ContentPart{image(ai.MediaPart{MIMEType: "video/mp4", URI: "https://example.com/a.mp4"})}},
 		"unsupported image": {Role: ai.RoleUser, Parts: []ai.ContentPart{image(ai.MediaPart{MIMEType: "image/tiff", Data: []byte{1}})}},
 		"file scheme":       {Role: ai.RoleUser, Parts: []ai.ContentPart{image(ai.MediaPart{MIMEType: "image/png", URI: "file:///tmp/a.png"})}},
 		"cloud scheme":      {Role: ai.RoleUser, Parts: []ai.ContentPart{image(ai.MediaPart{MIMEType: "image/png", URI: "gs://bucket/a.png"})}},

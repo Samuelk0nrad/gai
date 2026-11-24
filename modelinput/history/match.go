@@ -168,7 +168,7 @@ func equalPart(a, b ai.ContentPart) bool {
 	}
 	if a.Media != nil {
 		x, y := a.Media, b.Media
-		if x.MIMEType != y.MIMEType || x.URI != y.URI || !bytes.Equal(x.Data, y.Data) {
+		if x.MIMEType != y.MIMEType || x.URI != y.URI || x.Name != y.Name || !bytes.Equal(x.Data, y.Data) {
 			return false
 		}
 	}

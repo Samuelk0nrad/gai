@@ -132,9 +132,11 @@ func AddTokenCounts(counts ...int) (int, error) {
 // concatenated literally with four estimated framing tokens per message.
 // Structured/opaque messages use canonical JSON, including their framing;
 // native tools and non-default request options use separate JSON projections.
-// Three estimated tokens cover the response prefix. This is not native framing
-// or an exact provider encoding/billing count.
-const RequestEstimateID = "gai.request/canonical-messages-v1"
+// Media bytes are left out of that JSON; each media part adds a fixed local
+// allowance instead (see docs/request-budgets.md). Three estimated tokens
+// cover the response prefix. This is not native framing or an exact provider
+// encoding/billing count.
+const RequestEstimateID = "gai.request/canonical-messages-v2"
 
 // EstimateRequestTokens estimates a finalized request using local work only.
 // Rendered tool protocols already live in Messages; only native Tools add a
@@ -221,6 +223,18 @@ func estimateMessages(ctx context.Context, messages []Message, counter TokenCoun
 			tokens, err = countLocalText(ctx, text, counter)
 			if err == nil {
 				framing, err = AddTokenCounts(framing, 4)
+			}
+		} else if containsMedia(message.Parts) {
+			// Media bytes are never counted as JSON text: the envelope keeps
+			// MIME type, URI and name, and each media part adds a local allowance.
+			projected := message
+			projected.Parts = withoutMediaData(message.Parts)
+			tokens, err = countRequestJSON(ctx, projected, counter)
+			if err == nil {
+				var media int
+				if media, err = estimateMessageMedia(ctx, message.Parts, counter); err == nil {
+					tokens, err = AddTokenCounts(tokens, media)
+				}
 			}
 		} else {
 			tokens, err = countRequestJSON(ctx, message, counter)
