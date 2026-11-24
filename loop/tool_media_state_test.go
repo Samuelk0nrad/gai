@@ -53,3 +53,30 @@ func TestProcessorReturningInvalidMediaIsRejected(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// pngOnly is a model whose adapter accepts only PNG images.
+type pngOnly struct{ ai.Model }
+
+func (pngOnly) AcceptsMedia(media ai.MediaPart, _ ai.MediaPlacement) error {
+	if media.MIMEType == "image/png" {
+		return nil
+	}
+	return &ai.UnsupportedContentError{Provider: "test", Kind: ai.ContentMedia, Detail: media.MIMEType}
+}
+
+// Media a processor adds to a synthetic result, such as an unknown tool's
+// error, is adapted like an invoked tool's.
+func TestProcessorMediaOnUninvokedResultIsAdapted(t *testing.T) {
+	processor := ToolResultProcessorFunc(func(_ context.Context, _ ToolPolicyInput, result ToolResult) (ToolResult, error) {
+		return ToolResult{Text: "help", Media: []ai.MediaPart{{MIMEType: "application/zip", Data: []byte{1}, Name: "tools.zip"}}}, nil
+	})
+	l := &Loop{ToolResultProcessor: processor, mediaAdapter: ai.NewMediaAdapter(pngOnly{}, ai.MediaPolicy{Fallback: ai.MediaFallbackPlaceholder})}
+	iteration, calls := schedulerCalls("missing")
+	if err := l.executeToolCalls(t.Context(), iteration, calls, nil, make(chan Event, 8), 1, 1, 0); err != nil {
+		t.Fatal(err)
+	}
+	result := iteration.Conversation[0].Parts[0].ToolResult
+	if len(result.Parts) != 1 || result.Text() != "help\n[file: tools.zip, application/zip]" {
+		t.Fatalf("result = %+v", result)
+	}
+}

@@ -468,8 +468,10 @@ func (l *Loop) processUninvoked(ctx context.Context, task scheduledTool) (respon
 		}
 	}()
 	result := *task.result
-	if l.ToolResultProcessor != nil {
-		processed, err := l.ToolResultProcessor.Process(ctx, ToolPolicyInput{Call: task.pending.call.Clone(), Traits: task.options.Traits}, result)
+	// The same processor as for invoked tools, so media a processor adds
+	// is adapted for the model too.
+	if processor := l.resultProcessor(); processor != nil {
+		processed, err := processor.Process(ctx, ToolPolicyInput{Call: task.pending.call.Clone(), Traits: task.options.Traits}, result)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrToolResultProcess, err)
 		}
