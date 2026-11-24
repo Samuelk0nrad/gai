@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/loop"
@@ -110,7 +111,42 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 		// Iterations accepted in this execution, by generation, with their
 		// live diagnostics.
 		live := map[string]loop.Iteration{}
-		for low := range upstream {
+		// Only the top-level primary stage takes live steering.
+		var steering *steeringInbox
+		var notify <-chan struct{}
+		if w.durability != nil && !w.durableChild && w.stageID == PrimaryStageID {
+			steering = w.durability.steering
+			notify = steering.notify
+		}
+		accepted := func() {
+			if steering == nil {
+				return
+			}
+			for _, notice := range steering.takeNotices() {
+				obs.SteeringAccepted(ctx, notice.command, notice.revision)
+				deliver = w.sendEvent(ctx, out, Event{Type: EventSteeringAccepted, Source: source, Steering: &loop.SteeringDetail{Commands: []string{notice.command}}, CheckpointRevision: notice.revision}, deliver)
+			}
+		}
+	events:
+		for {
+			var low loop.Event
+			select {
+			case event, ok := <-upstream:
+				if !ok {
+					break events
+				}
+				low = event
+			case <-notify:
+				accepted()
+				continue
+			}
+			// A command is queued for its accepted event before the loop can
+			// take it, so delivering waiting notices first puts every accepted
+			// event before the events its command causes.
+			accepted()
+			if low.Type == loop.EventSteeringApplied && low.Steering != nil {
+				obs.SteeringApplied(ctx, low.Steering.Commands, low.GenerationID)
+			}
 			event, emit := mapLoopEvent(low, source)
 			if emit {
 				acc.recordOutput(event)
@@ -157,6 +193,12 @@ func (w *Workflow) mapPrimary(ctx context.Context, upstream <-chan loop.Event, o
 		if terminal.Type == "" {
 			terminal = Event{Type: EventStageFinish, Source: source, StageOutcome: StageFailed, Err: errors.New("loop stream closed without a terminal event")}
 			acc.errs = append(acc.errs, terminal.Err)
+		}
+		if steering != nil {
+			// The loop has ended. Steering it did not take stays saved in
+			// the checkpoint for Resume, and later commands are refused.
+			w.durability.closeSteering()
+			accepted()
 		}
 		if w.durability != nil {
 			// Committed steering is conversation input, not model output, and
@@ -239,9 +281,14 @@ func mapLoopEvent(low loop.Event, source EventSource) (Event, bool) {
 		request := low.ToolApproval.Clone()
 		event.ToolApproval = &request
 	}
+	if low.Steering != nil {
+		event.Steering = &loop.SteeringDetail{Commands: slices.Clone(low.Steering.Commands)}
+	}
 	switch low.Type {
 	case loop.EventCheckpointCommitted:
 		event.Type = EventCheckpointCommitted
+	case loop.EventSteeringApplied:
+		event.Type = EventSteeringApplied
 	case loop.EventToolApprovalRequested:
 		event.Type = EventToolApprovalRequested
 	case loop.EventToolApprovalResolved:

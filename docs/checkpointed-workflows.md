@@ -33,7 +33,7 @@ For PostgreSQL, use a table with `run_id` as the primary key, `revision`, and `s
 
 If acknowledgement is ambiguous, the callback must reload and compare both the proposed revision and content before returning nil. Retry that same write inside the callback when appropriate. An error stops further admission and returns `loop.ErrCheckpointCommit`; GAI never reruns the handler to repair a failed result write. Already-started handlers settle where possible. The last acknowledged checkpoint remains authoritative, even if the callback saved a later revision before returning an error: load storage before recovery.
 
-`Resume` claims ownership by committing a fresh execution identity against the loaded revision before model or tool work starts. CAS alone cannot revoke effects already started by another worker. Use leases/fencing and external idempotency where required. Commit callbacks may call `Result` or `RequestPause`, but must not synchronously wait for the workflow to finish or consume its event stream.
+`Resume` claims ownership by committing a fresh execution identity against the loaded revision before model or tool work starts. CAS alone cannot revoke effects already started by another worker. Use leases/fencing and external idempotency where required. Commit callbacks may call `Result` or `RequestPause`, but must not call `Steer`, synchronously wait for the workflow to finish or consume its event stream.
 
 Each commit carries the complete checkpoint, including the accepted conversation and tool results. The checkpoint passed to `Commit` shares memory with the workflow and with later revisions, so the callback must not modify it; encoding it or keeping it unchanged is safe, and `Checkpoint.Clone` gives a copy to modify. Storage cost therefore grows with the transcript: a run with many large tool results writes its whole history at every boundary. Keep large tool output out of the conversation where possible, for example by returning a reference that the application stores separately.
 
@@ -91,11 +91,40 @@ Otherwise leave the run blocked. GAI cannot infer whether an external effect occ
 
 ## Steering and approvals
 
-Pause, then resume with an application-assigned stable `CommandID` and optional `StageID` (the active suspended stage by default). `Prompt.User` appends user content; `Prompt.Context` remains trusted machine context. Context parts must render purely and deterministically: validation and duplicate comparison can render them before the ownership claim.
+To steer a stopped run, resume it with an application-assigned stable `CommandID` and optional `StageID` (the active suspended stage by default). To steer a running workflow without pausing it, use `Workflow.Steer` (see below). `Prompt.User` appends user content; `Prompt.Context` remains trusted machine context. Context parts must render purely and deterministically: validation and duplicate comparison can render them before the ownership claim.
 
 `ContinuePendingTools` is the default. GAI finishes the accepted plan before appending steering and generating again. `CancelUnstartedTools` preserves completed calls and resolves only undispatched calls with `Not executed: canceled by steering.` before appending the new input. Outcome-unknown calls must first be reconciled. Provider call/result pairing is preserved.
 
 The command is applied and recorded atomically: its effects go into the stage continuation, and `Checkpoint.Commands` keeps its ID with a SHA-256 digest of the materialized content. Exact redelivery is a no-op, including after its stage has completed; reusing an ID with different content returns `agent.ErrCommandConflict`. New commands cannot reopen completed stages. Persist pause requests in the application's durable inbox if they must survive process loss before acknowledgement.
+
+### Steering a running workflow
+
+`Workflow.Steer` gives the primary agent new input without pausing the run, for example a changed due date, a message in the task thread or a finished sub-agent:
+
+```go
+err := w.Steer(ctx, agent.SteerInput{
+    CommandID: "task-42:due-date:7",
+    Prompt:    modelinput.PromptInput{User: ai.TextParts("[System] due date changed to Friday")},
+})
+```
+
+It uses the same path as resume steering. The rendered messages go into the primary continuation's `Steering` and the command into `Checkpoint.Commands`, with the same digest, so the same command can be sent to `Steer` or to `Resume`. `Steer` returns once that is committed through `Durability.Commit`. If the execution then stops, a `Resume` from the checkpoint applies the steering. The command ID also stays in `Continuation.SteeringCommands` until the steering is applied.
+
+The running loop applies the steering at its next step boundary: after the results of the accepted plan and before the next model request. Commands that the loop takes at one boundary become one generation, in the order `Steer` accepted them; a command accepted while that generation is saved waits for the next boundary. Steering that arrives while the final answer is generated continues the run instead of letting it finish. So does steering accepted before the agent chose a terminal tool batch: the batch runs, and the agent then answers the steering. With a `ToolChoice` that forces the terminal tool, that next request calls it again.
+
+The loop stops taking steering at the boundary before its last allowed model request, after applying what is waiting, because no later request could see new input. It also stops when it accepts a terminal tool batch while no steering is waiting, because the batch ends the run.
+
+`CancelUnstartedTools` resolves accepted calls that have not started with `Not executed: canceled by steering.`. Calls that already started finish, and their results are kept. A canceled call that was waiting for a `ToolGuard` resolves at once instead of waiting for the guard. A model response that was being generated when the command was accepted did not see the steering, so its unstarted calls are canceled too. The cancellation belongs to its command: once that command's messages are in the conversation, it no longer cancels new plans, even if other commands still wait. Unlike `Resume`, `Steer` does not reject a plan with dispatched calls: in a running loop those calls are in progress, not uncertain. An in-process `ToolApprovalResolver` that is waiting for a decision keeps waiting; the call is canceled when the resolver returns.
+
+`Steer` returns:
+
+- nil for an exact redelivery of an accepted command, also after the workflow has finished, and `agent.ErrCommandConflict` for a different payload under the same ID.
+- `agent.ErrWorkflowNotStarted` before `Run` or `RunEvents`. Between the start and the first checkpoint commit of a new run, `Steer` waits for that commit or for `ctx`.
+- an error matching `agent.ErrWorkflowFinished` once the primary agent could no longer apply new input: it has given its final answer with no steering waiting, accepted a terminal tool batch, started its last allowed model request, or its loop has ended because the execution paused, failed or was canceled. A command accepted just before such a loop ended stays saved in the checkpoint, and `Resume` applies it. Resume the run or start a new one for new input.
+- the error of `ctx` when it ends while `Steer` waits, for example for a slow commit by the running loop. The command was then not saved.
+- `agent.ErrDurability` for a workflow without `Durability`, and `agent.ErrInvalidCommand` for a missing command ID, an unknown `PendingToolAction` or rendered messages that fail validation. An error from rendering a context part is returned as it is.
+
+Only the primary agent takes live steering; middleware stages are post-processing. Each command accepted by `Steer` emits `EventSteeringAccepted`, with its ID in `Steering.Commands` and the revision that saved it in `CheckpointRevision`. In the same execution it comes before every event the command causes, such as a call canceled by steering. `EventSteeringApplied` reports the generation that added steering to the conversation, with the applied command IDs. Steering accepted by an earlier execution or by a `Resume` command is applied without an accepted event in the new stream. Both are also recorded as observations on the workflow span (`agent_workflow_steering_accepted` and `agent_workflow_steering_applied`).
 
 Set `Durability.DeferredApprovals` explicitly to persist approval requests and pause without a waiting resolver. Resume with the same request IDs in `ResumeInput.Approvals` and a command ID. Requests bind an invocation to its exact arguments. Saved approval never overrides newly revoked permissions. Without deferred mode, the existing resolver/refusal behavior is unchanged.
 
@@ -115,7 +144,7 @@ This changes when `ShouldRun` runs. A stage is decided only after every earlier 
 
 ## Events, output and usage
 
-Use the existing workflow event stream. Durable events include run/execution/stage identity, generation/invocation identity where relevant, and a sequence local to this execution. `(ExecutionID, Sequence)` is the live event identity; checkpoint revision is a separate counter. `EventResumed` carries the immutable acknowledged resume-claim snapshot, `EventCheckpointCommitted` reports loop commits, and `EventPaused` carries the acknowledged paused checkpoint. Agent-level stage/terminal commits are reflected in checkpoint snapshots rather than generating a second stream.
+Use the existing workflow event stream. Durable events include run/execution/stage identity, generation/invocation identity where relevant, and a sequence local to this execution. `(ExecutionID, Sequence)` is the live event identity; checkpoint revision is a separate counter. `EventResumed` carries the immutable acknowledged resume-claim snapshot, `EventCheckpointCommitted` reports loop commits, and `EventPaused` carries the acknowledged paused checkpoint. `EventSteeringAccepted` and `EventSteeringApplied` report steering commands. Agent-level stage/terminal commits, including the commits made by `Steer`, are reflected in checkpoint snapshots rather than generating a second stream.
 
 On `EventResumed`, discard abandoned provisional output and reconstruct accepted output from the checkpoint's completed generations and stage output decisions. Pending assistant text is provisional: it is re-emitted with its saved generation identity as the pending plan continues. Completed output is restored internally and is not redelivered as fresh output. This provides a canonical rebuild boundary; the live channel is not a transactional delivery guarantee. Use an application outbox when checkpoint persistence and event delivery must commit atomically.
 

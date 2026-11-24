@@ -23,6 +23,8 @@ type durableModel struct {
 	requests  []ai.AIRequest
 	responses [][]ai.Token
 	onRequest func(context.Context, int)
+	// afterResponse runs after the response streamed, before the stream ends.
+	afterResponse func(context.Context, int)
 }
 
 func (*durableModel) Descriptor() ai.ModelDescriptor {
@@ -49,6 +51,9 @@ func (m *durableModel) GenerateStream(ctx context.Context, request ai.AIRequest)
 			if !ai.SendToken(ctx, out, token) {
 				return
 			}
+		}
+		if m.afterResponse != nil {
+			m.afterResponse(ctx, index)
 		}
 	}()
 	return out

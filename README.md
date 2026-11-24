@@ -500,8 +500,9 @@ Set `RunInput.Durability` to save an acknowledged checkpoint before each model
 attempt, tool dispatch and tool result. The application supplies compare-and-swap
 storage. `Workflow.RequestPause` stops at the next safe point, and `Agent.Resume`
 continues the same logical run from a saved checkpoint in a fresh process.
-Durable runs support deferred tool approvals, steering commands and explicit
-recovery of tool calls whose outcome is unknown. See the
+`Workflow.Steer` gives a running agent new input at its next step boundary
+without pausing it. Durable runs support deferred tool approvals, steering
+commands and explicit recovery of tool calls whose outcome is unknown. See the
 [checkpointed workflow guide](docs/checkpointed-workflows.md) for the storage
 contract and the [runnable example](examples/checkpointed-workflow).
 

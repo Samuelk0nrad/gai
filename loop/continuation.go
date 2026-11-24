@@ -120,6 +120,10 @@ type Continuation struct {
 	Usage                 []GenerationUsage `json:"usage,omitempty"`
 	UsageIncomplete       bool              `json:"usage_incomplete,omitempty"`
 	Steering              []ai.Message      `json:"steering,omitempty"`
+	// SteeringCommands lists the IDs of the commands whose messages are
+	// waiting in Steering, in the order they were accepted. A command that only
+	// cancels unstarted tools adds no messages and is not listed.
+	SteeringCommands []string `json:"steering_commands,omitempty"`
 }
 
 // Clone returns a deep copy that shares no mutable memory with c. Strings are
@@ -142,6 +146,7 @@ func (c Continuation) Clone() Continuation {
 	}
 	c.Usage = slices.Clone(c.Usage)
 	c.Steering = ai.CloneMessages(c.Steering)
+	c.SteeringCommands = slices.Clone(c.SteeringCommands)
 	return c
 }
 
@@ -156,6 +161,7 @@ func (c Continuation) detach() Continuation {
 	}
 	out.Usage = slices.Clone(c.Usage)
 	out.Steering = ai.CloneMessages(c.Steering)
+	out.SteeringCommands = slices.Clone(c.SteeringCommands)
 	return out
 }
 
@@ -165,25 +171,30 @@ func (g Generation) clone() Generation {
 	if g.Invocations != nil {
 		invocations := make([]InvocationRecord, len(g.Invocations))
 		for i, inv := range g.Invocations {
-			inv.Call = inv.Call.Clone()
-			if inv.Result != nil {
-				result := *inv.Result
-				result.Parts = ai.CloneParts(result.Parts)
-				inv.Result = &result
-			}
-			if inv.Approval != nil {
-				approval := inv.Approval.Clone()
-				inv.Approval = &approval
-			}
-			if inv.ApprovalDecision != nil {
-				decision := *inv.ApprovalDecision
-				inv.ApprovalDecision = &decision
-			}
-			invocations[i] = inv
+			invocations[i] = cloneInvocationRecord(inv)
 		}
 		g.Invocations = invocations
 	}
 	return g
+}
+
+// cloneInvocationRecord deep-copies one invocation record.
+func cloneInvocationRecord(inv InvocationRecord) InvocationRecord {
+	inv.Call = inv.Call.Clone()
+	if inv.Result != nil {
+		result := *inv.Result
+		result.Parts = ai.CloneParts(result.Parts)
+		inv.Result = &result
+	}
+	if inv.Approval != nil {
+		approval := inv.Approval.Clone()
+		inv.Approval = &approval
+	}
+	if inv.ApprovalDecision != nil {
+		decision := *inv.ApprovalDecision
+		inv.ApprovalDecision = &decision
+	}
+	return inv
 }
 
 // LimitError reports a limit of l that already prevents continuing c: a
@@ -251,6 +262,9 @@ func (c Continuation) validate(trusted int, checkPrompt bool) error {
 		if err := m.Validate(); err != nil {
 			return fmt.Errorf("%w: %v", ErrContinuation, err)
 		}
+	}
+	if len(c.SteeringCommands) > 0 && len(c.Steering) == 0 || slices.Contains(c.SteeringCommands, "") {
+		return ErrContinuation
 	}
 	ids := map[string]bool{}
 	for i, g := range c.Generations {
@@ -354,6 +368,54 @@ type ContinuationControl struct {
 	PauseRequested              func() bool
 	PauseSignal                 <-chan struct{}
 	DeferredApprovals           bool
+	// Steering, when set, hands the loop steering that the owner accepted and
+	// saved while the loop runs. The loop calls it from its own goroutine after
+	// each acknowledged commit, at each continuation boundary and before it
+	// accepts a terminal tool batch, and takes ownership of the result. The
+	// owner must have saved the returned state already: it adds steering the
+	// loop has not taken to every snapshot that Commit receives, so the loop's
+	// state matches the saved continuation once it applies the result. The
+	// SteeringTake argument tells the owner when to stop accepting steering.
+	Steering func(SteeringTake) Steering
+	// SteeringSignal, when set, receives a value after the owner canceled
+	// accepted calls through steering. A loop waiting to admit tools then takes
+	// the steering at once, so a canceled call does not wait for a guard.
+	SteeringSignal <-chan struct{}
+}
+
+// SteeringTake tells a ContinuationControl owner whether the loop could
+// still apply steering that the owner accepts after this take.
+type SteeringTake uint8
+
+const (
+	// SteeringOpen means the loop can still apply later steering.
+	SteeringOpen SteeringTake = iota
+	// SteeringLast means the loop applies the returned steering before its
+	// last allowed model request, or has no model request left. It could not
+	// apply later steering, so the owner stops accepting steering.
+	SteeringLast
+	// SteeringFinishing means the loop is about to run a terminal tool batch,
+	// which ends it unless steering is waiting or cancels one of its calls.
+	// When no steering is waiting, including a pending cancellation, the owner
+	// stops accepting steering; otherwise the loop continues after the batch.
+	SteeringFinishing
+)
+
+// SteeringDetail identifies the steering commands of a steering event.
+type SteeringDetail struct {
+	// Commands lists command IDs in the order they were accepted.
+	Commands []string
+}
+
+// Steering is input that a ContinuationControl owner accepted for a running
+// loop. The loop appends Messages and Commands to its continuation and applies
+// them at the next continuation boundary. Canceled holds the owner's saved
+// version of accepted calls it resolved as canceled by steering; the loop
+// replaces its own records with them and never runs those calls.
+type Steering struct {
+	Messages []ai.Message
+	Commands []string
+	Canceled []InvocationRecord
 }
 
 // RecoveryRequiredError identifies effects or processed output requiring an
@@ -497,6 +559,23 @@ func (c *Continuation) CancelUnstarted() error {
 		if inv.Disposition == InvocationDispatched || inv.ProcessingFailed {
 			return &RecoveryRequiredError{Invocations: []InvocationRecord{*inv}}
 		}
+	}
+	c.CancelPlanned()
+	return nil
+}
+
+// CancelPlanned resolves every planned call of the pending plan as canceled by
+// steering and returns the changed records. Unlike CancelUnstarted it leaves
+// dispatched calls alone, because in a running loop they are in progress rather
+// than uncertain. It changes the pending invocation records in place, so the
+// caller must own them.
+func (c *Continuation) CancelPlanned() []InvocationRecord {
+	if c.Pending == nil {
+		return nil
+	}
+	var canceled []InvocationRecord
+	for i := range c.Pending.Invocations {
+		inv := &c.Pending.Invocations[i]
 		if inv.Disposition != InvocationPlanned {
 			continue
 		}
@@ -504,8 +583,9 @@ func (c *Continuation) CancelUnstarted() error {
 		inv.CanceledBySteering = true
 		inv.Execution = ToolExecution{State: ToolNotStarted, Output: ToolOutputAccepted, Decision: ToolDecision{Action: ToolDeny, Code: "steering_canceled"}}
 		inv.Result = &ai.ToolResult{ToolCallID: inv.Call.ID, Name: inv.Call.Name, Parts: ai.TextParts("Not executed: canceled by steering."), IsError: true}
+		canceled = append(canceled, *inv)
 	}
-	return nil
+	return canceled
 }
 
 // Iterations reconstructs accepted semantic history without pending invocations.
@@ -596,6 +676,9 @@ func (d *durableLoop) commitWithContexts(storageCtx, eventCtx context.Context) e
 	d.commits++
 	d.validated = len(d.state.Generations)
 	d.promptValidated = true
+	// Steering accepted before this commit was saved with it, so the loop takes
+	// it now, before anything else changes its state.
+	d.takeSteering(SteeringOpen)
 	if d.events != nil {
 		event := Event{Type: EventCheckpointCommitted}
 		if d.control.Revision != nil {

@@ -136,7 +136,7 @@ func (l *Loop) executeRun(ctx context.Context, events chan<- Event) {
 		if run.continuationBoundary() {
 			return
 		}
-		if l.durable.state.Phase == PhaseDone {
+		if l.durable.finished() {
 			_ = sendEvent(run.ctx, events, DoneEvent())
 			return
 		}
@@ -501,6 +501,9 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		attempt.finish(nil)
 		return iterationContinue
 	}
+	if terminalBatch && r.owner.durable != nil {
+		r.owner.durable.beforeTerminalBatch()
+	}
 	if err := r.commitPlan(attempt); err != nil {
 		attempt.terminateCommit(err)
 		return iterationTerminal
@@ -586,7 +589,9 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		attempt.finish(nil)
 		return iterationContinue
 	}
-	if (len(attempt.toolCalls) == 0 || terminalBatch) && (r.owner.durable == nil || r.owner.durable.state.Phase == PhaseDone) {
+	// Steering accepted while the final answer was generated keeps a durable
+	// loop running; the next boundary applies it.
+	if (len(attempt.toolCalls) == 0 || terminalBatch) && (r.owner.durable == nil || r.owner.durable.finished()) {
 		attempt.cancelAttempt()
 		attempt.state.markFinal()
 		attempt.finish(nil)

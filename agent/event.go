@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/Samuelk0nrad/gai/ai"
@@ -42,6 +43,19 @@ const (
 	EventDone                EventType = "done"
 	EventError               EventType = "error"
 	EventCanceled            EventType = "canceled"
+)
+
+const (
+	// EventSteeringAccepted reports one steering command committed by
+	// Workflow.Steer. Steering holds its ID and CheckpointRevision the
+	// revision that saved it. In the same execution it precedes every event
+	// the command causes.
+	EventSteeringAccepted EventType = "steering_accepted"
+	// EventSteeringApplied reports waiting steering added to the conversation
+	// at a step boundary, as the generation GenerationID; the model sees it in
+	// its next request. Steering lists the applied command IDs, including
+	// commands accepted by an earlier execution or by Resume.
+	EventSteeringApplied EventType = "steering_applied"
 )
 
 // EventSourceKind identifies the logical kind of event producer.
@@ -123,6 +137,9 @@ type Event struct {
 
 	Output *OutputPart
 
+	// Steering identifies the commands of a steering event.
+	Steering *loop.SteeringDetail
+
 	Iteration *loop.Iteration
 
 	ToolCall   *ai.ToolCall
@@ -183,5 +200,8 @@ func cloneEvent(event Event) Event {
 	}
 	cloned.ToolCall = cloneToolCall(event.ToolCall)
 	cloned.ToolResult = cloneToolResult(event.ToolResult)
+	if event.Steering != nil {
+		cloned.Steering = &loop.SteeringDetail{Commands: slices.Clone(event.Steering.Commands)}
+	}
 	return cloned
 }
