@@ -91,13 +91,41 @@ search:
 }
 
 // equivalentMessage reports whether a request message carries the stored
-// message, either unchanged or in its history preview projection.
+// message, either unchanged or in a history preview projection. The preview
+// length is read from each truncated tool result, so a request built with any
+// WithToolResultPreview value matches.
 func equivalentMessage(requestMessage, stored ai.Message) bool {
 	if equalMessage(requestMessage, stored) {
 		return true
 	}
-	preview := (&Part{Messages: []ai.Message{stored}}).ConversationMessages()
-	return len(preview) == 1 && equalMessage(requestMessage, preview[0])
+	if len(stored.Extensions) > 0 || requestMessage.Role != stored.Role || len(requestMessage.Parts) != len(stored.Parts) ||
+		!equalExtensions(requestMessage.Extensions, stored.Extensions) {
+		return false
+	}
+	for i := range stored.Parts {
+		if !equivalentPart(requestMessage.Parts[i], stored.Parts[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// equivalentPart reports whether a request part is the stored part, or its
+// tool result cut at the preview length the request part shows.
+func equivalentPart(requestPart, stored ai.ContentPart) bool {
+	if equalPart(requestPart, stored) {
+		return true
+	}
+	if !previewable(&stored) || requestPart.ToolResult == nil {
+		return false
+	}
+	limit, ok := previewedLength(requestPart.ToolResult)
+	if !ok {
+		return false
+	}
+	preview := ai.CloneParts([]ai.ContentPart{stored})[0]
+	previewToolResult(preview.ToolResult, limit)
+	return equalPart(requestPart, preview)
 }
 
 // equalMessage compares canonical messages by meaning. JSON payloads compare as

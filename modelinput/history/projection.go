@@ -23,7 +23,8 @@ func summaryMessage(summary *Summary) ai.Message {
 // it: the summary, then every turn. Older turns carry the history preview
 // projection, as HistorySource selected them. The newest turn is raw, because
 // that run sent it as live conversation rather than as selected history.
-func fullProjection(state *HistoryState) []ai.Message {
+// previewRunes is the tool-result preview, encoded as in Part.
+func fullProjection(state *HistoryState, previewRunes int) []ai.Message {
 	if state == nil {
 		return nil
 	}
@@ -35,7 +36,7 @@ func fullProjection(state *HistoryState) []ai.Message {
 	for i := range turns {
 		block := turnMessages(&turns[i])
 		if i < len(turns)-1 {
-			block = (&Part{Messages: block}).ConversationMessages()
+			block = previewMessages(block, previewRunes)
 		} else {
 			block = ai.CloneMessages(block)
 		}
