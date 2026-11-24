@@ -31,50 +31,94 @@ func TestTruncateToolResultBytesValidatesBudget(t *testing.T) {
 }
 
 func TestTruncateToolResultBytesCutsSuccessfulText(t *testing.T) {
-	const limit = 200
 	for _, tc := range []struct {
 		name string
 		text string
 	}{
-		{"ascii", strings.Repeat("x", 1000)},
-		{"json", `{"items":[` + strings.Repeat(`{"id":1,"name":"item"},`, 100) + `]}`},
-		{"two-byte", strings.Repeat("é", 500)},
-		{"three-byte", strings.Repeat("€", 500)},
-		{"four-byte", strings.Repeat("😀", 500)},
-		{"mixed", strings.Repeat("a€😀é", 100)},
+		{"ascii", strings.Repeat("x", 10000)},
+		{"json", `{"items":[` + strings.Repeat(`{"id":1,"name":"item"},`, 1000) + `]}`},
+		{"two-byte", strings.Repeat("é", 5000)},
+		{"three-byte", strings.Repeat("€", 5000)},
+		{"four-byte", strings.Repeat("😀", 5000)},
+		{"mixed", strings.Repeat("a€😀é", 1000)},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			processor, _ := TruncateToolResultBytes(limit)
-			result, err := processor.Process(t.Context(), ToolPolicyInput{}, ToolResult{Text: tc.text})
-			if err != nil || result.Err != nil {
-				t.Fatalf("result=%#v err=%v", result, err)
-			}
-			if len(result.Text) > limit {
-				t.Fatalf("len=%d exceeds %d", len(result.Text), limit)
-			}
-			if !utf8.ValidString(result.Text) {
-				t.Fatalf("invalid UTF-8: %q", result.Text)
-			}
-			kept, _, ok := strings.Cut(result.Text, "\n\n[tool result truncated:")
-			if !ok || !strings.HasPrefix(tc.text, kept) {
-				t.Fatalf("result does not keep the start: %q", result.Text)
-			}
-			if want := kept + truncationNote(len(kept), len(tc.text)); result.Text != want {
-				t.Fatalf("note=%q want %q", result.Text, want)
-			}
-			// Cutting may only back off a partial rune, never more.
-			if limit-len(result.Text) >= utf8.UTFMax {
-				t.Fatalf("kept %d bytes, wasted %d", len(kept), limit-len(result.Text))
-			}
-			again, _ := processor.Process(t.Context(), ToolPolicyInput{}, result)
-			if again != result {
-				t.Fatal("reprocessing a truncated result changed it")
-			}
-			repeat, _ := processor.Process(t.Context(), ToolPolicyInput{}, ToolResult{Text: tc.text})
-			if repeat != result {
-				t.Fatal("truncation is not deterministic")
-			}
-		})
+		// 128 and 1000 keep fewer digits than the limit has, so the note
+		// shrinks; 200 keeps the same digit count.
+		for _, limit := range []int{MinTruncateToolResultBytes, 200, 1000} {
+			t.Run(fmt.Sprintf("%s/%d", tc.name, limit), func(t *testing.T) {
+				processor, _ := TruncateToolResultBytes(limit)
+				result, err := processor.Process(t.Context(), ToolPolicyInput{}, ToolResult{Text: tc.text})
+				if err != nil || result.Err != nil {
+					t.Fatalf("result=%#v err=%v", result, err)
+				}
+				if len(result.Text) > limit {
+					t.Fatalf("len=%d exceeds %d", len(result.Text), limit)
+				}
+				if !utf8.ValidString(result.Text) {
+					t.Fatalf("invalid UTF-8: %q", result.Text)
+				}
+				kept, _, ok := strings.Cut(result.Text, "\n\n[tool result truncated:")
+				if !ok || !strings.HasPrefix(tc.text, kept) {
+					t.Fatalf("result does not keep the start: %q", result.Text)
+				}
+				if want := kept + truncationNote(len(kept), len(tc.text)); result.Text != want {
+					t.Fatalf("note=%q want %q", result.Text, want)
+				}
+				// The prefix is the longest that fits: one more rune would not.
+				_, size := utf8.DecodeRuneInString(tc.text[len(kept):])
+				if grown := len(kept) + size; grown+len(truncationNote(grown, len(tc.text))) <= limit {
+					t.Fatalf("kept %d bytes, but %d would fit in %d", len(kept), grown, limit)
+				}
+				if tc.name == "ascii" && len(result.Text) != limit {
+					t.Fatalf("ascii len=%d, want exactly %d", len(result.Text), limit)
+				}
+				again, _ := processor.Process(t.Context(), ToolPolicyInput{}, result)
+				if again != result {
+					t.Fatal("reprocessing a truncated result changed it")
+				}
+				repeat, _ := processor.Process(t.Context(), ToolPolicyInput{}, ToolResult{Text: tc.text})
+				if repeat != result {
+					t.Fatal("truncation is not deterministic")
+				}
+			})
+		}
+	}
+}
+
+func TestTruncateToolResultBytesRecutKeepsOriginalSize(t *testing.T) {
+	text := strings.Repeat("a€😀é", 100000)
+	large, _ := TruncateToolResultBytes(16 * 1024)
+	stored, _ := large.Process(t.Context(), ToolPolicyInput{}, ToolResult{Text: text})
+	for _, limit := range []int{4096, 1000, MinTruncateToolResultBytes} {
+		small, _ := TruncateToolResultBytes(limit)
+		recut, _ := small.Process(t.Context(), ToolPolicyInput{}, stored)
+		direct, _ := small.Process(t.Context(), ToolPolicyInput{}, ToolResult{Text: text})
+		if recut != direct {
+			t.Fatalf("limit %d: recut=%q\ndirect=%q", limit, recut.Text, direct.Text)
+		}
+		if strings.Count(recut.Text, "[tool result truncated:") != 1 || !strings.HasSuffix(recut.Text, fmt.Sprintf("of %d bytes]", len(text))) {
+			t.Fatalf("limit %d: original size lost: %q", limit, recut.Text)
+		}
+	}
+	// A larger limit leaves the stored cut unchanged.
+	larger, _ := TruncateToolResultBytes(64 * 1024)
+	if got, _ := larger.Process(t.Context(), ToolPolicyInput{}, stored); got != stored {
+		t.Fatal("larger limit changed a stored cut")
+	}
+}
+
+func TestTruncateToolResultBytesIgnoresNoteLookalikes(t *testing.T) {
+	processor, _ := TruncateToolResultBytes(MinTruncateToolResultBytes)
+	body := strings.Repeat("x", 500)
+	for _, text := range []string{
+		body + truncationNote(10, 1000000),        // kept size does not match the text
+		body + truncationNote(500, 400),           // original not larger than kept
+		body + truncationNote(500, 1000000) + "!", // note not at the end
+	} {
+		result, _ := processor.Process(t.Context(), ToolPolicyInput{}, ToolResult{Text: text})
+		if !strings.HasSuffix(result.Text, fmt.Sprintf("of %d bytes]", len(text))) {
+			t.Fatalf("lookalike note trusted: %q", result.Text)
+		}
 	}
 }
 

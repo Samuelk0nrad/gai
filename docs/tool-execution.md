@@ -290,8 +290,11 @@ ends with a note that counts toward the limit:
   processor before the truncation.
 - The limit is in bytes, not tokens, so the same result is always cut the same
   way, whatever the model or tokenizer. Output that already fits is unchanged,
-  so the cut result is stable when it is stored in history and replayed in
-  later runs, which keeps prompt-cache prefixes stable.
+  so a cut result stored in history and replayed with the same or a larger
+  limit stays the same, which keeps prompt-cache prefixes stable. If the limit
+  is later lowered, a stored cut is cut again from its kept text and keeps the
+  original size in its single note, giving the same text as cutting the
+  original once at the new limit.
 - Oversized error text, including `ErrToolDenied` and `ErrToolApprovalRequired`
   refusals, is never cut: it is replaced exactly as `LimitToolResultBytes` does.
 - Zero disables truncation. Positive limits must be at least

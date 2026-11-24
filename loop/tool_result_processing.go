@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
+	"strconv"
 	"unicode/utf8"
 )
 
@@ -105,7 +107,10 @@ const MinTruncateToolResultBytes = 128
 // plain text: a cut JSON result is no longer valid JSON. Put a structure-aware
 // processor before this one to shorten JSON by fields instead. The same input
 // always produces the same output, and output that already fits is unchanged,
-// so applying the processor again to stored results is a no-op.
+// so applying the processor again to stored results with the same or a larger
+// limit is a no-op. A result that already ends with a truncation note is cut
+// again from its kept text and keeps the original size in the new note, so a
+// later, smaller limit gives the same text as cutting the original once.
 //
 // Oversized error text, including ErrToolDenied and ErrToolApprovalRequired
 // refusals, is handled exactly like LimitToolResultBytes: it is replaced with a
@@ -131,17 +136,55 @@ func TruncateToolResultBytes(maxBytes int) (ToolResultProcessor, error) {
 // truncateToolText keeps the longest UTF-8-aligned prefix that fits maxBytes
 // together with its note. len(text) must exceed maxBytes.
 func truncateToolText(text string, maxBytes int) string {
+	original := len(text)
+	if kept, size, ok := parseTruncatedToolText(text); ok {
+		text, original = kept, size
+	}
 	// The kept size never exceeds maxBytes, so a note sized with maxBytes is at
 	// least as long as the final note; cutting to fit it always leaves room.
-	keep := maxBytes - len(truncationNote(maxBytes, len(text)))
-	for i := 0; i < utf8.UTFMax-1 && keep > 0 && !utf8.RuneStart(text[keep]); i++ {
+	keep := alignToolTextCut(text, maxBytes-len(truncationNote(maxBytes, original)))
+	// The final note prints keep, which can have fewer digits than maxBytes;
+	// grow the prefix into the bytes that frees while it still fits.
+	for {
+		next := alignToolTextCut(text, maxBytes-len(truncationNote(keep, original)))
+		if next <= keep || next+len(truncationNote(next, original)) > maxBytes {
+			break
+		}
+		keep = next
+	}
+	return text[:keep] + truncationNote(keep, original)
+}
+
+// alignToolTextCut moves a cut at or before len(text) back to a UTF-8 boundary.
+// Invalid UTF-8 backs off at most one partial rune.
+func alignToolTextCut(text string, keep int) int {
+	keep = min(max(keep, 0), len(text))
+	for i := 0; i < utf8.UTFMax-1 && keep > 0 && keep < len(text) && !utf8.RuneStart(text[keep]); i++ {
 		keep--
 	}
-	return text[:keep] + truncationNote(keep, len(text))
+	return keep
 }
 
 func truncationNote(kept, original int) string {
 	return fmt.Sprintf("\n\n[tool result truncated: showing first %d of %d bytes]", kept, original)
+}
+
+// truncationNotePattern matches a note produced by truncationNote at the end of text.
+var truncationNotePattern = regexp.MustCompile(`\n\n\[tool result truncated: showing first ([0-9]+) of ([0-9]+) bytes\]\z`)
+
+// parseTruncatedToolText recognizes output of an earlier truncation: a note
+// whose kept size matches the text before it and whose original size is larger.
+func parseTruncatedToolText(text string) (kept string, original int, ok bool) {
+	match := truncationNotePattern.FindStringSubmatchIndex(text)
+	if match == nil {
+		return "", 0, false
+	}
+	keep, err1 := strconv.Atoi(text[match[2]:match[3]])
+	size, err2 := strconv.Atoi(text[match[4]:match[5]])
+	if err1 != nil || err2 != nil || keep != match[0] || size <= keep {
+		return "", 0, false
+	}
+	return text[:keep], size, true
 }
 
 // rejectOversizedToolResult replaces output with a complete safe diagnostic,
