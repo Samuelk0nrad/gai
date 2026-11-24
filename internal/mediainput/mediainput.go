@@ -137,8 +137,10 @@ func Resolve(provider string, media *ai.MediaPart) (Source, error) {
 			return Source{}, Unsupported(provider, "media data URI must be base64 encoded and match the part MIME type")
 		}
 		// Check the payload without keeping a decoded copy, so a model
-		// never accepts media that mapping later fails to decode.
-		if _, err := io.Copy(io.Discard, base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload))); err != nil || payload == "" {
+		// never accepts media that mapping later fails to decode. The
+		// stream decoder checks padding per chunk, so data after padding
+		// in a later chunk is checked separately.
+		if _, err := io.Copy(io.Discard, base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload))); err != nil || payload == "" || !paddingAtEnd(payload) {
 			return Source{}, Unsupported(provider, "media data URI is not valid base64")
 		}
 		source.payload = payload
@@ -260,4 +262,11 @@ func ContainsMedia(parts []ai.ContentPart) bool {
 		}
 	}
 	return false
+}
+
+// paddingAtEnd reports whether only padding and line breaks follow the first
+// padding character, as base64.StdEncoding.DecodeString requires.
+func paddingAtEnd(payload string) bool {
+	i := strings.IndexByte(payload, '=')
+	return i < 0 || strings.Trim(payload[i:], "=\r\n") == ""
 }
