@@ -13,10 +13,10 @@ import (
 
 func TestRequestEstimateCountsMediaWithoutEncodedBytes(t *testing.T) {
 	image := bytes.Repeat([]byte{0x89}, 1<<20)
-	pdf := []byte("%PDF-1.7 1 0 obj << /Type /Pages /Kids [2 0 R 3 0 R 4 0 R] /Count 3 >> endobj 2 0 obj << /Type /Page >> endobj 3 0 obj << /Type/Page >> endobj")
+	pdf := []byte("%PDF-1.7\n1 0 obj << /Type /Pages /Kids [2 0 R 3 0 R 4 0 R] /Count 3 >> endobj 2 0 obj << /Type /Page >> endobj 3 0 obj << /Type/Page >> endobj")
 	compressedPDF := bytes.Repeat([]byte{0}, 3*mediaPDFBytesPerPage+1)
 	// Outline dictionaries also carry /Count; only the page tree counts.
-	bookmarkedPDF := []byte("%PDF-1.7 1 0 obj << /Type /Catalog /Pages 2 0 R /Outlines 5 0 R >> endobj " +
+	bookmarkedPDF := []byte("%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R /Outlines 5 0 R >> endobj " +
 		"2 0 obj << /Kids [3 0 R 4 0 R] /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Type /Pages /Count 2 >> endobj " +
 		"3 0 obj << /Type /Page /Parent 2 0 R >> endobj 4 0 obj << /Type /Page /Parent 2 0 R >> endobj " +
 		"5 0 obj << /Type /Outlines /First 7 0 R /Count 400 >> endobj")
@@ -105,7 +105,7 @@ func TestMediaPlaceholder(t *testing.T) {
 }
 
 func TestPDFPageEstimateReadsOnlyThePageTreeCount(t *testing.T) {
-	nested := []byte("%PDF-1.7 1 0 obj << /Type /Pages /Count 2 /Kids [2 0 R 3 0 R] " +
+	nested := []byte("%PDF-1.7\n1 0 obj << /Type /Pages /Count 2 /Kids [2 0 R 3 0 R] " +
 		"/Resources << /Properties << /P1 << /Count 400 >> >> >> >> endobj")
 	if got, err := pdfPageEstimate(t.Context(), nested); err != nil || got != 2 {
 		t.Fatalf("nested dictionary: pages = %d, %v", got, err)
@@ -113,7 +113,7 @@ func TestPDFPageEstimateReadsOnlyThePageTreeCount(t *testing.T) {
 	// Stream bodies are skipped, so page-tree text inside them is ignored and
 	// a large file is scanned once.
 	fake := bytes.Repeat([]byte("<< /Type /Pages /Count 999 >> << /Type /Page >> "), 200_000)
-	pdf := append([]byte("%PDF-1.7 1 0 obj << /Type /Pages /Count 3 >> endobj 2 0 obj << /Length 1 >>\nstream\n"), fake...)
+	pdf := append([]byte("%PDF-1.7\n1 0 obj << /Type /Pages /Count 3 >> endobj 2 0 obj << /Length 1 >>\nstream\n"), fake...)
 	pdf = append(pdf, []byte("\nendstream endobj")...)
 	started := time.Now()
 	if got, err := pdfPageEstimate(t.Context(), pdf); err != nil || got != 3 {
@@ -126,5 +126,26 @@ func TestPDFPageEstimateReadsOnlyThePageTreeCount(t *testing.T) {
 	cancel()
 	if _, err := pdfPageEstimate(ctx, pdf); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled: err = %v", err)
+	}
+}
+
+// Strings and comments may hold dictionary-like text that is not syntax.
+func TestPDFPageEstimateSkipsStringsAndComments(t *testing.T) {
+	for name, extra := range map[string]string{
+		"literal string":         `/Title (<< /Type /Pages /Count 400 >>)`,
+		"nested and escaped":     `/Title (a (b) \) \( << /Type /Pages /Count 400 >> (c))`,
+		"hex string":             `/ID [<3C3C2F54797065202F50616765733E3E> <00>]`,
+		"string with page dicts": `/Subject (<< /Type /Page >> << /Type /Page >> << /Type /Page >>)`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			pdf := []byte("%PDF-1.7\n1 0 obj << /Type /Pages /Count 2 >> endobj\n2 0 obj << " + extra + " >> endobj\n")
+			if got, err := pdfPageEstimate(t.Context(), pdf); err != nil || got != 2 {
+				t.Fatalf("pages = %d, %v", got, err)
+			}
+		})
+	}
+	commented := []byte("%PDF-1.7\n% << /Type /Pages /Count 400 >>\r\n1 0 obj << /Type /Pages /Count 2 >> endobj\n")
+	if got, err := pdfPageEstimate(t.Context(), commented); err != nil || got != 2 {
+		t.Fatalf("comment: pages = %d, %v", got, err)
 	}
 }

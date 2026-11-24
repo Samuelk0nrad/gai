@@ -129,16 +129,33 @@ func pdfPageEstimate(ctx context.Context, data []byte) (int, error) {
 	}
 	var stack []dict
 	pages, treeCount := 0, 0
+	nextCheck := 0
 	for i := 0; i < len(data); i++ {
-		if i&(1<<20-1) == 0 {
+		// Skipped strings and streams can jump past any fixed offset.
+		if i >= nextCheck {
 			if err := ctx.Err(); err != nil {
 				return 0, err
 			}
+			nextCheck = i + 1<<20
 		}
 		switch c := data[i]; {
 		case c == '<' && i+1 < len(data) && data[i+1] == '<':
 			stack = append(stack, dict{})
 			i++
+		case c == '<':
+			// A hex string; its digits are not syntax.
+			if end := bytes.IndexByte(data[i+1:], '>'); end >= 0 {
+				i += end + 1
+			} else {
+				i = len(data)
+			}
+		case c == '(':
+			i = pdfSkipLiteralString(data, i)
+		case c == '%':
+			// A comment runs to the end of the line.
+			for i+1 < len(data) && data[i+1] != '\n' && data[i+1] != '\r' {
+				i++
+			}
 		case c == '>' && i+1 < len(data) && data[i+1] == '>':
 			if n := len(stack); n > 0 {
 				d := stack[n-1]
@@ -179,6 +196,26 @@ func pdfPageEstimate(ctx context.Context, data []byte) (int, error) {
 		pages = (len(data) + mediaPDFBytesPerPage - 1) / mediaPDFBytesPerPage
 	}
 	return max(pages, 1), nil
+}
+
+// pdfSkipLiteralString returns the index of the parenthesis that closes the
+// literal string opening at i, honoring escapes and balanced parentheses, or
+// the last index when it is unterminated.
+func pdfSkipLiteralString(data []byte, i int) int {
+	depth := 0
+	for ; i < len(data); i++ {
+		switch data[i] {
+		case '\\':
+			i++
+		case '(':
+			depth++
+		case ')':
+			if depth--; depth == 0 {
+				return i
+			}
+		}
+	}
+	return len(data) - 1
 }
 
 // pdfName reads a PDF name after its slash and returns it with the index
