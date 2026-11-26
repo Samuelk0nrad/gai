@@ -492,3 +492,31 @@ func TestGenerateStreamClassifiesProviderRateLimit(t *testing.T) {
 		t.Fatalf("HTTP status attribute = %d, want %d", got, http.StatusTooManyRequests)
 	}
 }
+
+func TestSchemaNumbersRetainPrecisionInAnthropicParams(t *testing.T) {
+	const exact = "9007199254740993"
+	tools, err := mapTools([]ai.ToolDefinition{{
+		Type: "function", Name: "bounded", Description: "Bounded input.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"value":{"type":"integer","maximum":` + exact + `}}}`),
+	}})
+	if err != nil {
+		t.Fatalf("mapTools: %v", err)
+	}
+	format, err := mapResponseFormat(ai.ResponseFormat{
+		Type: ai.ResponseFormatJSONSchema, Name: "answer",
+		Schema: json.RawMessage(`{"type":"object","properties":{"value":{"type":"integer","maximum":` + exact + `}}}`),
+	})
+	if err != nil {
+		t.Fatalf("mapResponseFormat: %v", err)
+	}
+	encoded, err := json.Marshal(struct {
+		Tools  any `json:"tools"`
+		Format any `json:"format"`
+	}{Tools: tools, Format: format})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	if got := strings.Count(string(encoded), exact); got != 2 {
+		t.Fatalf("exact numeric bound count = %d, want 2; payload: %s", got, encoded)
+	}
+}

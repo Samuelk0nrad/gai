@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 
 	invopop "github.com/invopop/jsonschema"
@@ -88,12 +89,11 @@ func (s Schema) validateConfiguration() error {
 func decodeDocument(raw json.RawMessage) (any, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
+	value, err := decodeValue(decoder, nil)
+	if err != nil {
 		return nil, err
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return nil, errors.New("multiple JSON values")
 		}
@@ -101,3 +101,71 @@ func decodeDocument(raw json.RawMessage) (any, error) {
 	}
 	return value, nil
 }
+
+func decodeValue(decoder *json.Decoder, path []string) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return token, nil
+	}
+	switch delim {
+	case '{':
+		object := make(map[string]any)
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return nil, fmt.Errorf("object key is %T, want string", keyToken)
+			}
+			keyPath := appendPath(path, key)
+			if _, exists := object[key]; exists {
+				return nil, &duplicateKeyError{path: pointer(keyPath), key: key}
+			}
+			value, err := decodeValue(decoder, keyPath)
+			if err != nil {
+				return nil, err
+			}
+			object[key] = value
+		}
+		if _, err := decoder.Token(); err != nil {
+			return nil, err
+		}
+		return object, nil
+	case '[':
+		array := make([]any, 0)
+		for decoder.More() {
+			value, err := decodeValue(decoder, appendPath(path, strconv.Itoa(len(array))))
+			if err != nil {
+				return nil, err
+			}
+			array = append(array, value)
+		}
+		if _, err := decoder.Token(); err != nil {
+			return nil, err
+		}
+		return array, nil
+	default:
+		return nil, fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+}
+
+func appendPath(path []string, part string) []string {
+	result := make([]string, len(path)+1)
+	copy(result, path)
+	result[len(path)] = part
+	return result
+}
+
+type duplicateKeyError struct {
+	path string
+	key  string
+}
+
+func (e *duplicateKeyError) Error() string       { return fmt.Sprintf("duplicate object key %q", e.key) }
+func (e *duplicateKeyError) JSONPointer() string { return e.path }

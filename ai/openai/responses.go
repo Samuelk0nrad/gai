@@ -7,6 +7,7 @@ import (
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/jsonvalue"
 	"github.com/Samuelk0nrad/gai/internal/mediainput"
 	"github.com/Samuelk0nrad/gai/internal/streamtext"
 	"github.com/openai/openai-go/packages/param"
@@ -247,7 +248,7 @@ func buildResponsesParams(model string, req ai.AIRequest) (responses.ResponseNew
 		params.Text.Format.OfJSONObject = &shared.ResponseFormatJSONObjectParam{}
 	case ai.ResponseFormatJSONSchema:
 		var schema map[string]any
-		if err := json.Unmarshal(req.ResponseFormat.Schema, &schema); err != nil {
+		if err := jsonvalue.Decode(req.ResponseFormat.Schema, &schema); err != nil {
 			return responses.ResponseNewParams{}, err
 		}
 		params.Text.Format = responses.ResponseFormatTextConfigParamOfJSONSchema(req.ResponseFormat.Name, schema)
@@ -268,7 +269,7 @@ func buildResponsesParams(model string, req ai.AIRequest) (responses.ResponseNew
 			return responses.ResponseNewParams{}, err
 		}
 		var schema map[string]any
-		if err := json.Unmarshal(definition.Parameters, &schema); err != nil {
+		if err := jsonvalue.Decode(definition.Parameters, &schema); err != nil {
 			return responses.ResponseNewParams{}, fmt.Errorf("decode tool %q schema: %w", definition.Name, err)
 		}
 		params.Tools = append(params.Tools, responses.ToolUnionParam{OfFunction: &responses.FunctionToolParam{

@@ -10,6 +10,7 @@ import (
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/jsonvalue"
 	"github.com/Samuelk0nrad/gai/internal/mediainput"
 	"google.golang.org/genai"
 )
@@ -741,7 +742,7 @@ func mapGenerateContentTools(definitions []ai.ToolDefinition) ([]*genai.Tool, er
 			return nil, err
 		}
 		var schema any
-		if err := json.Unmarshal(definition.Parameters, &schema); err != nil {
+		if err := jsonvalue.Decode(definition.Parameters, &schema); err != nil {
 			return nil, err
 		}
 		declarations = append(declarations, &genai.FunctionDeclaration{
@@ -791,7 +792,7 @@ func applyGenerateContentResponseFormat(ensureConfig func() *genai.GenerateConte
 		return nil
 	case ai.ResponseFormatJSONSchema:
 		var schema any
-		if err := json.Unmarshal(format.Schema, &schema); err != nil {
+		if err := jsonvalue.Decode(format.Schema, &schema); err != nil {
 			return err
 		}
 		cfg := ensureConfig()

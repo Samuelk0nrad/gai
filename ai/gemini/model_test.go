@@ -526,3 +526,35 @@ func TestCanonicalResponseProjectsTextReasoningAndToolCalls(t *testing.T) {
 		t.Fatalf("unexpected tool calls: %#v", toolCalls)
 	}
 }
+
+func TestSchemaNumbersRetainPrecisionInGeminiConfig(t *testing.T) {
+	const exact = "9007199254740993"
+	tools, err := mapGenerateContentTools([]ai.ToolDefinition{{
+		Type: "function", Name: "bounded", Description: "Bounded input.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"value":{"type":"integer","maximum":` + exact + `}}}`),
+	}})
+	if err != nil {
+		t.Fatalf("mapGenerateContentTools: %v", err)
+	}
+	var config *genai.GenerateContentConfig
+	ensureConfig := func() *genai.GenerateContentConfig {
+		if config == nil {
+			config = &genai.GenerateContentConfig{}
+		}
+		return config
+	}
+	if err := applyGenerateContentResponseFormat(ensureConfig, ai.ResponseFormat{
+		Type: ai.ResponseFormatJSONSchema, Name: "answer",
+		Schema: json.RawMessage(`{"type":"object","properties":{"value":{"type":"integer","maximum":` + exact + `}}}`),
+	}); err != nil {
+		t.Fatalf("applyGenerateContentResponseFormat: %v", err)
+	}
+	config.Tools = tools
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if got := strings.Count(string(encoded), exact); got != 2 {
+		t.Fatalf("exact numeric bound count = %d, want 2; payload: %s", got, encoded)
+	}
+}

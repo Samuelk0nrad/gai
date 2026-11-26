@@ -3,6 +3,7 @@ package structured_test
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Samuelk0nrad/gai/structured"
@@ -97,8 +98,116 @@ func TestDecodeErrorIncludesPathAndRejectsTrailingJSON(t *testing.T) {
 	}
 
 	_, err = (structured.Spec[answer]{Schema: schema}).Decode(json.RawMessage(`{"count":1} {"count":2}`))
-	if !errors.As(err, &decode) || decode.Path != "/" {
-		t.Fatalf("trailing error = %T %#v, want DecodeError at /", err, err)
+	if !errors.As(err, &decode) || decode.Path != "" {
+		t.Fatalf("trailing error = %T %#v, want DecodeError at document root", err, err)
+	}
+}
+
+func TestDecodeErrorUsesInputLocationForDottedKeysAndArrayElements(t *testing.T) {
+	schema, err := structured.Raw("answer", json.RawMessage(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("dotted key", func(t *testing.T) {
+		type answer struct {
+			Value int `json:"a.b"`
+		}
+		_, err := (structured.Spec[answer]{Schema: schema}).Decode(json.RawMessage(`{"a.b":"many"}`))
+		var decode *structured.DecodeError
+		if !errors.As(err, &decode) || decode.Path != "/a.b" {
+			t.Fatalf("error = %T %#v, want DecodeError at /a.b", err, err)
+		}
+	})
+
+	t.Run("array element", func(t *testing.T) {
+		type item struct {
+			Count int `json:"count"`
+		}
+		type answer struct {
+			Items []item `json:"items"`
+		}
+		_, err := (structured.Spec[answer]{Schema: schema}).Decode(json.RawMessage(`{"items":[{"count":"many"}]}`))
+		var decode *structured.DecodeError
+		if !errors.As(err, &decode) || decode.Path != "/items/0/count" {
+			t.Fatalf("error = %T %#v, want DecodeError at /items/0/count", err, err)
+		}
+	})
+}
+
+func TestDecodeRejectsDuplicateObjectKeysBeforeTypedDecode(t *testing.T) {
+	schema, err := structured.Raw("answer", json.RawMessage(`{
+		"type":"object",
+		"properties":{"payload":{"type":"object","properties":{"count":{"type":"integer"},"extra":{"type":"string","maxLength":3}},"required":["count"]}},
+		"required":["payload"]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type payload struct {
+		Count int    `json:"count"`
+		Extra string `json:"extra"`
+	}
+	type answer struct {
+		Payload payload `json:"payload"`
+	}
+
+	_, err = (structured.Spec[answer]{Schema: schema}).Decode(json.RawMessage(`{"payload":{"extra":"too long"},"payload":{"count":1}}`))
+	var decode *structured.DecodeError
+	if !errors.As(err, &decode) {
+		t.Fatalf("error = %T %v, want DecodeError", err, err)
+	}
+	if decode.Path != "/payload" || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("error = %#v, want duplicate-key error at /payload", err)
+	}
+}
+
+func TestValidationPathsUseRFC6901WithoutMutatingValidatorError(t *testing.T) {
+	schema, err := structured.Raw("answer", json.RawMessage(`{"type":"object","properties":{"a/b":{"type":"integer"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (structured.Spec[map[string]any]{Schema: schema}).Decode(json.RawMessage(`{"a/b":"many"}`))
+	var validation *structured.ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("error = %T %v, want ValidationError", err, err)
+	}
+	if validation.Path != "/a~1b" {
+		t.Fatalf("path = %q, want /a~1b", validation.Path)
+	}
+	if got := validation.Err.Error(); !strings.Contains(got, "/a~1b") || strings.Contains(got, "/a~01b") {
+		t.Fatalf("wrapped validator error path was mutated: %q", got)
+	}
+
+	rootSchema, err := structured.Raw("root", json.RawMessage(`{"type":"integer"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (structured.Spec[int]{Schema: rootSchema}).Decode(json.RawMessage(`"many"`))
+	if !errors.As(err, &validation) || validation.Path != "" {
+		t.Fatalf("root validation error = %T %#v, want empty RFC 6901 pointer", err, err)
+	}
+}
+
+func TestSemanticValidationErrorIsCopiedPerDecode(t *testing.T) {
+	schema, err := structured.Raw("answer", json.RawMessage(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reused := &structured.ValidationError{Path: "/value", Keyword: "semantic", Err: errors.New("invalid")}
+	spec := structured.Spec[map[string]any]{Schema: schema, Validate: func(map[string]any) error { return reused }}
+
+	_, firstErr := spec.Decode(json.RawMessage(`{"value":1}`))
+	_, secondErr := spec.Decode(json.RawMessage(`{"value":2}`))
+	var first, second *structured.ValidationError
+	if !errors.As(firstErr, &first) || !errors.As(secondErr, &second) {
+		t.Fatalf("errors = %T, %T; want ValidationError", firstErr, secondErr)
+	}
+	if first == reused || second == reused || first == second {
+		t.Fatal("semantic validation error was not copied")
+	}
+	if reused.JSON != nil || string(first.JSON) != `{"value":1}` || string(second.JSON) != `{"value":2}` {
+		t.Fatalf("JSON snapshots: reused=%s first=%s second=%s", reused.JSON, first.JSON, second.JSON)
 	}
 }
 

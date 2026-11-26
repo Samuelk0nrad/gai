@@ -61,24 +61,24 @@ func (s Spec[T]) Decode(raw json.RawMessage) (Result[T], error) {
 	}
 	instance, err := decodeDocument(raw)
 	if err != nil {
-		return zero, &DecodeError{Path: "/", JSON: cloneJSON(raw), Err: err}
+		return zero, &DecodeError{Path: errorPath(err), JSON: cloneJSON(raw), Err: err}
 	}
 	if err := s.Schema.compiled.Validate(instance); err != nil {
 		return zero, validationError(err, raw)
 	}
 	var value T
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return zero, &DecodeError{Path: decodePath(err), JSON: cloneJSON(raw), Err: err}
+		return zero, &DecodeError{Path: decodePath(raw, err), JSON: cloneJSON(raw), Err: err}
 	}
 	if s.Validate != nil {
 		if err := s.Validate(value); err != nil {
 			var validation *ValidationError
 			if errors.As(err, &validation) {
-				validation.JSON = cloneJSON(raw)
-				validation.Path = normalizePath(validation.Path)
-				return zero, validation
+				result := *validation
+				result.JSON = cloneJSON(raw)
+				return zero, &result
 			}
-			return zero, &ValidationError{Path: "/", Keyword: "semantic", JSON: cloneJSON(raw), Err: err}
+			return zero, &ValidationError{Path: "", Keyword: "semantic", JSON: cloneJSON(raw), Err: err}
 		}
 	}
 	return Result[T]{Value: value, JSON: cloneJSON(raw)}, nil

@@ -1,15 +1,18 @@
 package structured
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	validator "github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // ValidationError reports a JSON Schema or semantic validation failure.
-// Path is an RFC 6901 JSON Pointer rooted at "/".
+// Path is an RFC 6901 JSON Pointer. The document root is the empty string.
 type ValidationError struct {
 	Path    string
 	Keyword string
@@ -35,7 +38,7 @@ func (e *ValidationError) Unwrap() error {
 func (*ValidationError) StructuredOutputErrorKind() string { return "structured_validation" }
 
 // DecodeError reports malformed JSON or a value that cannot decode into T.
-// Path is an RFC 6901 JSON Pointer rooted at "/".
+// Path is an RFC 6901 JSON Pointer. The document root is the empty string.
 type DecodeError struct {
 	Path string
 	JSON json.RawMessage
@@ -62,7 +65,7 @@ func (*DecodeError) StructuredOutputErrorKind() string { return "structured_deco
 func validationError(err error, raw json.RawMessage) error {
 	var schemaErr *validator.ValidationError
 	if !asValidationError(err, &schemaErr) {
-		return &ValidationError{Path: "/", Keyword: "schema", JSON: cloneJSON(raw), Err: err}
+		return &ValidationError{Path: "", Keyword: "schema", JSON: cloneJSON(raw), Err: err}
 	}
 	leaf := deepestValidationError(schemaErr)
 	keyword := "schema"
@@ -107,26 +110,70 @@ func deepestValidationError(err *validator.ValidationError) *validator.Validatio
 	return best
 }
 
-func decodePath(err error) string {
-	if typed, ok := err.(*json.UnmarshalTypeError); ok {
-		if typed.Field == "" {
-			return "/"
-		}
-		parts := strings.Split(typed.Field, ".")
-		return pointer(parts)
+func decodePath(raw json.RawMessage, err error) string {
+	var typed *json.UnmarshalTypeError
+	if !errors.As(err, &typed) || typed.Offset <= 0 {
+		return ""
 	}
-	return "/"
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	path, found, parseErr := pathAtOffset(decoder, nil, typed.Offset)
+	if parseErr != nil || !found {
+		return ""
+	}
+	return pointer(path)
+}
+
+func pathAtOffset(decoder *json.Decoder, path []string, offset int64) ([]string, bool, error) {
+	start := decoder.InputOffset()
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, false, err
+	}
+	delim, isDelim := token.(json.Delim)
+	if !isDelim {
+		return path, offset > start && offset <= decoder.InputOffset(), nil
+	}
+	switch delim {
+	case '{':
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return nil, false, err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return nil, false, fmt.Errorf("object key is %T, want string", keyToken)
+			}
+			if foundPath, found, err := pathAtOffset(decoder, appendPath(path, key), offset); err != nil || found {
+				return foundPath, found, err
+			}
+		}
+	case '[':
+		for index := 0; decoder.More(); index++ {
+			if foundPath, found, err := pathAtOffset(decoder, appendPath(path, strconv.Itoa(index)), offset); err != nil || found {
+				return foundPath, found, err
+			}
+		}
+	default:
+		return nil, false, fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, false, err
+	}
+	return path, offset > start && offset <= decoder.InputOffset(), nil
 }
 
 func pointer(parts []string) string {
 	if len(parts) == 0 {
-		return "/"
+		return ""
 	}
+	escaped := make([]string, len(parts))
 	for i, part := range parts {
 		part = strings.ReplaceAll(part, "~", "~0")
-		parts[i] = strings.ReplaceAll(part, "/", "~1")
+		escaped[i] = strings.ReplaceAll(part, "/", "~1")
 	}
-	return "/" + strings.Join(parts, "/")
+	return "/" + strings.Join(escaped, "/")
 }
 
 func normalizePath(path string) string {
@@ -138,4 +185,13 @@ func normalizePath(path string) string {
 
 func cloneJSON(raw json.RawMessage) json.RawMessage {
 	return append(json.RawMessage(nil), raw...)
+}
+
+func errorPath(err error) string {
+	type pathError interface{ JSONPointer() string }
+	var located pathError
+	if errors.As(err, &located) {
+		return located.JSONPointer()
+	}
+	return ""
 }
