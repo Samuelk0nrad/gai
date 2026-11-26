@@ -232,10 +232,10 @@ func (r *runExecution) prepareValidatedRun() bool {
 }
 
 func (r *runExecution) runIteration(iterationCount int) iterationOutcome {
-	deferTokens := (r.owner.ToolTransport == ToolTransportText && (!r.requiredToolCallSatisfied ||
+	discardUnpermitted := (r.owner.ToolTransport == ToolTransportText && (!r.requiredToolCallSatisfied ||
 		(r.owner.ToolChoice.Mode == ai.ToolChoiceRequired && len(r.owner.ToolChoice.Names) > 0))) ||
-		(r.owner.ToolTransport == ToolTransportNative && len(r.owner.ToolChoice.Names) > 0) ||
-		r.owner.OutputValidation != nil
+		(r.owner.ToolTransport == ToolTransportNative && len(r.owner.ToolChoice.Names) > 0)
+	deferTokens := discardUnpermitted || r.owner.OutputValidation != nil
 
 	var accepted *attemptExecution
 	firstAttempt := 1
@@ -269,7 +269,7 @@ func (r *runExecution) runIteration(iterationCount int) iterationOutcome {
 		}
 		break
 	}
-	return r.postAttempt(accepted, deferTokens)
+	return r.postAttempt(accepted, discardUnpermitted)
 }
 
 func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferTokens bool) (*attemptExecution, attemptOutcome) {
@@ -546,7 +546,7 @@ func (r *runExecution) validateFinalOutput(attempt *attemptExecution) attemptOut
 }
 
 // postAttempt executes tool calls and commits only accepted iteration output.
-func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) iterationOutcome {
+func (r *runExecution) postAttempt(attempt *attemptExecution, discardUnpermitted bool) iterationOutcome {
 	if r.owner.ToolChoice.Mode == ai.ToolChoiceNone {
 		attempt.toolCalls = nil
 	}
@@ -559,12 +559,12 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		attempt.terminateError(ErrMixedTerminalToolBatch)
 		return iterationTerminal
 	}
-	if terminalBatch && deferTokens && len(attempt.toolCalls) > 0 &&
+	if terminalBatch && discardUnpermitted && len(attempt.toolCalls) > 0 &&
 		!hasAnyPermittedToolCall(attempt.toolCalls, r.owner.Tools, r.owner.ToolChoice.Names) {
 		attempt.terminateError(fmt.Errorf("%w: no permitted terminal call", ErrTerminalToolBatch))
 		return iterationTerminal
 	}
-	if !terminalBatch && deferTokens && (!r.requiredToolCallSatisfied || len(attempt.toolCalls) > 0) &&
+	if !terminalBatch && discardUnpermitted && (!r.requiredToolCallSatisfied || len(attempt.toolCalls) > 0) &&
 		!hasPermittedToolCall(attempt.toolCalls, r.owner.Tools, r.owner.ToolChoice.Names) {
 		if err := r.commitDiscard(attempt); err != nil {
 			attempt.terminateCommit(err)

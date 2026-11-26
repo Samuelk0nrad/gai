@@ -2237,6 +2237,40 @@ func TestIterationDeltaMessagesPreservesThoughtOnlyResponses(t *testing.T) {
 	}
 }
 
+func TestLoopOutputValidationPreservesMixedToolErrorRecovery(t *testing.T) {
+	tool := &countingTool{}
+	model := &scriptedStreamModel{sequences: [][]ai.Token{
+		{
+			{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-count", Type: "function", Name: "count", Args: json.RawMessage(`{"text":"valid"}`)}}},
+			{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-missing", Type: "function", Name: "missing", Args: json.RawMessage(`{"text":"unknown"}`)}}},
+		},
+		{{Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(`{"count":2}`)}}},
+	}}
+	l := loop.New(model, []loop.Tool{tool}, testPromptBuilder(), nil)
+	l.OutputValidation = &loop.OutputValidation{
+		Validate: func(raw json.RawMessage) error {
+			if string(raw) != `{"count":2}` {
+				return fmt.Errorf("validated %q", raw)
+			}
+			return nil
+		},
+	}
+
+	if err := loopError(collectLoopEvents(t, l, context.Background())); err != nil {
+		t.Fatalf("loop error: %v", err)
+	}
+	if calls := tool.calls.Load(); calls != 1 {
+		t.Fatalf("valid sibling tool calls = %d, want 1", calls)
+	}
+	if len(l.Iterations) != 2 {
+		t.Fatalf("accepted iterations = %d, want tool batch and final output", len(l.Iterations))
+	}
+	if len(l.Iterations[0].Parts) != 2 || l.Iterations[0].Parts[1].ToolResp == nil ||
+		!errors.Is(l.Iterations[0].Parts[1].ToolResp.Err, loop.ErrToolNotFound) {
+		t.Fatalf("mixed tool batch did not preserve the unknown-tool result: %#v", l.Iterations[0].Parts)
+	}
+}
+
 func TestLoopOutputValidationRetriesBeforeCommit(t *testing.T) {
 	validationErr := errors.New("count must be positive")
 	model := &scriptedStreamModel{sequences: [][]ai.Token{
