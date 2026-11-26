@@ -61,6 +61,7 @@ func (r *runExecution) prepareContinuation() error {
 			d.state.RetryCount = r.state.retryCount
 			d.state.Phase = PhaseReady
 		}
+		r.providerRetries = r.state.retryCount
 	} else {
 		d.state = Continuation{Version: ContinuationVersion, Phase: PhaseReady, NextIteration: 1, NextAttempt: 1, InputPending: true, RequiredToolSatisfied: r.owner.ToolChoice.Mode != ai.ToolChoiceRequired}
 	}
