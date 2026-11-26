@@ -4,7 +4,9 @@ go 1.26.11
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.84.0
+	github.com/invopop/jsonschema v0.14.0
 	github.com/openai/openai-go v1.12.0
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/tiktoken-go/tokenizer v0.10.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.47.0
@@ -34,7 +36,6 @@ require (
 	github.com/googleapis/gax-go/v2 v2.22.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
-	github.com/invopop/jsonschema v0.14.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect

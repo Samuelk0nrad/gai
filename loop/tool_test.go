@@ -18,6 +18,7 @@ type namedTestTool struct {
 func (t namedTestTool) Name() string            { return t.name }
 func (namedTestTool) Description() string       { return "A test tool." }
 func (namedTestTool) Params() ai.ToolParameters { return loop.NewEchoTool().Params() }
+
 // Function returns a fixed successful result for tool registration and invocation fixtures.
 func (namedTestTool) Function(context.Context, ai.ToolCall) (string, error) {
 	return "ok", nil
@@ -48,6 +49,37 @@ func TestToolDefinitionsRejectNonCanonicalToolName(t *testing.T) {
 	_, err := loop.ToolDefinitions([]loop.Tool{namedTestTool{name: " search "}})
 	if !errors.Is(err, ai.ErrInvalidToolDefinition) {
 		t.Fatalf("ToolDefinitions() error = %v, want ErrInvalidToolDefinition", err)
+	}
+}
+
+func TestNewRawSchemaToolPreservesSchemaInDefinition(t *testing.T) {
+	t.Parallel()
+	raw := json.RawMessage(`{"type":"object","properties":{"choice":{"oneOf":[{"const":"a"},{"const":"b"}]}},"required":["choice"],"additionalProperties":false}`)
+
+	tool, err := loop.NewRawSchemaTool("choose", "Chooses a value.", raw, func(context.Context, ai.ToolCall) (string, error) {
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("NewRawSchemaTool: %v", err)
+	}
+	definitions, err := loop.ToolDefinitions([]loop.Tool{tool})
+	if err != nil {
+		t.Fatalf("ToolDefinitions: %v", err)
+	}
+	if len(definitions) != 1 || string(definitions[0].Parameters) != string(raw) {
+		t.Fatalf("definitions = %#v, want exact raw schema %s", definitions, raw)
+	}
+
+	configured, err := loop.WithToolOptions(tool, loop.ToolOptions{Serial: true})
+	if err != nil {
+		t.Fatalf("WithToolOptions: %v", err)
+	}
+	definitions, err = loop.ToolDefinitions([]loop.Tool{configured})
+	if err != nil {
+		t.Fatalf("configured ToolDefinitions: %v", err)
+	}
+	if string(definitions[0].Parameters) != string(raw) {
+		t.Fatalf("configured raw schema = %s, want %s", definitions[0].Parameters, raw)
 	}
 }
 

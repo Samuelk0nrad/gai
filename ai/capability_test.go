@@ -134,6 +134,44 @@ func TestToolParametersJSONSchemaValidation(t *testing.T) {
 	}
 }
 
+func TestToolParametersRawSchemaPreservesUnsupportedKeywords(t *testing.T) {
+	raw := json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "value": {
+      "anyOf": [{"type": "string", "format": "uuid"}, {"type": "null"}],
+      "minLength": 3
+    }
+  },
+  "required": ["value"],
+  "unevaluatedProperties": false
+}`)
+
+	got, err := (ai.ToolParameters{RawSchema: raw}).JSONSchema()
+	if err != nil {
+		t.Fatalf("JSONSchema: %v", err)
+	}
+	if string(got) != string(raw) {
+		t.Fatalf("raw schema changed:\n%s\nwant:\n%s", got, raw)
+	}
+
+	got[0] = '['
+	if raw[0] != '{' {
+		t.Fatal("JSONSchema returned caller-owned bytes")
+	}
+}
+
+func TestToolParametersRawSchemaRejectsDSLFields(t *testing.T) {
+	params := ai.ToolParameters{
+		RawSchema:  json.RawMessage(`{"type":"object"}`),
+		Properties: []ai.ToolParameter{{Name: "value", Type: ai.ToolParameterString}},
+	}
+
+	if _, err := params.JSONSchema(); !errors.Is(err, ai.ErrInvalidToolDefinition) {
+		t.Fatalf("JSONSchema error = %v, want ErrInvalidToolDefinition", err)
+	}
+}
+
 func TestResponseFormatValidation(t *testing.T) {
 	format := ai.ResponseFormat{
 		Type:   ai.ResponseFormatJSONSchema,

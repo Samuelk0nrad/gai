@@ -59,4 +59,9 @@ var (
 	ErrBuildPrompt = errors.New("build prompt error")
 	// ErrMaxRetries indicates that model generation exhausted its retry limit.
 	ErrMaxRetries = errors.New("max retries exceeded")
+	// ErrMaxValidationRetries indicates invalid final output exhausted its
+	// independent validation retry limit.
+	ErrMaxValidationRetries = errors.New("max output validation retries exceeded")
+	// ErrOutputValidationConfig identifies invalid or unsupported final-output validation.
+	ErrOutputValidationConfig = errors.New("invalid output validation configuration")
 )

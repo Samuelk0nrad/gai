@@ -2,6 +2,7 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -29,6 +30,11 @@ type runExecution struct {
 	continuationCancel        context.CancelFunc
 	// pendingRetry is the retry metric waiting for its next attempt to start.
 	pendingRetry *pendingRetryMetric
+	// Provider and validation retry budgets are independent. state.retryCount
+	// remains the total ordered retry identity exposed through events.
+	providerRetries   int
+	validationRetries int
+	validationPrompt  string
 }
 
 // pendingRetryMetric holds a retry until its next attempt passes the
@@ -228,7 +234,8 @@ func (r *runExecution) prepareValidatedRun() bool {
 func (r *runExecution) runIteration(iterationCount int) iterationOutcome {
 	deferTokens := (r.owner.ToolTransport == ToolTransportText && (!r.requiredToolCallSatisfied ||
 		(r.owner.ToolChoice.Mode == ai.ToolChoiceRequired && len(r.owner.ToolChoice.Names) > 0))) ||
-		(r.owner.ToolTransport == ToolTransportNative && len(r.owner.ToolChoice.Names) > 0)
+		(r.owner.ToolTransport == ToolTransportNative && len(r.owner.ToolChoice.Names) > 0) ||
+		r.owner.OutputValidation != nil
 
 	var accepted *attemptExecution
 	firstAttempt := 1
@@ -243,6 +250,17 @@ func (r *runExecution) runIteration(iterationCount int) iterationOutcome {
 		attempt, outcome := r.runModelAttempt(iterationCount, attemptID, deferTokens)
 		switch outcome {
 		case attemptAccepted:
+			// Provider retries count consecutive provider failures. A complete
+			// generation resets that budget even when output validation asks for
+			// a separate corrective attempt.
+			r.providerRetries = 0
+			validationOutcome := r.validateFinalOutput(attempt)
+			if validationOutcome == attemptRetry {
+				continue
+			}
+			if validationOutcome == attemptTerminal {
+				return iterationTerminal
+			}
 			accepted = attempt
 		case attemptRetry:
 			continue
@@ -288,6 +306,12 @@ func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferToken
 			return attempt, attempt.terminateCanceled(cancelErr)
 		}
 		return attempt, attempt.terminateError(fmt.Errorf("%w: %w", ErrBuildPrompt, err))
+	}
+	if r.validationPrompt != "" {
+		request.Messages = append(request.Messages, ai.TextMessage(ai.RoleUser, r.validationPrompt))
+		if err := request.Validate(); err != nil {
+			return attempt, attempt.terminateError(fmt.Errorf("%w: validation retry prompt: %w", ErrBuildPrompt, err))
+		}
 	}
 
 	// Capture independently before a model or explicit request counter can
@@ -338,7 +362,7 @@ func (r *runExecution) runModelAttempt(iterationCount, attemptID int, deferToken
 	attemptTimedOut := attempt.timedOut()
 	if attemptTimedOut && !retrying {
 		retryErr = ErrAttemptTimeout
-		if r.owner.RetryPolicy.ShouldRetry(r.state.retryCount, ErrAttemptTimeout) {
+		if r.owner.RetryPolicy.ShouldRetry(r.providerRetries, ErrAttemptTimeout) {
 			retrying = true
 		} else {
 			err := fmt.Errorf("%w: limit=%d: %w", ErrMaxRetries, r.owner.RetryPolicy.MaxRetries, ErrAttemptTimeout)
@@ -381,7 +405,7 @@ func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request 
 			if a.run.owner.RetryPolicy != nil {
 				retryLimit = a.run.owner.RetryPolicy.MaxRetries
 				retryable = a.run.owner.RetryPolicy.isRetryable(token.Err)
-				canRetry = a.run.owner.RetryPolicy.hasRetryBudget(a.run.state.retryCount) && retryable
+				canRetry = a.run.owner.RetryPolicy.hasRetryBudget(a.run.providerRetries) && retryable
 			}
 			if canRetry {
 				return true, attemptRetry, retryErr
@@ -422,13 +446,14 @@ func (a *attemptExecution) consumeModelStream(modelCtx context.Context, request 
 }
 
 func (a *attemptExecution) scheduleRetry(retryErr error) attemptOutcome {
+	a.run.providerRetries++
 	a.run.state.retry()
 	if err := a.run.commitRetry(a); err != nil {
 		return a.terminateCommit(err)
 	}
 	delay := time.Duration(0)
 	if a.run.owner.RetryPolicy != nil {
-		delay = a.run.owner.RetryPolicy.Backoff(a.run.state.retryCount-1, retryErr)
+		delay = a.run.owner.RetryPolicy.Backoff(a.run.providerRetries-1, retryErr)
 	}
 	a.state.recordIteration(a.iteration)
 	a.state.markRetrying(a.run.state.retryCount, retryReason(retryErr), delay)
@@ -473,6 +498,53 @@ func (a *attemptExecution) scheduleRetry(retryErr error) attemptOutcome {
 	return attemptRetry
 }
 
+// validateFinalOutput rejects a complete no-tool response before any of its
+// deferred output is published or committed to the conversation. Validation
+// has an independent retry budget, while the shared retry count keeps attempt
+// identity monotonic for stream consumers.
+func (r *runExecution) validateFinalOutput(attempt *attemptExecution) attemptOutcome {
+	validation := r.owner.OutputValidation
+	if validation == nil || len(attempt.toolCalls) > 0 {
+		return attemptAccepted
+	}
+
+	var raw json.RawMessage
+	for _, message := range attempt.iteration.Conversation {
+		if message.Role == ai.RoleAssistant {
+			raw = append(raw, message.Text()...)
+		}
+	}
+	validationErr := validation.Validate(raw)
+	if validationErr == nil {
+		return attemptAccepted
+	}
+	if r.validationRetries >= validation.MaxRetries {
+		return attempt.terminateError(fmt.Errorf("%w: limit=%d: %w", ErrMaxValidationRetries, validation.MaxRetries, validationErr))
+	}
+	prompt, err := validation.prompt(validationErr)
+	if err != nil {
+		return attempt.terminateError(errors.Join(err, validationErr))
+	}
+
+	r.validationRetries++
+	r.state.retry()
+	if err := r.commitRetry(attempt); err != nil {
+		return attempt.terminateCommit(err)
+	}
+	attempt.state.recordIteration(attempt.iteration)
+	reason := outputValidationRetryReason(validationErr)
+	attempt.state.markRetrying(r.state.retryCount, reason, 0)
+	if err := sendEvent(r.ctx, r.events, RetryEvent(attempt.iteration.Count, attempt.state.attemptID(), r.state.retryCount, reason, 0, attempt.iteration)); err != nil {
+		return attempt.terminateSendFailure(err)
+	}
+
+	r.validationPrompt = prompt
+	attempt.cancelAttempt()
+	r.pendingRetry = &pendingRetryMetric{modelName: attempt.modelName, err: validationErr}
+	attempt.finish(nil)
+	return attemptRetry
+}
+
 // postAttempt executes tool calls and commits only accepted iteration output.
 func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) iterationOutcome {
 	if r.owner.ToolChoice.Mode == ai.ToolChoiceNone {
@@ -506,6 +578,7 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 			return iterationTerminal
 		}
 		r.state.resetRetries()
+		r.providerRetries = 0
 		attempt.finish(nil)
 		return iterationContinue
 	}
@@ -591,6 +664,7 @@ func (r *runExecution) postAttempt(attempt *attemptExecution, deferTokens bool) 
 		r.requiredToolCallSatisfied = true
 	}
 	r.state.resetRetries()
+	r.providerRetries = 0
 
 	if r.owner.ToolTransport == ToolTransportText && len(attempt.toolCalls) == 0 && !r.requiredToolCallSatisfied {
 		attempt.cancelAttempt()

@@ -173,6 +173,13 @@ func NewTool(name, description string, params ai.ToolParameters, function ToolFu
 	return tool, nil
 }
 
+// NewRawSchemaTool is NewTool with an exact JSON Schema parameter definition.
+// The schema is copied and passed to every provider without reducing it to the
+// typed ToolParameters subset.
+func NewRawSchemaTool(name, description string, schema json.RawMessage, function ToolFunc) (Tool, error) {
+	return NewTool(name, description, ai.ToolParameters{RawSchema: append(json.RawMessage(nil), schema...)}, function)
+}
+
 // Name returns the validated tool identifier.
 func (t *functionTool) Name() string { return t.name }
 

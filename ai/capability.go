@@ -35,6 +35,9 @@ type ToolParameters struct {
 	Properties           []ToolParameter
 	Strict               bool
 	AdditionalProperties *bool
+	// RawSchema is an exact JSON Schema escape hatch. When set, Properties,
+	// Strict, and AdditionalProperties must remain unset.
+	RawSchema json.RawMessage `json:"raw_schema,omitempty"`
 }
 
 // ToolParameter describes one property in a tool argument schema.
@@ -64,6 +67,22 @@ type toolParameterSchema struct {
 
 // JSONSchema validates and renders params as provider-facing JSON Schema.
 func (params ToolParameters) JSONSchema() (json.RawMessage, error) {
+	if len(params.RawSchema) > 0 {
+		if len(params.Properties) > 0 || params.Strict || params.AdditionalProperties != nil {
+			return nil, fmt.Errorf("%w: raw schema cannot be combined with typed parameters", ErrInvalidToolDefinition)
+		}
+		if !json.Valid(params.RawSchema) {
+			return nil, fmt.Errorf("%w: raw parameters schema is invalid JSON", ErrInvalidToolDefinition)
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(params.RawSchema, &schema); err != nil {
+			return nil, fmt.Errorf("%w: raw parameters schema: %w", ErrInvalidToolDefinition, err)
+		}
+		if typ, ok := schema["type"].(string); ok && typ != "object" {
+			return nil, fmt.Errorf("%w: parameters type must be object", ErrInvalidToolDefinition)
+		}
+		return append(json.RawMessage(nil), params.RawSchema...), nil
+	}
 	schema, err := params.schema()
 	if err != nil {
 		return nil, err
