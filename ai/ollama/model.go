@@ -155,8 +155,8 @@ func (m *Model) generateStream(ctx context.Context, req ai.AIRequest, emit func(
 		if len(bytes.TrimSpace(record)) == 0 {
 			continue
 		}
-		var chunk rawChatResponse
-		if err := json.Unmarshal(record, &chunk); err != nil {
+		var chunk *rawChatResponse
+		if err := json.Unmarshal(record, &chunk); err != nil || chunk == nil {
 			emit(ai.Token{Err: errors.New("decode Ollama stream: malformed response record")})
 			return
 		}

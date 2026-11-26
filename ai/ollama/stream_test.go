@@ -163,6 +163,7 @@ func TestGenerateStreamRejectsMalformedAndTruncatedStreams(t *testing.T) {
 		body string
 	}{
 		{"malformed", "not-json\n"},
+		{"null record", "null\n" + `{"done":true,"done_reason":"stop"}` + "\n"},
 		{"truncated", `{"message":{"role":"assistant","content":"partial"},"done":false}` + "\n"},
 		{"in-band error", `{"error":"model unavailable"}` + "\n"},
 		{"invalid tool arguments", `{"message":{"role":"assistant","tool_calls":[{"function":{"name":"x","arguments":[]}}]},"done":true}`},
