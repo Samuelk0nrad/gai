@@ -37,6 +37,17 @@ func TestForGeneratesSchemaAndDecodesTypedValue(t *testing.T) {
 	}
 }
 
+func TestRawPreservesLargeNumericBounds(t *testing.T) {
+	schema, err := structured.Raw("large integer", json.RawMessage(`{"type":"integer","maximum":9007199254740993}`))
+	if err != nil {
+		t.Fatalf("Raw: %v", err)
+	}
+
+	if _, err := (structured.Spec[json.Number]{Schema: schema}).Decode(json.RawMessage(`9007199254740993`)); err != nil {
+		t.Fatalf("Decode at exact maximum: %v", err)
+	}
+}
+
 func TestRawValidatesUnionNullableAndReportsJSONPointer(t *testing.T) {
 	schema, err := structured.Raw("answer", json.RawMessage(`{
 		"type":"object",

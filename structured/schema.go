@@ -57,8 +57,8 @@ func Raw(name string, raw json.RawMessage) (Schema, error) {
 }
 
 func compile(raw json.RawMessage) (*validator.Schema, error) {
-	var document any
-	if err := json.Unmarshal(raw, &document); err != nil {
+	document, err := decodeDocument(raw)
+	if err != nil {
 		return nil, err
 	}
 	compiler := validator.NewCompiler()
