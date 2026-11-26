@@ -203,7 +203,8 @@ func (p *Provider) getClient(ctx context.Context) (*genai.Client, error) {
 		APIKey:     p.apiKey,
 		HTTPClient: p.httpClient,
 		HTTPOptions: genai.HTTPOptions{
-			BaseURL: p.baseURL,
+			BaseURL:    p.baseURL,
+			APIVersion: "v1beta",
 		},
 	})
 }
