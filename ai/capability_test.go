@@ -32,6 +32,13 @@ func TestNewToolDefinitionRejectsInvalidSchema(t *testing.T) {
 	}
 }
 
+func TestNewToolDefinitionRejectsNullSchema(t *testing.T) {
+	_, err := ai.NewToolDefinition("search", "Searches documents.", json.RawMessage(`null`))
+	if !errors.Is(err, ai.ErrInvalidToolDefinition) {
+		t.Fatalf("expected ErrInvalidToolDefinition, got %v", err)
+	}
+}
+
 func TestToolParametersJSONSchema(t *testing.T) {
 	params := ai.ToolParameters{
 		Strict: true,
@@ -166,6 +173,14 @@ func TestToolParametersRawSchemaRejectsDSLFields(t *testing.T) {
 		RawSchema:  json.RawMessage(`{"type":"object"}`),
 		Properties: []ai.ToolParameter{{Name: "value", Type: ai.ToolParameterString}},
 	}
+
+	if _, err := params.JSONSchema(); !errors.Is(err, ai.ErrInvalidToolDefinition) {
+		t.Fatalf("JSONSchema error = %v, want ErrInvalidToolDefinition", err)
+	}
+}
+
+func TestToolParametersRawSchemaRejectsNull(t *testing.T) {
+	params := ai.ToolParameters{RawSchema: json.RawMessage(`null`)}
 
 	if _, err := params.JSONSchema(); !errors.Is(err, ai.ErrInvalidToolDefinition) {
 		t.Fatalf("JSONSchema error = %v, want ErrInvalidToolDefinition", err)

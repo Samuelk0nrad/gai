@@ -78,6 +78,9 @@ func (params ToolParameters) JSONSchema() (json.RawMessage, error) {
 		if err := json.Unmarshal(params.RawSchema, &schema); err != nil {
 			return nil, fmt.Errorf("%w: raw parameters schema: %w", ErrInvalidToolDefinition, err)
 		}
+		if schema == nil {
+			return nil, fmt.Errorf("%w: raw parameters schema must be a JSON object", ErrInvalidToolDefinition)
+		}
 		if typ, ok := schema["type"].(string); ok && typ != "object" {
 			return nil, fmt.Errorf("%w: parameters type must be object", ErrInvalidToolDefinition)
 		}
@@ -306,6 +309,9 @@ func (def ToolDefinition) Validate() error {
 	var schema map[string]any
 	if err := json.Unmarshal(def.Parameters, &schema); err != nil {
 		return fmt.Errorf("%w: parameters schema: %w", ErrInvalidToolDefinition, err)
+	}
+	if schema == nil {
+		return fmt.Errorf("%w: parameters must be a JSON object", ErrInvalidToolDefinition)
 	}
 	if typ, ok := schema["type"].(string); ok && typ != "object" {
 		return fmt.Errorf("%w: parameters type must be object", ErrInvalidToolDefinition)
