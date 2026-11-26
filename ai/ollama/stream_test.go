@@ -157,6 +157,28 @@ func TestGenerateStreamEmitsIncrementalTextToolCallsAndCompletion(t *testing.T) 
 	}
 }
 
+func TestGenerateStreamReportsUnsuccessfulTerminalReasonBeforeToolCalls(t *testing.T) {
+	model := fixtureModel(t, http.StatusOK, `{"model":"test","message":{"role":"assistant","content":"partial","tool_calls":[{"id":"call_1","function":{"name":"search","arguments":{"q":"go"}}}]},"done":true,"done_reason":"length","prompt_eval_count":5,"eval_count":3}`, http.Header{"X-Request-Id": []string{"req-limit"}})
+	events := collectEvents(t, model.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "x")}}))
+
+	if len(events) != 3 || events[0].Text() != "partial" || events[1].Type() != ai.TokenTypeCompletion || events[2].Type() != ai.TokenTypeErr {
+		t.Fatalf("events = %#v", events)
+	}
+	completion := events[1].Completion
+	if completion.Provider != "ollama" || completion.RequestID != "req-limit" || completion.Model != "test" || completion.FinishReason != "length" || !completion.UsageReported || completion.Usage.InputTokens != 5 || completion.Usage.OutputTokens != 3 || !json.Valid(completion.Raw) {
+		t.Fatalf("completion = %#v", completion)
+	}
+	var terminal *ai.TerminalError
+	if !errors.As(events[2].Err, &terminal) || terminal.Provider != "ollama" || terminal.Reason != "length" || !errors.Is(events[2].Err, ai.ErrUnsuccessfulGeneration) {
+		t.Fatalf("terminal error = %#v", events[2].Err)
+	}
+	for _, event := range events {
+		if event.ToolCall() != nil {
+			t.Fatalf("truncated tool call was emitted: %#v", event)
+		}
+	}
+}
+
 func TestGenerateStreamRejectsMalformedAndTruncatedStreams(t *testing.T) {
 	tests := []struct {
 		name string

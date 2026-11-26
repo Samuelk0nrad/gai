@@ -198,14 +198,6 @@ func (m *Model) generateStream(ctx context.Context, req ai.AIRequest, emit func(
 		if !chunk.Done {
 			continue
 		}
-		// Ollama stores content and tool calls in separate fields, so emit all
-		// streamed text before completing calls for canonical replay.
-		for index := range pendingCalls {
-			call := pendingCalls[index].Clone()
-			if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &call}}) {
-				return
-			}
-		}
 		completion.FinishReason = chunk.DoneReason
 		if chunk.PromptEvalCount != nil || chunk.EvalCount != nil {
 			completion.UsageReported = true
@@ -219,6 +211,21 @@ func (m *Model) generateStream(ctx context.Context, req ai.AIRequest, emit func(
 		completion.Raw = record
 		snapshot := completion
 		snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
+		if chunk.DoneReason != "" && chunk.DoneReason != "stop" {
+			if !emit(ai.Token{Completion: &snapshot}) {
+				return
+			}
+			emit(ai.Token{Err: &ai.TerminalError{Provider: "ollama", Reason: chunk.DoneReason}})
+			return
+		}
+		// Ollama stores content and tool calls in separate fields, so emit all
+		// streamed text before completing calls for canonical replay.
+		for index := range pendingCalls {
+			call := pendingCalls[index].Clone()
+			if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &call}}) {
+				return
+			}
+		}
 		emit(ai.Token{Completion: &snapshot})
 		return
 	}
