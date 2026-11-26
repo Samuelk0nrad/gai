@@ -254,6 +254,13 @@ func (r *runExecution) runIteration(iterationCount int) iterationOutcome {
 			// generation resets that budget even when output validation asks for
 			// a separate corrective attempt.
 			r.providerRetries = 0
+			// Text transport enforces required tool choice after generation. Let
+			// postAttempt discard a no-tool response before validating final output,
+			// so the rejection does not consume the validation retry budget.
+			if r.owner.ToolTransport == ToolTransportText && !r.requiredToolCallSatisfied && len(attempt.toolCalls) == 0 {
+				accepted = attempt
+				break
+			}
 			validationOutcome := r.validateFinalOutput(attempt)
 			if validationOutcome == attemptRetry {
 				continue

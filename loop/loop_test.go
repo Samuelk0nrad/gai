@@ -2237,6 +2237,43 @@ func TestIterationDeltaMessagesPreservesThoughtOnlyResponses(t *testing.T) {
 	}
 }
 
+func TestLoopOutputValidationSkipsRejectedRequiredToolResponse(t *testing.T) {
+	model := &scriptedStreamModel{sequences: [][]ai.Token{
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "I will answer without a tool."}}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-1", Type: "function", Name: "echo", Args: json.RawMessage(`{"text":"payload"}`)}}}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(`{"count":2}`)}}},
+	}}
+	l := loop.New(model, []loop.Tool{loop.NewEchoTool()}, testPromptBuilder(), nil)
+	l.ToolTransport = loop.ToolTransportText
+	l.ToolChoice = ai.ToolChoice{Mode: ai.ToolChoiceRequired}
+	validationCalls := 0
+	l.OutputValidation = &loop.OutputValidation{
+		Validate: func(raw json.RawMessage) error {
+			validationCalls++
+			if string(raw) != `{"count":2}` {
+				return fmt.Errorf("validated rejected response %q", raw)
+			}
+			return nil
+		},
+	}
+
+	events := collectLoopEvents(t, l, context.Background())
+	if err := loopError(events); err != nil {
+		t.Fatalf("loop error: %v", err)
+	}
+	if validationCalls != 1 {
+		t.Fatalf("validation calls = %d, want only the accepted final response", validationCalls)
+	}
+	if got := len(model.Requests()); got != 3 {
+		t.Fatalf("requests = %d, want rejected text, required tool call, and final output", got)
+	}
+	for _, event := range events {
+		if event.IterationCount == 1 && (event.Type == loop.EventToken || event.Type == loop.EventIterationDone) {
+			t.Fatalf("rejected required-tool response must not be observable, got %#v", event)
+		}
+	}
+}
+
 func TestLoopOutputValidationPreservesMixedToolErrorRecovery(t *testing.T) {
 	tool := &countingTool{}
 	model := &scriptedStreamModel{sequences: [][]ai.Token{
