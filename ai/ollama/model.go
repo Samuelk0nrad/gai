@@ -1,6 +1,8 @@
 package ollama
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,14 +12,11 @@ import (
 	"strings"
 
 	"github.com/lace-ai/gai/ai"
-	ollamaapi "github.com/ollama/ollama/api"
 )
 
-const maxErrorBodySize = 1 << 20
-
-var (
-	errSDKStreamDone      = errors.New("ollama SDK stream complete")
-	errSDKCallbackHandled = errors.New("ollama SDK callback error handled")
+const (
+	maxErrorBodySize    = 1 << 20
+	maxStreamRecordSize = 16 << 20
 )
 
 // Model is an immutable, concurrency-safe Ollama chat model.
@@ -50,8 +49,10 @@ func (m *Model) Descriptor() ai.ModelDescriptor {
 }
 
 type rawChatResponse struct {
+	Model   string `json:"model"`
 	Message struct {
 		Role      string `json:"role"`
+		Content   string `json:"content"`
 		Thinking  string `json:"thinking"`
 		ToolCalls []struct {
 			ID       string `json:"id"`
@@ -61,8 +62,11 @@ type rawChatResponse struct {
 			} `json:"function"`
 		} `json:"tool_calls"`
 	} `json:"message"`
-	PromptEvalCount *int `json:"prompt_eval_count"`
-	EvalCount       *int `json:"eval_count"`
+	Done            bool   `json:"done"`
+	DoneReason      string `json:"done_reason"`
+	PromptEvalCount *int   `json:"prompt_eval_count"`
+	EvalCount       *int   `json:"eval_count"`
+	Error           string `json:"error"`
 }
 
 func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.Token {
@@ -113,57 +117,74 @@ func (m *Model) generateStream(ctx context.Context, req ai.AIRequest, emit func(
 		emit(ai.Token{Err: err})
 		return
 	}
-	schemas := make([]json.RawMessage, len(req.Tools))
-	for index := range req.Tools {
-		schemas[index] = req.Tools[index].Parameters
-	}
-	client, capture, err := m.provider.sdkClient(schemas)
+	response, err := m.provider.doChat(ctx, payload)
 	if err != nil {
-		emit(ai.Token{Err: fmt.Errorf("configure Ollama SDK client: %w", err)})
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			emit(ai.Token{Err: ctxErr})
+			return
+		}
+		emit(ai.Token{Err: ai.ClassifyProviderError(err, 0, "", "", nil)})
+		return
+	}
+	defer response.Body.Close()
+
+	requestID := response.Header.Get("X-Request-Id")
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, maxErrorBodySize+1))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			emit(ai.Token{Err: ctxErr})
+			return
+		}
+		if readErr != nil {
+			body = nil
+		}
+		if len(body) > maxErrorBodySize {
+			body = body[:maxErrorBodySize]
+		}
+		httpErr := newHTTPError(response.StatusCode, body)
+		emit(ai.Token{Err: ai.ClassifyProviderError(httpErr, response.StatusCode, ollamaErrorCode(body), requestID, response.Header)})
 		return
 	}
 
-	completion := ai.Completion{Provider: "ollama"}
+	completion := ai.Completion{Provider: "ollama", RequestID: requestID}
 	var pendingCalls []ai.ToolCall
-	err = client.Chat(ctx, payload, func(chunk ollamaapi.ChatResponse) error {
-		record := capture.popRecord()
-		if len(record) == 0 {
-			emit(ai.Token{Err: fmt.Errorf("decode Ollama SDK stream: response record unavailable")})
-			return errSDKCallbackHandled
+	scanner := bufio.NewScanner(response.Body)
+	scanner.Buffer(make([]byte, 64*1024), maxStreamRecordSize)
+	for scanner.Scan() {
+		record := append(json.RawMessage(nil), scanner.Bytes()...)
+		if len(bytes.TrimSpace(record)) == 0 {
+			continue
 		}
-		var raw rawChatResponse
-		if err := json.Unmarshal(record, &raw); err != nil {
-			emit(ai.Token{Err: fmt.Errorf("decode Ollama SDK stream metadata: %w", err)})
-			return errSDKCallbackHandled
+		var chunk rawChatResponse
+		if err := json.Unmarshal(record, &chunk); err != nil {
+			emit(ai.Token{Err: errors.New("decode Ollama stream: malformed response record")})
+			return
 		}
-		_, headers, _ := capture.metadata()
-		completion.RequestID = headers.Get("X-Request-Id")
+		if chunk.Error != "" {
+			emit(ai.Token{Err: ai.ClassifyProviderError(errors.New("ollama stream error"), 0, chunk.Error, requestID, response.Header)})
+			return
+		}
 		if chunk.Model != "" {
 			completion.Model = chunk.Model
 		}
-		if raw.Message.Role != "" && raw.Message.Role != "assistant" {
-			emit(ai.Token{Err: fmt.Errorf("invalid Ollama stream role %q", raw.Message.Role)})
-			return errSDKCallbackHandled
+		if chunk.Message.Role != "" && chunk.Message.Role != "assistant" {
+			emit(ai.Token{Err: fmt.Errorf("invalid Ollama stream role %q", chunk.Message.Role)})
+			return
 		}
-		if raw.Message.Thinking != "" {
+		if chunk.Message.Thinking != "" {
 			emit(ai.Token{Err: fmt.Errorf("%w: Ollama reasoning output", ai.ErrUnsupportedCapability)})
-			return errSDKCallbackHandled
+			return
 		}
 		if chunk.Message.Content != "" && !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentText, Text: chunk.Message.Content}}) {
-			return errSDKCallbackHandled
+			return
 		}
-		if len(raw.Message.ToolCalls) != len(chunk.Message.ToolCalls) {
-			emit(ai.Token{Err: fmt.Errorf("%w: malformed Ollama tool calls", ai.ErrInvalidToolCall)})
-			return errSDKCallbackHandled
-		}
-		for index, sdkCall := range chunk.Message.ToolCalls {
-			rawCall := raw.Message.ToolCalls[index]
-			name := strings.TrimSpace(sdkCall.Function.Name)
-			if name == "" || !jsonObject(rawCall.Function.Arguments) {
+		for _, wireCall := range chunk.Message.ToolCalls {
+			name := strings.TrimSpace(wireCall.Function.Name)
+			if name == "" || !jsonObject(wireCall.Function.Arguments) {
 				emit(ai.Token{Err: fmt.Errorf("%w: malformed Ollama tool call", ai.ErrInvalidToolCall)})
-				return errSDKCallbackHandled
+				return
 			}
-			id := strings.TrimSpace(sdkCall.ID)
+			id := strings.TrimSpace(wireCall.ID)
 			if id == "" {
 				id = ai.GenerateToolCallID(name)
 			}
@@ -171,82 +192,42 @@ func (m *Model) generateStream(ctx context.Context, req ai.AIRequest, emit func(
 				ID:   id,
 				Type: "function",
 				Name: name,
-				Args: append(json.RawMessage(nil), rawCall.Function.Arguments...),
+				Args: append(json.RawMessage(nil), wireCall.Function.Arguments...),
 			})
 		}
 		if !chunk.Done {
-			return nil
+			continue
 		}
 		// Ollama stores content and tool calls in separate fields, so emit all
 		// streamed text before completing calls for canonical replay.
 		for index := range pendingCalls {
 			call := pendingCalls[index].Clone()
 			if !emit(ai.Token{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &call}}) {
-				return errSDKCallbackHandled
+				return
 			}
 		}
 		completion.FinishReason = chunk.DoneReason
-		if raw.PromptEvalCount != nil || raw.EvalCount != nil {
+		if chunk.PromptEvalCount != nil || chunk.EvalCount != nil {
 			completion.UsageReported = true
-			if raw.PromptEvalCount != nil {
-				completion.Usage.InputTokens = *raw.PromptEvalCount
+			if chunk.PromptEvalCount != nil {
+				completion.Usage.InputTokens = *chunk.PromptEvalCount
 			}
-			if raw.EvalCount != nil {
-				completion.Usage.OutputTokens = *raw.EvalCount
+			if chunk.EvalCount != nil {
+				completion.Usage.OutputTokens = *chunk.EvalCount
 			}
 		}
-		completion.Raw = append(json.RawMessage(nil), record...)
+		completion.Raw = record
 		snapshot := completion
 		snapshot.Raw = append(json.RawMessage(nil), completion.Raw...)
-		if !emit(ai.Token{Completion: &snapshot}) {
-			return errSDKCallbackHandled
-		}
-		return errSDKStreamDone
-	})
-
-	if errors.Is(err, errSDKStreamDone) || errors.Is(err, errSDKCallbackHandled) {
+		emit(ai.Token{Completion: &snapshot})
 		return
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		emit(ai.Token{Err: ctxErr})
 		return
 	}
-	status, headers, errorBody := capture.metadata()
-	if status == 0 {
-		if err != nil {
-			emit(ai.Token{Err: ai.ClassifyProviderError(err, 0, "", "", nil)})
-			return
-		}
-		emit(ai.Token{Err: io.ErrUnexpectedEOF})
-		return
-	}
-	if err != nil && status >= http.StatusMultipleChoices && status < http.StatusBadRequest {
-		// A redirect may have been captured before its target failed or the
-		// redirect policy rejected it. Preserve that later client error.
-		emit(ai.Token{Err: ai.ClassifyProviderError(err, 0, "", headers.Get("X-Request-Id"), headers)})
-		return
-	}
-	if status < http.StatusOK || status >= http.StatusMultipleChoices {
-		httpErr := newHTTPError(status, errorBody)
-		emit(ai.Token{Err: ai.ClassifyProviderError(httpErr, status, ollamaErrorCode(errorBody), headers.Get("X-Request-Id"), headers)})
-		return
-	}
-	if err != nil {
-		record := capture.unconsumedRecord()
-		if len(record) == 0 {
-			emit(ai.Token{Err: ai.ClassifyProviderError(err, 0, "", headers.Get("X-Request-Id"), headers)})
-			return
-		}
-		var inBand struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(record, &inBand) == nil && inBand.Error != "" {
-			emit(ai.Token{Err: ai.ClassifyProviderError(errors.New("ollama stream error"), 0, inBand.Error, headers.Get("X-Request-Id"), headers)})
-			return
-		}
-		// The SDK includes malformed response records verbatim in its error.
-		// Do not expose model output through errors or observation telemetry.
-		emit(ai.Token{Err: errors.New("decode Ollama SDK stream: malformed response record")})
+	if err := scanner.Err(); err != nil {
+		emit(ai.Token{Err: ai.ClassifyProviderError(err, 0, "", requestID, response.Header)})
 		return
 	}
 	emit(ai.Token{Err: io.ErrUnexpectedEOF})

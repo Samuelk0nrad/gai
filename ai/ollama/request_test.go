@@ -32,7 +32,7 @@ func TestBuildChatRequestMapsCanonicalToolRoundTripAndOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payload.Model != "test-model" || payload.Stream == nil || !*payload.Stream || payload.Think == nil || payload.Think.Value != false {
+	if payload.Model != "test-model" || !payload.Stream || payload.Think {
 		t.Fatalf("request identity = %#v", payload)
 	}
 	if !reflect.DeepEqual(payload.Options, map[string]any{"num_ctx": 8192, "num_predict": 123}) {

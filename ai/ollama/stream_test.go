@@ -18,13 +18,16 @@ import (
 	"github.com/lace-ai/gai/ai"
 )
 
-func TestGenerateStreamUsesOfficialSDKClient(t *testing.T) {
+func TestGenerateStreamUsesNativeChatClient(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/prefix/api/chat" {
-			t.Errorf("path = %q, want /prefix/api/chat", r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/prefix/api/chat" {
+			t.Errorf("request = %s %q, want POST /prefix/api/chat", r.Method, r.URL.Path)
 		}
-		if got := r.Header.Get("User-Agent"); !strings.HasPrefix(got, "ollama/") {
-			t.Errorf("User-Agent = %q, want official Ollama SDK user agent", got)
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		if got := r.Header.Get("User-Agent"); strings.HasPrefix(got, "ollama/") {
+			t.Errorf("User-Agent = %q, official Ollama SDK is still in use", got)
 		}
 		fmt.Fprintln(w, `{"model":"test","message":{"role":"assistant","content":"ok"},"done":true,"done_reason":"stop"}`)
 	}))
@@ -40,7 +43,26 @@ func TestGenerateStreamUsesOfficialSDKClient(t *testing.T) {
 	}
 }
 
-func TestGenerateStreamPreservesCanonicalToolSchemaThroughSDK(t *testing.T) {
+func TestGenerateStreamPreservesEscapedBaseURLPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.RequestURI != "/tenant%2Fname/api/chat" {
+			t.Errorf("RequestURI = %q, want /tenant%%2Fname/api/chat", r.RequestURI)
+		}
+		fmt.Fprintln(w, `{"model":"test","message":{"role":"assistant","content":"ok"},"done":true,"done_reason":"stop"}`)
+	}))
+	defer server.Close()
+
+	model, err := New(nil, WithBaseURL(server.URL+"/tenant%2Fname")).TypedModel("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectEvents(t, model.GenerateStream(context.Background(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "x")}}))
+	if len(events) != 2 || events[1].Completion == nil {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestGenerateStreamPreservesCanonicalToolSchema(t *testing.T) {
 	schema := json.RawMessage(`{"type":"object","properties":{"unit":{"type":"string","default":"celsius"},"location":{"$ref":"#/$defs/location"}},"$defs":{"location":{"type":"string"}},"additionalProperties":false}`)
 	var wantSchema any
 	if err := json.Unmarshal(schema, &wantSchema); err != nil {
@@ -244,6 +266,29 @@ func TestGenerateStreamClassifiesHTTPErrorsAndCancellation(t *testing.T) {
 	canceled := collectEvents(t, cancelModel.GenerateStream(ctx, ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "x")}}))
 	if len(canceled) > 1 || len(canceled) == 1 && !errors.Is(canceled[0].Err, context.DeadlineExceeded) {
 		t.Fatalf("canceled events = %#v", canceled)
+	}
+}
+
+func TestGenerateStreamCancellationInterruptsHTTPErrorBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	model, err := New(nil, WithBaseURL(server.URL)).TypedModel("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	var events []ai.Token
+	model.generateStream(ctx, ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "x")}}, func(token ai.Token) bool {
+		events = append(events, token)
+		return true
+	})
+	if len(events) != 1 || !errors.Is(events[0].Err, context.DeadlineExceeded) {
+		t.Fatalf("events = %#v", events)
 	}
 }
 
