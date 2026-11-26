@@ -56,6 +56,8 @@ func GenerateStructured[T any](ctx context.Context, model Model, req AIRequest, 
 }
 
 func generateResponse(ctx context.Context, model Model, req AIRequest) (AIResponse, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	var response AIResponse
 	for token := range model.GenerateStream(ctx, req) {
 		token = token.Clone()

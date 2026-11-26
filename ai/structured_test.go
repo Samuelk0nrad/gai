@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Samuelk0nrad/gai/ai"
 	"github.com/Samuelk0nrad/gai/structured"
@@ -15,6 +16,12 @@ type structuredScriptModel struct {
 	mu        sync.Mutex
 	responses [][]ai.Token
 	requests  []ai.AIRequest
+}
+
+type structuredModelFunc func(context.Context, ai.AIRequest) <-chan ai.Token
+
+func (f structuredModelFunc) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.Token {
+	return f(ctx, req)
 }
 
 func (m *structuredScriptModel) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.Token {
@@ -134,5 +141,40 @@ func TestGenerateStructuredReturnsStreamErrorAfterCompletion(t *testing.T) {
 	_, err = ai.GenerateStructured(t.Context(), model, ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "answer")}}, structured.Spec[map[string]any]{Schema: schema})
 	if !errors.Is(err, streamErr) {
 		t.Fatalf("error = %v, want stream error", err)
+	}
+}
+
+func TestGenerateStructuredCancelsStreamAfterEarlyError(t *testing.T) {
+	schema, err := structured.Raw("answer", json.RawMessage(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamErr := errors.New("stream failed")
+	stopped := make(chan struct{})
+	model := structuredModelFunc(func(ctx context.Context, _ ai.AIRequest) <-chan ai.Token {
+		out := make(chan ai.Token)
+		go func() {
+			defer close(stopped)
+			defer close(out)
+			if !ai.SendToken(ctx, out, ai.Token{Err: streamErr}) {
+				return
+			}
+			ai.SendToken(ctx, out, textToken(`{}`))
+		}()
+		return out
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	_, err = ai.GenerateStructured(ctx, model, ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "answer")}}, structured.Spec[map[string]any]{Schema: schema})
+	if !errors.Is(err, streamErr) {
+		t.Fatalf("error = %v, want stream error", err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		cancel()
+		<-stopped
+		t.Fatal("stream producer did not stop after the early error")
 	}
 }
