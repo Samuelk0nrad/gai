@@ -52,6 +52,19 @@ func TestToolDefinitionsRejectNonCanonicalToolName(t *testing.T) {
 	}
 }
 
+func TestNewRawSchemaToolRejectsEmptySchema(t *testing.T) {
+	t.Parallel()
+
+	for _, schema := range []json.RawMessage{nil, {}} {
+		_, err := loop.NewRawSchemaTool("empty", "Rejects an empty schema.", schema, func(context.Context, ai.ToolCall) (string, error) {
+			return "ok", nil
+		})
+		if !errors.Is(err, ai.ErrInvalidToolDefinition) {
+			t.Errorf("NewRawSchemaTool(%#v) error = %v, want ErrInvalidToolDefinition", schema, err)
+		}
+	}
+}
+
 func TestNewRawSchemaToolPreservesSchemaInDefinition(t *testing.T) {
 	t.Parallel()
 	raw := json.RawMessage(`{

@@ -182,6 +182,9 @@ func NewRawSchemaTool(name, description string, schema json.RawMessage, function
 	if function == nil {
 		return nil, fmt.Errorf("%w: tool function is nil", ai.ErrInvalidToolDefinition)
 	}
+	if len(schema) == 0 {
+		return nil, fmt.Errorf("%w: raw parameters schema is empty", ai.ErrInvalidToolDefinition)
+	}
 	tool := &functionTool{
 		name:         name,
 		description:  description,
