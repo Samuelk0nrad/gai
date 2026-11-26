@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -527,34 +528,69 @@ func TestCanonicalResponseProjectsTextReasoningAndToolCalls(t *testing.T) {
 	}
 }
 
-func TestSchemaNumbersRetainPrecisionInGeminiConfig(t *testing.T) {
+func TestSchemaNumbersRetainPrecisionAcrossGeminiTransports(t *testing.T) {
 	const exact = "9007199254740993"
-	tools, err := mapGenerateContentTools([]ai.ToolDefinition{{
-		Type: "function", Name: "bounded", Description: "Bounded input.",
-		Parameters: json.RawMessage(`{"type":"object","properties":{"value":{"type":"integer","maximum":` + exact + `}}}`),
-	}})
-	if err != nil {
-		t.Fatalf("mapGenerateContentTools: %v", err)
-	}
-	var config *genai.GenerateContentConfig
-	ensureConfig := func() *genai.GenerateContentConfig {
-		if config == nil {
-			config = &genai.GenerateContentConfig{}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
 		}
-		return config
-	}
-	if err := applyGenerateContentResponseFormat(ensureConfig, ai.ResponseFormat{
-		Type: ai.ResponseFormatJSONSchema, Name: "answer",
-		Schema: json.RawMessage(`{"type":"object","properties":{"value":{"type":"integer","maximum":` + exact + `}}}`),
-	}); err != nil {
-		t.Fatalf("applyGenerateContentResponseFormat: %v", err)
-	}
-	config.Tools = tools
-	encoded, err := json.Marshal(config)
+		if got := strings.Count(string(body), exact); got != 2 {
+			t.Errorf("exact numeric bound count = %d, want 2; payload: %s", got, body)
+		}
+		if !strings.Contains(string(body), `"customized":true`) {
+			t.Errorf("existing request customizer was not applied; payload: %s", body)
+		}
+		if strings.Contains(r.URL.Path, ":streamGenerateContent") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer server.Close()
+
+	provider := New("test-api-key", nil)
+	provider.baseURL = server.URL
+	provider.httpClient = server.Client()
+	model, err := provider.TypedModel("gemini-test", WithGenerateContentConfig(func(config *genai.GenerateContentConfig) error {
+		if config.HTTPOptions == nil {
+			config.HTTPOptions = &genai.HTTPOptions{}
+		}
+		config.HTTPOptions.ExtrasRequestProvider = func(body map[string]any) map[string]any {
+			body["customized"] = true
+			return body
+		}
+		return nil
+	}))
 	if err != nil {
-		t.Fatalf("marshal config: %v", err)
+		t.Fatal(err)
 	}
-	if got := strings.Count(string(encoded), exact); got != 2 {
-		t.Fatalf("exact numeric bound count = %d, want 2; payload: %s", got, encoded)
+	req := ai.AIRequest{
+		Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "answer")},
+		Tools: []ai.ToolDefinition{{
+			Type: "function", Name: "bounded", Description: "Bounded input.",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"value":{"type":"integer","maximum":` + exact + `}}}`),
+		}},
+		ResponseFormat: ai.ResponseFormat{
+			Type: ai.ResponseFormatJSONSchema, Name: "answer",
+			Schema: json.RawMessage(`{"type":"object","properties":{"value":{"type":"integer","maximum":` + exact + `}}}`),
+		},
+	}
+
+	if _, err := any(model).(ai.ModelGenerator).Generate(t.Context(), req); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	for token := range model.GenerateStream(t.Context(), req) {
+		if token.Err != nil {
+			t.Fatalf("GenerateStream: %v", token.Err)
+		}
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
 	}
 }

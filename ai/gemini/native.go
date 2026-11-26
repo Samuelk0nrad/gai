@@ -45,5 +45,83 @@ func (m *Model) generateContentConfig(req ai.AIRequest) (*genai.GenerateContentC
 			return nil, err
 		}
 	}
+	preserveGenerateContentSchemaNumbers(config)
 	return config, nil
+}
+
+func preserveGenerateContentSchemaNumbers(config *genai.GenerateContentConfig) {
+	if config == nil {
+		return
+	}
+
+	toolSchemas := make([][]any, len(config.Tools))
+	hasSchemas := config.ResponseJsonSchema != nil
+	for i, tool := range config.Tools {
+		if tool == nil {
+			continue
+		}
+		toolSchemas[i] = make([]any, len(tool.FunctionDeclarations))
+		for j, declaration := range tool.FunctionDeclarations {
+			if declaration == nil || declaration.ParametersJsonSchema == nil {
+				continue
+			}
+			toolSchemas[i][j] = declaration.ParametersJsonSchema
+			hasSchemas = true
+		}
+	}
+	if !hasSchemas {
+		return
+	}
+
+	if config.HTTPOptions == nil {
+		config.HTTPOptions = &genai.HTTPOptions{}
+	}
+	responseSchema := config.ResponseJsonSchema
+	customize := config.HTTPOptions.ExtrasRequestProvider
+	config.HTTPOptions.ExtrasRequestProvider = func(body map[string]any) map[string]any {
+		// The SDK converts dynamic fields through float64 before this hook runs.
+		// Restore the exact schemas so json.Number values reach the wire unchanged.
+		if generationConfig, ok := body["generationConfig"].(map[string]any); ok && responseSchema != nil {
+			generationConfig["responseJsonSchema"] = responseSchema
+		}
+		if tools := body["tools"]; tools != nil {
+			for i, schemas := range toolSchemas {
+				tool, ok := mapSliceItem(tools, i)
+				if !ok {
+					continue
+				}
+				declarations := tool["functionDeclarations"]
+				for j, schema := range schemas {
+					if schema == nil {
+						continue
+					}
+					if declaration, ok := mapSliceItem(declarations, j); ok {
+						declaration["parametersJsonSchema"] = schema
+					}
+				}
+			}
+		}
+		if customize != nil {
+			return customize(body)
+		}
+		return body
+	}
+}
+
+func mapSliceItem(values any, index int) (map[string]any, bool) {
+	switch values := values.(type) {
+	case []any:
+		if index >= len(values) {
+			return nil, false
+		}
+		value, ok := values[index].(map[string]any)
+		return value, ok
+	case []map[string]any:
+		if index >= len(values) {
+			return nil, false
+		}
+		return values[index], true
+	default:
+		return nil, false
+	}
 }
