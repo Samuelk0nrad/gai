@@ -54,7 +54,17 @@ func TestToolDefinitionsRejectNonCanonicalToolName(t *testing.T) {
 
 func TestNewRawSchemaToolPreservesSchemaInDefinition(t *testing.T) {
 	t.Parallel()
-	raw := json.RawMessage(`{"type":"object","properties":{"choice":{"oneOf":[{"const":"a"},{"const":"b"}]}},"required":["choice"],"additionalProperties":false}`)
+	raw := json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "choice": {
+      "description": "Choose <a> or b & explain why",
+      "oneOf": [{"const": "a"}, {"const": "b"}]
+    }
+  },
+  "required": ["choice"],
+  "additionalProperties": false
+}`)
 
 	tool, err := loop.NewRawSchemaTool("choose", "Chooses a value.", raw, func(context.Context, ai.ToolCall) (string, error) {
 		return "ok", nil

@@ -153,6 +153,8 @@ type ToolFunc func(context.Context, ai.ToolCall) (string, error)
 type functionTool struct {
 	name, description string
 	paramsJSON        []byte
+	rawSchema         json.RawMessage
+	rawSchemaSet      bool
 	function          ToolFunc
 }
 
@@ -177,7 +179,20 @@ func NewTool(name, description string, params ai.ToolParameters, function ToolFu
 // The schema is copied and passed to every provider without reducing it to the
 // typed ToolParameters subset.
 func NewRawSchemaTool(name, description string, schema json.RawMessage, function ToolFunc) (Tool, error) {
-	return NewTool(name, description, ai.ToolParameters{RawSchema: append(json.RawMessage(nil), schema...)}, function)
+	if function == nil {
+		return nil, fmt.Errorf("%w: tool function is nil", ai.ErrInvalidToolDefinition)
+	}
+	tool := &functionTool{
+		name:         name,
+		description:  description,
+		rawSchema:    append(json.RawMessage(nil), schema...),
+		rawSchemaSet: true,
+		function:     function,
+	}
+	if _, err := ToolDefinitions([]Tool{tool}); err != nil {
+		return nil, err
+	}
+	return tool, nil
 }
 
 // Name returns the validated tool identifier.
@@ -188,6 +203,9 @@ func (t *functionTool) Description() string { return t.description }
 
 // Params returns an independent parameter snapshot, preserving JSON numbers.
 func (t *functionTool) Params() ai.ToolParameters {
+	if t.rawSchemaSet {
+		return ai.ToolParameters{RawSchema: append(json.RawMessage(nil), t.rawSchema...)}
+	}
 	var params ai.ToolParameters
 	decoder := json.NewDecoder(bytes.NewReader(t.paramsJSON))
 	decoder.UseNumber()
