@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -524,5 +525,254 @@ func TestCanonicalResponseProjectsTextReasoningAndToolCalls(t *testing.T) {
 	}
 	if len(toolCalls) != 1 || toolCalls[0].Name != "search" {
 		t.Fatalf("unexpected tool calls: %#v", toolCalls)
+	}
+}
+
+func TestGenerateContentConfigCopiesSharedHTTPOptionsBeforeWrapping(t *testing.T) {
+	customized := 0
+	shared := &genai.HTTPOptions{
+		ExtrasRequestProvider: func(body map[string]any) map[string]any {
+			customized++
+			body["customized"] = true
+			return body
+		},
+	}
+	model := &Model{configHooks: []func(*genai.GenerateContentConfig) error{
+		func(config *genai.GenerateContentConfig) error {
+			config.HTTPOptions = shared
+			return nil
+		},
+	}}
+
+	configs := make([]*genai.GenerateContentConfig, 2)
+	for i, maximum := range []string{"1", "2"} {
+		var err error
+		configs[i], err = model.generateContentConfig(ai.AIRequest{
+			Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "answer")},
+			ResponseFormat: ai.ResponseFormat{
+				Type:   ai.ResponseFormatJSONSchema,
+				Name:   "answer",
+				Schema: json.RawMessage(`{"type":"integer","maximum":` + maximum + `}`),
+			},
+		})
+		if err != nil {
+			t.Fatalf("generate config %d: %v", i, err)
+		}
+	}
+
+	if configs[0].HTTPOptions == shared || configs[1].HTTPOptions == shared {
+		t.Error("request config retained the caller's shared HTTPOptions pointer")
+	}
+	if configs[0].HTTPOptions == configs[1].HTTPOptions {
+		t.Error("requests share an HTTPOptions pointer")
+	}
+	for i, config := range configs {
+		body := config.HTTPOptions.ExtrasRequestProvider(map[string]any{
+			"generationConfig": map[string]any{},
+		})
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal customized body %d: %v", i, err)
+		}
+		want := `"maximum":` + []string{"1", "2"}[i]
+		if !strings.Contains(string(encoded), want) {
+			t.Errorf("request %d did not retain its schema %q: %s", i, want, encoded)
+		}
+		if body["customized"] != true {
+			t.Errorf("request %d did not invoke the caller's customizer: %#v", i, body)
+		}
+	}
+	if customized != 2 {
+		t.Fatalf("caller customizer calls = %d, want 2", customized)
+	}
+}
+
+func TestGenerateContentConfigDoesNotMutateSharedResponseSchema(t *testing.T) {
+	sharedMaximum := map[string]any{"maximum": json.Number("10")}
+	sharedSchema := map[string]any{
+		"properties": map[string]any{"value": sharedMaximum},
+	}
+	model := &Model{configHooks: []func(*genai.GenerateContentConfig) error{
+		func(config *genai.GenerateContentConfig) error {
+			config.ResponseJsonSchema = sharedSchema
+			config.HTTPOptions = &genai.HTTPOptions{
+				ExtraBody: map[string]any{
+					"generationConfig": map[string]any{
+						"responseJsonSchema": map[string]any{
+							"properties": map[string]any{
+								"value": map[string]any{"maximum": json.Number("20")},
+							},
+						},
+					},
+				},
+			}
+			return nil
+		},
+	}}
+
+	config, err := model.generateContentConfig(ai.AIRequest{
+		Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "answer")},
+	})
+	if err != nil {
+		t.Fatalf("generate config: %v", err)
+	}
+	body := config.HTTPOptions.ExtrasRequestProvider(map[string]any{
+		"generationConfig": map[string]any{},
+	})
+	generationConfig := body["generationConfig"].(map[string]any)
+	responseSchema := generationConfig["responseJsonSchema"].(map[string]any)
+	properties := responseSchema["properties"].(map[string]any)
+	value := properties["value"].(map[string]any)
+	if got := value["maximum"]; got != json.Number("20") {
+		t.Fatalf("request schema maximum = %v, want 20", got)
+	}
+	if got := sharedMaximum["maximum"]; got != json.Number("10") {
+		t.Fatalf("shared schema maximum = %v, want 10", got)
+	}
+}
+
+func TestSchemaNumbersRetainPrecisionAcrossGeminiTransports(t *testing.T) {
+	const exact = "9007199254740993"
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
+		if got := strings.Count(string(body), exact); got != 2 {
+			t.Errorf("exact numeric bound count = %d, want 2; payload: %s", got, body)
+		}
+		if !strings.Contains(string(body), `"customized":true`) {
+			t.Errorf("existing request customizer was not applied; payload: %s", body)
+		}
+		if strings.Contains(r.URL.Path, ":streamGenerateContent") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer server.Close()
+
+	provider := New("test-api-key", nil)
+	provider.baseURL = server.URL
+	provider.httpClient = server.Client()
+	model, err := provider.TypedModel("gemini-test", WithGenerateContentConfig(func(config *genai.GenerateContentConfig) error {
+		if config.HTTPOptions == nil {
+			config.HTTPOptions = &genai.HTTPOptions{}
+		}
+		config.HTTPOptions.ExtrasRequestProvider = func(body map[string]any) map[string]any {
+			body["customized"] = true
+			return body
+		}
+		return nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := ai.AIRequest{
+		Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "answer")},
+		Tools: []ai.ToolDefinition{{
+			Type: "function", Name: "bounded", Description: "Bounded input.",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"value":{"type":"integer","maximum":` + exact + `}}}`),
+		}},
+		ResponseFormat: ai.ResponseFormat{
+			Type: ai.ResponseFormatJSONSchema, Name: "answer",
+			Schema: json.RawMessage(`{"type":"object","properties":{"value":{"type":"integer","maximum":` + exact + `}}}`),
+		},
+	}
+
+	if _, err := any(model).(ai.ModelGenerator).Generate(t.Context(), req); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	for token := range model.GenerateStream(t.Context(), req) {
+		if token.Err != nil {
+			t.Fatalf("GenerateStream: %v", token.Err)
+		}
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
+func TestSchemaExtraBodyOverridesReachGeminiTransport(t *testing.T) {
+	const exact = "9007199254740993"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
+		payload := string(body)
+		if got := strings.Count(payload, exact); got != 2 {
+			t.Errorf("exact numeric bound count = %d, want 2; payload: %s", got, payload)
+		}
+		for _, override := range []string{`"maximum":20`, `"maximum":30`} {
+			if !strings.Contains(payload, override) {
+				t.Errorf("ExtraBody override %s is missing; payload: %s", override, payload)
+			}
+		}
+		if strings.Contains(payload, `"maximum":10`) {
+			t.Errorf("original schema value replaced an ExtraBody override; payload: %s", payload)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer server.Close()
+
+	provider := New("test-api-key", nil)
+	provider.baseURL = server.URL
+	provider.httpClient = server.Client()
+	model, err := provider.TypedModel("gemini-test", WithGenerateContentConfig(func(config *genai.GenerateContentConfig) error {
+		if config.HTTPOptions == nil {
+			config.HTTPOptions = &genai.HTTPOptions{}
+		}
+		config.HTTPOptions.ExtraBody = map[string]any{
+			"generationConfig": map[string]any{
+				"responseJsonSchema": map[string]any{
+					"properties": map[string]any{
+						"responseValue": map[string]any{"maximum": json.Number("20")},
+					},
+				},
+			},
+			"tools": []any{
+				map[string]any{
+					"functionDeclarations": []any{
+						map[string]any{
+							"name": "bounded",
+							"parametersJsonSchema": map[string]any{
+								"type": "object",
+								"properties": map[string]any{
+									"exact":     map[string]any{"type": "integer", "maximum": json.Number(exact)},
+									"toolValue": map[string]any{"type": "integer", "maximum": json.Number("30")},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		return nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := ai.AIRequest{
+		Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "answer")},
+		Tools: []ai.ToolDefinition{{
+			Type: "function", Name: "bounded", Description: "Bounded input.",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"exact":{"type":"integer","maximum":` + exact + `},"toolValue":{"type":"integer","maximum":10}}}`),
+		}},
+		ResponseFormat: ai.ResponseFormat{
+			Type: ai.ResponseFormatJSONSchema, Name: "answer",
+			Schema: json.RawMessage(`{"type":"object","properties":{"exact":{"type":"integer","maximum":` + exact + `},"responseValue":{"type":"integer","maximum":10}}}`),
+		},
+	}
+
+	if _, err := any(model).(ai.ModelGenerator).Generate(t.Context(), req); err != nil {
+		t.Fatalf("Generate: %v", err)
 	}
 }

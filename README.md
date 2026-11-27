@@ -246,6 +246,19 @@ func (t *LookupOrderTool) Function(
 
 Use `loop.NewTool(name, description, params, handler)` to wrap a handler without a
 custom struct. A non-nil handler error becomes a tool failure the model can read.
+For schemas outside the typed parameter subset—such as `oneOf`, `anyOf`, nullable
+unions, formats, patterns, or numeric bounds—use `loop.NewRawSchemaTool`. Its
+`json.RawMessage` schema is copied and passed to every provider unchanged:
+
+```go
+tool, err := loop.NewRawSchemaTool(
+  "choose",
+  "Choose a candidate.",
+  json.RawMessage(`{"type":"object","properties":{"id":{"anyOf":[{"type":"string","format":"uuid"},{"type":"null"}]}},"required":["id"]}`),
+  choose,
+)
+```
+
 `ToolResultProcessor` can transform results before they reach the conversation,
 events, or loop telemetry.
 
@@ -282,6 +295,42 @@ workflow, err := support.NewRun(ctx, agent.RunInput{
   },
 })
 ```
+
+## Typed structured output
+
+The `structured` package generates or accepts JSON Schema, validates the complete
+model response, decodes it into a Go type, and retains an isolated copy of the
+exact accepted JSON:
+
+```go
+type Estimate struct {
+  Hours int      `json:"hours" jsonschema:"minimum=1"`
+  Notes []string `json:"notes"`
+}
+
+schema, err := structured.For[Estimate]("estimate")
+if err != nil {
+  return err
+}
+
+result, err := agent.RunStructured(ctx, estimator, input, structured.Spec[Estimate]{
+  Schema: schema,
+  Retry: structured.ValidationRetryPolicy{MaxRetries: 1}, // opt-in
+})
+if err != nil {
+  return err
+}
+fmt.Println(result.Value.Hours, string(result.JSON))
+```
+
+Use `structured.Raw(name, json.RawMessage(...))` when an application already owns
+the schema. Unsupported keywords are preserved; validation errors expose an RFC
+6901 path, and decode/validation errors retain the rejected JSON for diagnostics.
+Validation retries are disabled by default and bounded separately from provider
+retries. `ai.GenerateStructured` provides the same `structured.Result[T]` for a
+direct model request. The lower-level `ai.ResponseFormat` remains available when
+an application wants provider formatting without typed validation. Structured
+agent runs currently do not support durable continuation or terminal tools.
 
 ## Ordered workflow events
 

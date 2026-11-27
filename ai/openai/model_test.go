@@ -1225,3 +1225,36 @@ func TestModelGenerateStreamClassifiesProviderRateLimit(t *testing.T) {
 	}
 	t.Fatal("expected stream error")
 }
+
+func TestSchemaNumbersRetainPrecisionAcrossOpenAITransports(t *testing.T) {
+	const exact = "9007199254740993"
+	req := ai.AIRequest{
+		Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "answer")},
+		Tools: []ai.ToolDefinition{{
+			Type: "function", Name: "bounded", Description: "Bounded input.",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"value":{"type":"integer","maximum":` + exact + `}}}`),
+		}},
+		ResponseFormat: ai.ResponseFormat{
+			Type: ai.ResponseFormatJSONSchema, Name: "answer",
+			Schema: json.RawMessage(`{"type":"object","properties":{"value":{"type":"integer","maximum":` + exact + `}}}`),
+		},
+	}
+
+	chat, err := buildChatCompletionParams(GPT41Mini, req, false)
+	if err != nil {
+		t.Fatalf("buildChatCompletionParams: %v", err)
+	}
+	responses, err := buildResponsesParams(GPT41Mini, req)
+	if err != nil {
+		t.Fatalf("buildResponsesParams: %v", err)
+	}
+	for name, params := range map[string]any{"chat completions": chat, "responses": responses} {
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			t.Fatalf("marshal %s params: %v", name, err)
+		}
+		if got := strings.Count(string(encoded), exact); got != 2 {
+			t.Fatalf("%s exact numeric bound count = %d, want 2; payload: %s", name, got, encoded)
+		}
+	}
+}

@@ -2237,6 +2237,196 @@ func TestIterationDeltaMessagesPreservesThoughtOnlyResponses(t *testing.T) {
 	}
 }
 
+func TestLoopOutputValidationSkipsRejectedRequiredToolResponse(t *testing.T) {
+	model := &scriptedStreamModel{sequences: [][]ai.Token{
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: "I will answer without a tool."}}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-1", Type: "function", Name: "echo", Args: json.RawMessage(`{"text":"payload"}`)}}}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(`{"count":2}`)}}},
+	}}
+	l := loop.New(model, []loop.Tool{loop.NewEchoTool()}, testPromptBuilder(), nil)
+	l.ToolTransport = loop.ToolTransportText
+	l.ToolChoice = ai.ToolChoice{Mode: ai.ToolChoiceRequired}
+	validationCalls := 0
+	l.OutputValidation = &loop.OutputValidation{
+		Validate: func(raw json.RawMessage) error {
+			validationCalls++
+			if string(raw) != `{"count":2}` {
+				return fmt.Errorf("validated rejected response %q", raw)
+			}
+			return nil
+		},
+	}
+
+	events := collectLoopEvents(t, l, context.Background())
+	if err := loopError(events); err != nil {
+		t.Fatalf("loop error: %v", err)
+	}
+	if validationCalls != 1 {
+		t.Fatalf("validation calls = %d, want only the accepted final response", validationCalls)
+	}
+	if got := len(model.Requests()); got != 3 {
+		t.Fatalf("requests = %d, want rejected text, required tool call, and final output", got)
+	}
+	for _, event := range events {
+		if event.IterationCount == 1 && (event.Type == loop.EventToken || event.Type == loop.EventIterationDone) {
+			t.Fatalf("rejected required-tool response must not be observable, got %#v", event)
+		}
+	}
+}
+
+func TestLoopOutputValidationPreservesMixedToolErrorRecovery(t *testing.T) {
+	tool := &countingTool{}
+	model := &scriptedStreamModel{sequences: [][]ai.Token{
+		{
+			{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-count", Type: "function", Name: "count", Args: json.RawMessage(`{"text":"valid"}`)}}},
+			{Part: &ai.ContentPart{Kind: ai.ContentToolCall, ToolCall: &ai.ToolCall{ID: "call-missing", Type: "function", Name: "missing", Args: json.RawMessage(`{"text":"unknown"}`)}}},
+		},
+		{{Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: json.RawMessage(`{"count":2}`)}}},
+	}}
+	l := loop.New(model, []loop.Tool{tool}, testPromptBuilder(), nil)
+	l.OutputValidation = &loop.OutputValidation{
+		Validate: func(raw json.RawMessage) error {
+			if string(raw) != `{"count":2}` {
+				return fmt.Errorf("validated %q", raw)
+			}
+			return nil
+		},
+	}
+
+	if err := loopError(collectLoopEvents(t, l, context.Background())); err != nil {
+		t.Fatalf("loop error: %v", err)
+	}
+	if calls := tool.calls.Load(); calls != 1 {
+		t.Fatalf("valid sibling tool calls = %d, want 1", calls)
+	}
+	if len(l.Iterations) != 2 {
+		t.Fatalf("accepted iterations = %d, want tool batch and final output", len(l.Iterations))
+	}
+	if len(l.Iterations[0].Parts) != 2 || l.Iterations[0].Parts[1].ToolResp == nil ||
+		!errors.Is(l.Iterations[0].Parts[1].ToolResp.Err, loop.ErrToolNotFound) {
+		t.Fatalf("mixed tool batch did not preserve the unknown-tool result: %#v", l.Iterations[0].Parts)
+	}
+}
+
+func TestLoopOutputValidationRetriesBeforeCommit(t *testing.T) {
+	validationErr := errors.New("count must be positive")
+	model := &scriptedStreamModel{sequences: [][]ai.Token{
+		{
+			{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"count":0}`}},
+			{Completion: &ai.Completion{Usage: ai.Usage{OutputTokens: 3}, UsageReported: true}},
+		},
+		{
+			{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"count":2}`}},
+			{Completion: &ai.Completion{Usage: ai.Usage{OutputTokens: 4}, UsageReported: true}},
+		},
+	}}
+	l := loop.New(model, nil, testPromptBuilder(), nil)
+	l.OutputValidation = &loop.OutputValidation{
+		MaxRetries: 1,
+		Validate: func(raw json.RawMessage) error {
+			if string(raw) != `{"count":2}` {
+				return validationErr
+			}
+			return nil
+		},
+		RetryPrompt: func(error) string { return "return a positive count" },
+	}
+
+	events := collectLoopEvents(t, l, context.Background())
+	if err := loopError(events); err != nil {
+		t.Fatalf("loop error: %v", err)
+	}
+	var retries []loop.Event
+	var completed []loop.Event
+	for _, event := range events {
+		switch event.Type {
+		case loop.EventRetry:
+			retries = append(retries, event)
+		case loop.EventIterationDone:
+			completed = append(completed, event)
+		}
+	}
+	if len(retries) != 1 || retries[0].RetryReason != "structured_validation" || retries[0].Iteration == nil || retries[0].Iteration.Usage.OutputTokens != 3 {
+		t.Fatalf("retry events = %#v", retries)
+	}
+	if len(completed) != 1 || completed[0].Iteration == nil || completed[0].Iteration.Usage.OutputTokens != 4 {
+		t.Fatalf("completed events = %#v", completed)
+	}
+	if len(l.Iterations) != 1 || l.Iterations[0].Conversation[len(l.Iterations[0].Conversation)-1].Text() != `{"count":2}` {
+		t.Fatalf("accepted iterations = %#v", l.Iterations)
+	}
+	requests := model.Requests()
+	if len(requests) != 2 || len(requests[1].Messages) != len(requests[0].Messages)+1 || requests[1].Messages[len(requests[1].Messages)-1].Text() != "return a positive count" {
+		t.Fatalf("retry requests = %#v", requests)
+	}
+}
+
+func TestLoopOutputValidationExhaustionPreservesError(t *testing.T) {
+	validationErr := errors.New("invalid at /count")
+	model := &scriptedStreamModel{sequences: [][]ai.Token{{
+		{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"count":0}`}},
+	}}}
+	l := loop.New(model, nil, testPromptBuilder(), nil)
+	l.OutputValidation = &loop.OutputValidation{
+		Validate: func(json.RawMessage) error { return validationErr },
+	}
+
+	err := loopError(collectLoopEvents(t, l, context.Background()))
+	if !errors.Is(err, loop.ErrMaxValidationRetries) || !errors.Is(err, validationErr) {
+		t.Fatalf("error = %v, want exhaustion wrapping validation error", err)
+	}
+	if len(l.Iterations) != 0 {
+		t.Fatalf("committed iterations = %d, want 0", len(l.Iterations))
+	}
+}
+
+func TestLoopOutputValidationRetryBudgetIsIndependentFromProviderRetries(t *testing.T) {
+	model := &scriptedStreamModel{sequences: [][]ai.Token{
+		{{Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("provider before validation")}}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"count":0}`}}},
+		{{Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient, Err: errors.New("provider after validation")}}},
+		{{Part: &ai.ContentPart{Kind: ai.ContentText, Text: `{"count":2}`}}},
+	}}
+	l := loop.New(model, nil, testPromptBuilder(), nil)
+	l.RetryPolicy = &loop.RetryPolicy{MaxRetries: 1}
+	l.OutputValidation = &loop.OutputValidation{
+		MaxRetries: 1,
+		Validate: func(raw json.RawMessage) error {
+			if string(raw) != `{"count":2}` {
+				return errors.New("count must be positive")
+			}
+			return nil
+		},
+	}
+
+	if err := loopError(collectLoopEvents(t, l, context.Background())); err != nil {
+		t.Fatalf("loop error: %v", err)
+	}
+	if len(model.Requests()) != 4 {
+		t.Fatalf("requests = %d, want 4", len(model.Requests()))
+	}
+}
+
+func TestLoopOutputValidationAcceptsCanonicalJSONContent(t *testing.T) {
+	raw := json.RawMessage(`{"count":2}`)
+	model := &scriptedStreamModel{sequences: [][]ai.Token{{{
+		Part: &ai.ContentPart{Kind: ai.ContentJSON, JSON: raw},
+	}}}}
+	l := loop.New(model, nil, testPromptBuilder(), nil)
+	l.OutputValidation = &loop.OutputValidation{
+		Validate: func(got json.RawMessage) error {
+			if string(got) != string(raw) {
+				return fmt.Errorf("validated %q, want %q", got, raw)
+			}
+			return nil
+		},
+	}
+
+	if err := loopError(collectLoopEvents(t, l, context.Background())); err != nil {
+		t.Fatalf("loop error: %v", err)
+	}
+}
+
 func requestText(request ai.AIRequest) string {
 	var text strings.Builder
 	for _, message := range request.Messages {

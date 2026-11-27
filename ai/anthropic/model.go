@@ -11,6 +11,7 @@ import (
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/jsonvalue"
 	"github.com/Samuelk0nrad/gai/internal/mediainput"
 	"github.com/Samuelk0nrad/gai/internal/modelcatalog"
 	"github.com/Samuelk0nrad/gai/internal/streamtext"
@@ -588,7 +589,7 @@ func mapTools(defs []ai.ToolDefinition) ([]antropic.ToolUnionParam, error) {
 			return nil, err
 		}
 		var schema map[string]any
-		if err := json.Unmarshal(def.Parameters, &schema); err != nil {
+		if err := jsonvalue.Decode(def.Parameters, &schema); err != nil {
 			return nil, fmt.Errorf("decode anthropic tool schema: %w", err)
 		}
 		tool := antropic.ToolUnionParamOfTool(antropic.ToolInputSchemaParam{ExtraFields: schema}, def.Name)
@@ -635,7 +636,7 @@ func mapResponseFormat(format ai.ResponseFormat) (*antropic.OutputConfigParam, e
 		return nil, fmt.Errorf("%w: anthropic JSON object responses require a JSON schema", ai.ErrUnsupportedCapability)
 	case ai.ResponseFormatJSONSchema:
 		var schema map[string]any
-		if err := json.Unmarshal(format.Schema, &schema); err != nil {
+		if err := jsonvalue.Decode(format.Schema, &schema); err != nil {
 			return nil, fmt.Errorf("decode anthropic response schema: %w", err)
 		}
 		return &antropic.OutputConfigParam{Format: antropic.JSONOutputFormatParam{Schema: schema}}, nil

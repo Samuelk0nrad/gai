@@ -11,6 +11,7 @@ import (
 
 	"github.com/Samuelk0nrad/gai"
 	"github.com/Samuelk0nrad/gai/ai"
+	"github.com/Samuelk0nrad/gai/internal/jsonvalue"
 	sdk "github.com/openai/openai-go"
 	"github.com/openai/openai-go/packages/param"
 	"github.com/openai/openai-go/responses"
@@ -511,7 +512,7 @@ func applyTools(params *sdk.ChatCompletionNewParams, definitions []ai.ToolDefini
 			return err
 		}
 		var schema shared.FunctionParameters
-		if err := json.Unmarshal(definition.Parameters, &schema); err != nil {
+		if err := jsonvalue.Decode(definition.Parameters, &schema); err != nil {
 			return fmt.Errorf("decode tool %q schema: %w", definition.Name, err)
 		}
 		params.Tools = append(params.Tools, sdk.ChatCompletionToolParam{Function: shared.FunctionDefinitionParam{Name: definition.Name, Description: param.NewOpt(definition.Description), Parameters: schema}})
@@ -560,7 +561,7 @@ func applyResponseFormat(params *sdk.ChatCompletionNewParams, format ai.Response
 		return nil
 	case ai.ResponseFormatJSONSchema:
 		var schema any
-		if err := json.Unmarshal(format.Schema, &schema); err != nil {
+		if err := jsonvalue.Decode(format.Schema, &schema); err != nil {
 			return err
 		}
 		params.ResponseFormat.OfJSONSchema = &shared.ResponseFormatJSONSchemaParam{JSONSchema: shared.ResponseFormatJSONSchemaJSONSchemaParam{Name: format.Name, Schema: schema}}

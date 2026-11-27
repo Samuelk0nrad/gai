@@ -1084,15 +1084,23 @@ func TestDurableMetadataHasSameLosslessTypesBeforeAndAfterResume(t *testing.T) {
 	}
 }
 
-func TestDurablePauseInterruptsRetryBackoff(t *testing.T) {
+func TestDurablePauseDuringRetryBackoffPreservesRetryBudget(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		entered := make(chan struct{})
-		model := &durableModel{responses: [][]ai.Token{{{Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient}}}}}
+		var waits atomic.Int32
+		model := &durableModel{responses: [][]ai.Token{
+			{{Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient}}},
+			{{Err: &ai.ProviderError{Kind: ai.ProviderErrorTransient}}},
+			response("unexpected extra retry"),
+		}}
 		def := durableDefinition(model)
 		def.RetryPolicy = &loop.RetryPolicy{MaxRetries: 1, InitialBackoff: time.Hour, Wait: func(ctx context.Context, _ time.Duration) error {
-			close(entered)
-			<-ctx.Done()
-			return ctx.Err()
+			if waits.Add(1) == 1 {
+				close(entered)
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			return nil
 		}}
 		store := &checkpointStore{}
 		w := newDurableRun(t, agent.New(def), store)
@@ -1105,6 +1113,15 @@ func TestDurablePauseInterruptsRetryBackoff(t *testing.T) {
 		<-done
 		if w.Result().Status != agent.StatusPaused || model.count() != 1 || store.load().Stages[0].Continuation.RetryCount != 1 {
 			t.Fatal(w.Result(), model.count())
+		}
+
+		w, err := agent.New(def).Resume(context.Background(), store.load(), agent.ResumeInput{}, store.durability())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = w.Run(context.Background())
+		if !errors.Is(err, loop.ErrMaxRetries) || model.count() != 2 || waits.Load() != 1 {
+			t.Fatalf("resume error = %v, model calls = %d, waits = %d", err, model.count(), waits.Load())
 		}
 	})
 }

@@ -92,6 +92,9 @@ type Loop struct {
 	Reasoning ai.ReasoningConfig
 	// RetryPolicy enables classified retries. Nil disables retries.
 	RetryPolicy *RetryPolicy
+	// OutputValidation validates a final no-tool response before commit. Nil
+	// preserves ordinary execution. Validation retries are independently bounded.
+	OutputValidation *OutputValidation
 	// PromptBuilder constructs the prompt for each iteration.
 	PromptBuilder modelinput.PromptBuilder
 	// ToolResultProcessor optionally processes tool responses before they are recorded, emitted, or captured by loop telemetry.
@@ -144,6 +147,23 @@ func (l *Loop) Validate() error {
 	if l.RetryPolicy != nil {
 		if err := l.RetryPolicy.Validate(); err != nil {
 			return err
+		}
+	}
+	if l.OutputValidation != nil {
+		if err := l.OutputValidation.validate(); err != nil {
+			return err
+		}
+		if l.Continuation != nil {
+			return fmt.Errorf("%w: durable continuation is not supported", ErrOutputValidationConfig)
+		}
+		for _, tool := range l.Tools {
+			options, err := optionsForTool(tool)
+			if err != nil {
+				return err
+			}
+			if options.Terminal {
+				return fmt.Errorf("%w: terminal tools are not supported", ErrOutputValidationConfig)
+			}
 		}
 	}
 	if err := l.ResponseFormat.Validate(); err != nil {
