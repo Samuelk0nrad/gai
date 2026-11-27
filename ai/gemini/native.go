@@ -88,7 +88,7 @@ func preserveGenerateContentSchemaNumbers(config *genai.GenerateContentConfig) {
 		// Restore the exact schemas, then reapply the ExtraBody snapshot because the
 		// SDK merges those explicit overrides before calling this hook.
 		if generationConfig, ok := body["generationConfig"].(map[string]any); ok && responseSchema != nil {
-			generationConfig["responseJsonSchema"] = responseSchema
+			generationConfig["responseJsonSchema"] = cloneJSONValue(responseSchema)
 		}
 		if tools := body["tools"]; tools != nil {
 			for i, schemas := range toolSchemas {

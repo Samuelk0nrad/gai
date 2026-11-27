@@ -587,6 +587,50 @@ func TestGenerateContentConfigCopiesSharedHTTPOptionsBeforeWrapping(t *testing.T
 	}
 }
 
+func TestGenerateContentConfigDoesNotMutateSharedResponseSchema(t *testing.T) {
+	sharedMaximum := map[string]any{"maximum": json.Number("10")}
+	sharedSchema := map[string]any{
+		"properties": map[string]any{"value": sharedMaximum},
+	}
+	model := &Model{configHooks: []func(*genai.GenerateContentConfig) error{
+		func(config *genai.GenerateContentConfig) error {
+			config.ResponseJsonSchema = sharedSchema
+			config.HTTPOptions = &genai.HTTPOptions{
+				ExtraBody: map[string]any{
+					"generationConfig": map[string]any{
+						"responseJsonSchema": map[string]any{
+							"properties": map[string]any{
+								"value": map[string]any{"maximum": json.Number("20")},
+							},
+						},
+					},
+				},
+			}
+			return nil
+		},
+	}}
+
+	config, err := model.generateContentConfig(ai.AIRequest{
+		Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "answer")},
+	})
+	if err != nil {
+		t.Fatalf("generate config: %v", err)
+	}
+	body := config.HTTPOptions.ExtrasRequestProvider(map[string]any{
+		"generationConfig": map[string]any{},
+	})
+	generationConfig := body["generationConfig"].(map[string]any)
+	responseSchema := generationConfig["responseJsonSchema"].(map[string]any)
+	properties := responseSchema["properties"].(map[string]any)
+	value := properties["value"].(map[string]any)
+	if got := value["maximum"]; got != json.Number("20") {
+		t.Fatalf("request schema maximum = %v, want 20", got)
+	}
+	if got := sharedMaximum["maximum"]; got != json.Number("10") {
+		t.Fatalf("shared schema maximum = %v, want 10", got)
+	}
+}
+
 func TestSchemaNumbersRetainPrecisionAcrossGeminiTransports(t *testing.T) {
 	const exact = "9007199254740993"
 	requests := 0
