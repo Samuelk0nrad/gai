@@ -100,6 +100,10 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 			})
 		}
 	}()
+	// cutOff is a function call the output limit ended mid-arguments. The
+	// response.incomplete event that follows says why, so that error is
+	// reported instead of the call's broken JSON.
+	var cutOff error
 	for stream.Next() {
 		event := stream.Current()
 		switch event.Type {
@@ -144,6 +148,10 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 			args := json.RawMessage(event.Item.Arguments)
 			if !json.Valid(args) {
 				err := fmt.Errorf("invalid JSON arguments for tool %q", event.Item.Name)
+				if event.Item.Status == "incomplete" {
+					cutOff = err
+					continue
+				}
 				streamErr = err
 				emit(ai.Token{Err: err})
 				return
@@ -190,6 +198,11 @@ func (m *Model) generateResponsesStream(ctx context.Context, out chan<- ai.Token
 	if err := stream.Err(); err != nil {
 		streamErr = classifyProviderError(err)
 		emit(ai.Token{Err: streamErr})
+		return
+	}
+	if cutOff != nil {
+		streamErr = cutOff
+		emit(ai.Token{Err: cutOff})
 	}
 }
 
