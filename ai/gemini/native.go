@@ -81,9 +81,12 @@ func preserveGenerateContentSchemaNumbers(config *genai.GenerateContentConfig) {
 	}
 	responseSchema := config.ResponseJsonSchema
 	customize := config.HTTPOptions.ExtrasRequestProvider
+	extraBody := cloneJSONMap(config.HTTPOptions.ExtraBody)
+	config.HTTPOptions.ExtraBody = cloneJSONMap(extraBody)
 	config.HTTPOptions.ExtrasRequestProvider = func(body map[string]any) map[string]any {
 		// The SDK converts dynamic fields through float64 before this hook runs.
-		// Restore the exact schemas so json.Number values reach the wire unchanged.
+		// Restore the exact schemas, then reapply the ExtraBody snapshot because the
+		// SDK merges those explicit overrides before calling this hook.
 		if generationConfig, ok := body["generationConfig"].(map[string]any); ok && responseSchema != nil {
 			generationConfig["responseJsonSchema"] = responseSchema
 		}
@@ -104,6 +107,7 @@ func preserveGenerateContentSchemaNumbers(config *genai.GenerateContentConfig) {
 				}
 			}
 		}
+		mergeJSONMaps(body, extraBody)
 		if customize != nil {
 			return customize(body)
 		}
@@ -126,5 +130,52 @@ func mapSliceItem(values any, index int) (map[string]any, bool) {
 		return values[index], true
 	default:
 		return nil, false
+	}
+}
+
+func cloneJSONMap(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	clone := make(map[string]any, len(value))
+	for key, item := range value {
+		clone[key] = cloneJSONValue(item)
+	}
+	return clone
+}
+
+func cloneJSONValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		return cloneJSONMap(value)
+	case []any:
+		clone := make([]any, len(value))
+		for i, item := range value {
+			clone[i] = cloneJSONValue(item)
+		}
+		return clone
+	case []map[string]any:
+		clone := make([]map[string]any, len(value))
+		for i, item := range value {
+			clone[i] = cloneJSONMap(item)
+		}
+		return clone
+	default:
+		return value
+	}
+}
+
+func mergeJSONMaps(destination, source map[string]any) {
+	if destination == nil || source == nil {
+		return
+	}
+	for key, sourceValue := range source {
+		destinationMap, destinationIsMap := destination[key].(map[string]any)
+		sourceMap, sourceIsMap := sourceValue.(map[string]any)
+		if destinationIsMap && sourceIsMap {
+			mergeJSONMaps(destinationMap, sourceMap)
+			continue
+		}
+		destination[key] = sourceValue
 	}
 }

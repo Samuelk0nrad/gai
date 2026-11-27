@@ -653,3 +653,82 @@ func TestSchemaNumbersRetainPrecisionAcrossGeminiTransports(t *testing.T) {
 		t.Fatalf("requests = %d, want 2", requests)
 	}
 }
+
+func TestSchemaExtraBodyOverridesReachGeminiTransport(t *testing.T) {
+	const exact = "9007199254740993"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
+		payload := string(body)
+		if got := strings.Count(payload, exact); got != 2 {
+			t.Errorf("exact numeric bound count = %d, want 2; payload: %s", got, payload)
+		}
+		for _, override := range []string{`"maximum":20`, `"maximum":30`} {
+			if !strings.Contains(payload, override) {
+				t.Errorf("ExtraBody override %s is missing; payload: %s", override, payload)
+			}
+		}
+		if strings.Contains(payload, `"maximum":10`) {
+			t.Errorf("original schema value replaced an ExtraBody override; payload: %s", payload)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer server.Close()
+
+	provider := New("test-api-key", nil)
+	provider.baseURL = server.URL
+	provider.httpClient = server.Client()
+	model, err := provider.TypedModel("gemini-test", WithGenerateContentConfig(func(config *genai.GenerateContentConfig) error {
+		if config.HTTPOptions == nil {
+			config.HTTPOptions = &genai.HTTPOptions{}
+		}
+		config.HTTPOptions.ExtraBody = map[string]any{
+			"generationConfig": map[string]any{
+				"responseJsonSchema": map[string]any{
+					"properties": map[string]any{
+						"responseValue": map[string]any{"maximum": json.Number("20")},
+					},
+				},
+			},
+			"tools": []any{
+				map[string]any{
+					"functionDeclarations": []any{
+						map[string]any{
+							"name": "bounded",
+							"parametersJsonSchema": map[string]any{
+								"type": "object",
+								"properties": map[string]any{
+									"exact":     map[string]any{"type": "integer", "maximum": json.Number(exact)},
+									"toolValue": map[string]any{"type": "integer", "maximum": json.Number("30")},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		return nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := ai.AIRequest{
+		Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "answer")},
+		Tools: []ai.ToolDefinition{{
+			Type: "function", Name: "bounded", Description: "Bounded input.",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"exact":{"type":"integer","maximum":` + exact + `},"toolValue":{"type":"integer","maximum":10}}}`),
+		}},
+		ResponseFormat: ai.ResponseFormat{
+			Type: ai.ResponseFormatJSONSchema, Name: "answer",
+			Schema: json.RawMessage(`{"type":"object","properties":{"exact":{"type":"integer","maximum":` + exact + `},"responseValue":{"type":"integer","maximum":10}}}`),
+		},
+	}
+
+	if _, err := any(model).(ai.ModelGenerator).Generate(t.Context(), req); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+}
