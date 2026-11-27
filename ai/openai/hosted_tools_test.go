@@ -303,3 +303,41 @@ func responseFromResponsesJSON(t *testing.T, raw string) (*ai.AIResponse, error)
 	}
 	return responseFromResponses(&response)
 }
+
+// A function call the output limit cuts off arrives with broken arguments
+// and status "incomplete"; the error must name the limit, not the JSON.
+func TestResponsesStreamReportsOutputLimitForCutOffToolCall(t *testing.T) {
+	for _, tc := range []struct {
+		name, last, want string
+	}{
+		{"incomplete event", `{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":8000}}}`, "max_output_tokens"},
+		{"no incomplete event", "", `invalid JSON arguments for tool "run_code"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := responsesTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				var body strings.Builder
+				body.WriteString(sseEvent(`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"run_code","arguments":"{\"code\":\"import pp","status":"incomplete"}}`))
+				if tc.last != "" {
+					body.WriteString(sseEvent(tc.last))
+				}
+				_, _ = w.Write([]byte(body.String()))
+			})
+			var errs []error
+			for token := range m.GenerateStream(t.Context(), ai.AIRequest{Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "deck")}}) {
+				if token.Part != nil && token.Part.Kind == ai.ContentToolCall {
+					t.Fatalf("a cut-off call was emitted: %#v", token.Part.ToolCall)
+				}
+				if token.Err != nil {
+					errs = append(errs, token.Err)
+				}
+			}
+			if len(errs) != 1 || !strings.Contains(errs[0].Error(), tc.want) {
+				t.Fatalf("errors = %v, want one containing %q", errs, tc.want)
+			}
+			if tc.last != "" && !errors.Is(errs[0], ai.ErrUnsuccessfulGeneration) {
+				t.Fatalf("error = %v, want an unsuccessful generation", errs[0])
+			}
+		})
+	}
+}
