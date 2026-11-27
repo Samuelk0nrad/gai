@@ -86,10 +86,13 @@ func (s Schema) validateConfiguration() error {
 	return nil
 }
 
+const maxDecodeNestingDepth = 1000
+
 func decodeDocument(raw json.RawMessage) (any, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
-	value, err := decodeValue(decoder, nil)
+	state := documentDecoder{decoder: decoder}
+	value, err := state.decodeValue(0)
 	if err != nil {
 		return nil, err
 	}
@@ -102,8 +105,13 @@ func decodeDocument(raw json.RawMessage) (any, error) {
 	return value, nil
 }
 
-func decodeValue(decoder *json.Decoder, path []string) (any, error) {
-	token, err := decoder.Token()
+type documentDecoder struct {
+	decoder *json.Decoder
+	path    []string
+}
+
+func (d *documentDecoder) decodeValue(depth int) (any, error) {
+	token, err := d.decoder.Token()
 	if err != nil {
 		return nil, err
 	}
@@ -111,11 +119,14 @@ func decodeValue(decoder *json.Decoder, path []string) (any, error) {
 	if !ok {
 		return token, nil
 	}
+	if depth >= maxDecodeNestingDepth {
+		return nil, fmt.Errorf("maximum nesting depth of %d exceeded", maxDecodeNestingDepth)
+	}
 	switch delim {
 	case '{':
 		object := make(map[string]any)
-		for decoder.More() {
-			keyToken, err := decoder.Token()
+		for d.decoder.More() {
+			keyToken, err := d.decoder.Token()
 			if err != nil {
 				return nil, err
 			}
@@ -123,36 +134,45 @@ func decodeValue(decoder *json.Decoder, path []string) (any, error) {
 			if !ok {
 				return nil, fmt.Errorf("object key is %T, want string", keyToken)
 			}
-			keyPath := appendPath(path, key)
 			if _, exists := object[key]; exists {
-				return nil, &duplicateKeyError{path: pointer(keyPath), key: key}
+				d.path = append(d.path, key)
+				duplicatePath := pointer(d.path)
+				d.path = d.path[:len(d.path)-1]
+				return nil, &duplicateKeyError{path: duplicatePath, key: key}
 			}
-			value, err := decodeValue(decoder, keyPath)
+			value, err := d.decodeChild(key, depth+1)
 			if err != nil {
 				return nil, err
 			}
 			object[key] = value
 		}
-		if _, err := decoder.Token(); err != nil {
+		if _, err := d.decoder.Token(); err != nil {
 			return nil, err
 		}
 		return object, nil
 	case '[':
 		array := make([]any, 0)
-		for decoder.More() {
-			value, err := decodeValue(decoder, appendPath(path, strconv.Itoa(len(array))))
+		for d.decoder.More() {
+			value, err := d.decodeChild(strconv.Itoa(len(array)), depth+1)
 			if err != nil {
 				return nil, err
 			}
 			array = append(array, value)
 		}
-		if _, err := decoder.Token(); err != nil {
+		if _, err := d.decoder.Token(); err != nil {
 			return nil, err
 		}
 		return array, nil
 	default:
 		return nil, fmt.Errorf("unexpected JSON delimiter %q", delim)
 	}
+}
+
+func (d *documentDecoder) decodeChild(part string, depth int) (any, error) {
+	d.path = append(d.path, part)
+	value, err := d.decodeValue(depth)
+	d.path = d.path[:len(d.path)-1]
+	return value, err
 }
 
 func appendPath(path []string, part string) []string {

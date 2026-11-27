@@ -160,6 +160,32 @@ func TestDecodeRejectsDuplicateObjectKeysBeforeTypedDecode(t *testing.T) {
 	if decode.Path != "/payload" || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("error = %#v, want duplicate-key error at /payload", err)
 	}
+
+	_, err = (structured.Spec[any]{Schema: schema}).Decode(json.RawMessage(`{"payload":{"items":[{"a/b":1,"a/b":2}]}}`))
+	if !errors.As(err, &decode) || decode.Path != "/payload/items/0/a~1b" {
+		t.Fatalf("nested duplicate error = %T %#v, want DecodeError at /payload/items/0/a~1b", err, err)
+	}
+}
+
+func TestDecodeBoundsNestingDepth(t *testing.T) {
+	schema, err := structured.Raw("any", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := structured.Spec[any]{Schema: schema}
+
+	const maxDepth = 1000
+	atLimit := json.RawMessage(strings.Repeat("[", maxDepth) + "0" + strings.Repeat("]", maxDepth))
+	if _, err := spec.Decode(atLimit); err != nil {
+		t.Fatalf("Decode at nesting limit: %v", err)
+	}
+
+	aboveLimit := json.RawMessage(strings.Repeat("[", maxDepth+1) + "0" + strings.Repeat("]", maxDepth+1))
+	_, err = spec.Decode(aboveLimit)
+	var decode *structured.DecodeError
+	if !errors.As(err, &decode) || !strings.Contains(err.Error(), "maximum nesting depth") {
+		t.Fatalf("error = %T %v, want maximum-nesting-depth DecodeError", err, err)
+	}
 }
 
 func TestValidationPathsUseRFC6901WithoutMutatingValidatorError(t *testing.T) {
