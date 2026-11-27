@@ -528,6 +528,65 @@ func TestCanonicalResponseProjectsTextReasoningAndToolCalls(t *testing.T) {
 	}
 }
 
+func TestGenerateContentConfigCopiesSharedHTTPOptionsBeforeWrapping(t *testing.T) {
+	customized := 0
+	shared := &genai.HTTPOptions{
+		ExtrasRequestProvider: func(body map[string]any) map[string]any {
+			customized++
+			body["customized"] = true
+			return body
+		},
+	}
+	model := &Model{configHooks: []func(*genai.GenerateContentConfig) error{
+		func(config *genai.GenerateContentConfig) error {
+			config.HTTPOptions = shared
+			return nil
+		},
+	}}
+
+	configs := make([]*genai.GenerateContentConfig, 2)
+	for i, maximum := range []string{"1", "2"} {
+		var err error
+		configs[i], err = model.generateContentConfig(ai.AIRequest{
+			Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "answer")},
+			ResponseFormat: ai.ResponseFormat{
+				Type:   ai.ResponseFormatJSONSchema,
+				Name:   "answer",
+				Schema: json.RawMessage(`{"type":"integer","maximum":` + maximum + `}`),
+			},
+		})
+		if err != nil {
+			t.Fatalf("generate config %d: %v", i, err)
+		}
+	}
+
+	if configs[0].HTTPOptions == shared || configs[1].HTTPOptions == shared {
+		t.Error("request config retained the caller's shared HTTPOptions pointer")
+	}
+	if configs[0].HTTPOptions == configs[1].HTTPOptions {
+		t.Error("requests share an HTTPOptions pointer")
+	}
+	for i, config := range configs {
+		body := config.HTTPOptions.ExtrasRequestProvider(map[string]any{
+			"generationConfig": map[string]any{},
+		})
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal customized body %d: %v", i, err)
+		}
+		want := `"maximum":` + []string{"1", "2"}[i]
+		if !strings.Contains(string(encoded), want) {
+			t.Errorf("request %d did not retain its schema %q: %s", i, want, encoded)
+		}
+		if body["customized"] != true {
+			t.Errorf("request %d did not invoke the caller's customizer: %#v", i, body)
+		}
+	}
+	if customized != 2 {
+		t.Fatalf("caller customizer calls = %d, want 2", customized)
+	}
+}
+
 func TestSchemaNumbersRetainPrecisionAcrossGeminiTransports(t *testing.T) {
 	const exact = "9007199254740993"
 	requests := 0

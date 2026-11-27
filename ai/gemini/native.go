@@ -75,6 +75,9 @@ func preserveGenerateContentSchemaNumbers(config *genai.GenerateContentConfig) {
 
 	if config.HTTPOptions == nil {
 		config.HTTPOptions = &genai.HTTPOptions{}
+	} else {
+		httpOptions := *config.HTTPOptions
+		config.HTTPOptions = &httpOptions
 	}
 	responseSchema := config.ResponseJsonSchema
 	customize := config.HTTPOptions.ExtrasRequestProvider
